@@ -15,7 +15,7 @@ uv sync                                    # install all deps (dev + test)
 uv run ruff check src/ tests/              # lint
 uv run ruff check src/ tests/ --fix        # lint + auto-fix
 uv run ruff format src/ tests/             # format
-uv run mypy src/                           # type-check (strict)
+uv run mypy src/ tests/                    # type-check (strict)
 uv run pytest tests/ -m unit               # unit tests only
 uv run pytest tests/ -m integration        # integration tests only
 uv run pytest tests/ -n auto --cov=ai_company --cov-fail-under=80  # full suite + coverage
@@ -75,9 +75,12 @@ src/ai_company/
 
 ## CI
 
-- **Jobs**: lint (ruff) + type-check (mypy) + test (pytest + coverage) run in parallel → ci-pass (gate)
+- **Jobs**: lint (ruff) + type-check (mypy src/ tests/) + test (pytest + coverage) run in parallel → ci-pass (gate)
 - **Matrix**: Python 3.14
-- **Dependabot**: daily uv + github-actions updates, auto-merge for patch/minor
+- **Dependabot**: daily uv + github-actions updates, grouped minor/patch, no auto-merge
+- **Secret scanning**: gitleaks workflow on push/PR + weekly schedule
+- **Dependency review**: license allow-list (permissive only), PR comment summaries
+- **Coverage**: Codecov integration (replaces artifact-only uploads)
 
 ## Dependencies
 
