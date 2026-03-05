@@ -5,7 +5,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ai_company.config.schema import ProviderConfig, ProviderModelConfig
+from ai_company.config.schema import (
+    ProviderConfig,
+    ProviderModelConfig,
+    RateLimiterConfig,
+    RetryConfig,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -13,25 +18,31 @@ if TYPE_CHECKING:
 # ── Sample ProviderConfig ────────────────────────────────────────
 
 
-def make_provider_config(
+def make_provider_config(  # noqa: PLR0913
     *,
     driver: str = "litellm",
     api_key: str | None = "sk-test-key",
     base_url: str | None = None,
     models: tuple[ProviderModelConfig, ...] | None = None,
+    retry: RetryConfig | None = None,
+    rate_limiter: RateLimiterConfig | None = None,
 ) -> ProviderConfig:
-    """Build a ``ProviderConfig`` for testing."""
+    """Build a ``ProviderConfig`` for testing.
+
+    Defaults to retries disabled (``max_retries=0``) so driver tests
+    exercise exception mapping in isolation.
+    """
     if models is None:
         models = (
             ProviderModelConfig(
-                id="claude-sonnet-4-6",
+                id="test-model-001",
                 alias="sonnet",
                 cost_per_1k_input=0.003,
                 cost_per_1k_output=0.015,
                 max_context=200_000,
             ),
             ProviderModelConfig(
-                id="claude-haiku-4-5",
+                id="test-model-002",
                 alias="haiku",
                 cost_per_1k_input=0.001,
                 cost_per_1k_output=0.005,
@@ -43,6 +54,8 @@ def make_provider_config(
         api_key=api_key,
         base_url=base_url,
         models=models,
+        retry=retry or RetryConfig(max_retries=0),
+        rate_limiter=rate_limiter or RateLimiterConfig(),
     )
 
 
@@ -63,7 +76,7 @@ def make_mock_response(  # noqa: PLR0913
     prompt_tokens: int = 100,
     completion_tokens: int = 50,
     request_id: str = "req_abc123",
-    model: str = "claude-sonnet-4-6",
+    model: str = "test-model-001",
 ) -> MagicMock:
     """Build a mock LiteLLM ``ModelResponse``."""
     message = MagicMock()
