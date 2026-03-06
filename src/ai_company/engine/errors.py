@@ -19,3 +19,21 @@ class MaxTurnsExceededError(EngineError):
     Enforced by ``AgentContext.with_turn_completed`` when the hard turn
     limit has been reached.
     """
+
+
+class BudgetExhaustedError(EngineError):
+    """Budget exhaustion signal for the engine layer.
+
+    The execution loop returns ``TerminationReason.BUDGET_EXHAUSTED``
+    internally.  This exception is available for the engine layer above
+    the loop to convert that result into a raised error when appropriate.
+    """
+
+
+class LoopExecutionError(EngineError):
+    """Non-recoverable execution loop error for the engine layer.
+
+    The execution loop returns ``TerminationReason.ERROR`` internally.
+    This exception is available for the engine layer above the loop to
+    convert that result into a raised error when appropriate.
+    """
