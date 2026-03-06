@@ -74,16 +74,22 @@ class TestProjectStringValidation:
             _make_project(id="")
 
     def test_whitespace_id_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="id must not be whitespace-only"):
+        with pytest.raises(ValidationError, match="whitespace-only"):
             _make_project(id="   ")
 
     def test_whitespace_name_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="name must not be whitespace-only"):
+        with pytest.raises(ValidationError, match="whitespace-only"):
             _make_project(name="   ")
 
     def test_whitespace_lead_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="lead must not be whitespace-only"):
+        with pytest.raises(ValidationError, match="whitespace-only"):
             _make_project(lead="   ")
+
+    def test_empty_deadline_rejected(self) -> None:
+        with pytest.raises(
+            ValidationError, match="deadline must not be whitespace-only"
+        ):
+            _make_project(deadline="")
 
     def test_whitespace_deadline_rejected(self) -> None:
         with pytest.raises(
@@ -103,12 +109,12 @@ class TestProjectStringValidation:
         project = _make_project(deadline="2026-12-31T23:59:59")
         assert project.deadline == "2026-12-31T23:59:59"
 
-    def test_empty_team_member_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="Empty or whitespace-only"):
+    def test_whitespace_team_member_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="whitespace-only"):
             _make_project(team=("agent-1", "   "))
 
     def test_empty_task_id_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="Empty or whitespace-only"):
+        with pytest.raises(ValidationError, match="at least 1 character"):
             _make_project(task_ids=("task-1", ""))
 
 

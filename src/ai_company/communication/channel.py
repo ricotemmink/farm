@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ai_company.communication.enums import ChannelType
 from ai_company.core.types import (
     NotBlankStr,
-    validate_non_blank_unique_strings,
+    validate_unique_strings,
 )
 
 
@@ -27,13 +27,13 @@ class Channel(BaseModel):
         default=ChannelType.TOPIC,
         description="Channel delivery semantics",
     )
-    subscribers: tuple[str, ...] = Field(
+    subscribers: tuple[NotBlankStr, ...] = Field(
         default=(),
         description="Agent IDs subscribed to this channel",
     )
 
     @model_validator(mode="after")
     def _validate_subscribers(self) -> Self:
-        """Ensure subscriber entries are non-blank and unique."""
-        validate_non_blank_unique_strings(self.subscribers, "subscribers")
+        """Ensure subscriber entries are unique."""
+        validate_unique_strings(self.subscribers, "subscribers")
         return self

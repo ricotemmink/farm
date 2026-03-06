@@ -9,6 +9,8 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ai_company.core.types import NotBlankStr  # noqa: TC001
+
 
 class BudgetAlertConfig(BaseModel):
     """Alert threshold configuration for budget monitoring.
@@ -87,7 +89,7 @@ class AutoDowngradeConfig(BaseModel):
         strict=True,
         description="Budget percent triggering downgrade",
     )
-    downgrade_map: tuple[tuple[str, str], ...] = Field(
+    downgrade_map: tuple[tuple[NotBlankStr, NotBlankStr], ...] = Field(
         default=(),
         description="Ordered pairs of (from_alias, to_alias)",
     )
@@ -95,13 +97,30 @@ class AutoDowngradeConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _normalize_downgrade_map(cls, data: Any) -> Any:
-        """Strip whitespace from downgrade_map alias strings."""
+        """Normalize downgrade_map aliases by stripping leading/trailing whitespace.
+
+        Runs before NotBlankStr validation so that ``" gpt-4 "`` becomes
+        ``"gpt-4"`` rather than being kept with surrounding spaces.
+        Non-string or malformed entries are passed through unchanged so
+        that Pydantic can surface a proper field-level ``ValidationError``.
+        """
         if isinstance(data, dict) and "downgrade_map" in data:
             raw_map = data["downgrade_map"]
             if isinstance(raw_map, (list, tuple)):
+                normalized: list[Any] = []
+                for item in raw_map:
+                    if (
+                        isinstance(item, (list, tuple))
+                        and len(item) == 2  # noqa: PLR2004
+                        and isinstance(item[0], str)
+                        and isinstance(item[1], str)
+                    ):
+                        normalized.append((item[0].strip(), item[1].strip()))
+                    else:
+                        normalized.append(item)
                 return {
                     **data,
-                    "downgrade_map": tuple((s.strip(), t.strip()) for s, t in raw_map),
+                    "downgrade_map": tuple(normalized),
                 }
         return data
 
@@ -110,12 +129,6 @@ class AutoDowngradeConfig(BaseModel):
         """Validate downgrade_map for correctness."""
         sources: list[str] = []
         for source, target in self.downgrade_map:
-            if not source:
-                msg = "Empty or whitespace-only source alias in downgrade_map"
-                raise ValueError(msg)
-            if not target:
-                msg = "Empty or whitespace-only target alias in downgrade_map"
-                raise ValueError(msg)
             if source == target:
                 msg = f"Self-downgrade in downgrade_map: {source!r} -> {target!r}"
                 raise ValueError(msg)
