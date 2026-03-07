@@ -1,8 +1,9 @@
 """ReAct execution loop — think, act, observe.
 
 Implements the ``ExecutionLoop`` protocol using the ReAct pattern:
-check budget -> call LLM -> record turn -> check for LLM errors ->
-update context -> handle completion or execute tools -> repeat.
+check shutdown -> check budget -> call LLM -> record turn ->
+check for LLM errors -> update context -> handle completion or
+(check shutdown -> execute tools) -> repeat.
 """
 
 from typing import TYPE_CHECKING
@@ -11,6 +12,7 @@ from ai_company.observability import get_logger
 from ai_company.observability.events.execution import (
     EXECUTION_LOOP_BUDGET_EXHAUSTED,
     EXECUTION_LOOP_ERROR,
+    EXECUTION_LOOP_SHUTDOWN,
     EXECUTION_LOOP_START,
     EXECUTION_LOOP_TERMINATED,
     EXECUTION_LOOP_TOOL_CALLS,
@@ -29,6 +31,7 @@ from ai_company.providers.models import (
 from .loop_protocol import (
     BudgetChecker,
     ExecutionResult,
+    ShutdownChecker,
     TerminationReason,
     TurnRecord,
 )
@@ -54,13 +57,14 @@ class ReactLoop:
         """Return the loop type identifier."""
         return "react"
 
-    async def execute(
+    async def execute(  # noqa: PLR0913
         self,
         *,
         context: AgentContext,
         provider: CompletionProvider,
         tool_invoker: ToolInvoker | None = None,
         budget_checker: BudgetChecker | None = None,
+        shutdown_checker: ShutdownChecker | None = None,
         completion_config: CompletionConfig | None = None,
     ) -> ExecutionResult:
         """Run the ReAct loop until termination.
@@ -70,6 +74,8 @@ class ReactLoop:
             provider: LLM completion provider.
             tool_invoker: Optional tool invoker for tool execution.
             budget_checker: Optional budget exhaustion callback.
+            shutdown_checker: Optional callback; returns ``True`` when
+                a graceful shutdown has been requested.
             completion_config: Optional per-execution config override.
 
         Returns:
@@ -85,6 +91,10 @@ class ReactLoop:
         ctx = context
 
         while ctx.has_turns_remaining:
+            shutdown_result = self._check_shutdown(ctx, shutdown_checker, turns)
+            if shutdown_result is not None:
+                return shutdown_result
+
             budget_result = self._check_budget(ctx, budget_checker, turns)
             if budget_result is not None:
                 return budget_result
@@ -110,6 +120,7 @@ class ReactLoop:
                 turn_number,
                 turns,
                 tool_invoker,
+                shutdown_checker,
             )
             if isinstance(result, ExecutionResult):
                 return result
@@ -143,13 +154,14 @@ class ReactLoop:
         )
         return model_id, config, _get_tool_definitions(tool_invoker), []
 
-    async def _process_turn_response(
+    async def _process_turn_response(  # noqa: PLR0913
         self,
         ctx: AgentContext,
         response: CompletionResponse,
         turn_number: int,
         turns: list[TurnRecord],
         tool_invoker: ToolInvoker | None,
+        shutdown_checker: ShutdownChecker | None = None,
     ) -> AgentContext | ExecutionResult:
         """Check errors, update context, handle completion or tool calls."""
         error = self._check_response_errors(ctx, response, turn_number, turns)
@@ -171,6 +183,18 @@ class ReactLoop:
         if not response.tool_calls:
             return self._handle_completion(ctx, response, turns)
 
+        # Check shutdown before tool invocations
+        shutdown_result = self._check_shutdown(ctx, shutdown_checker, turns)
+        if shutdown_result is not None:
+            # Tools were not executed — clear tool_calls_made in the
+            # last TurnRecord so it doesn't overstate what happened.
+            if turns:
+                last = turns[-1]
+                turns[-1] = last.model_copy(
+                    update={"tool_calls_made": ()},
+                )
+            return shutdown_result
+
         return await self._execute_tool_calls(
             ctx,
             tool_invoker,
@@ -178,6 +202,42 @@ class ReactLoop:
             turn_number,
             turns,
         )
+
+    def _check_shutdown(
+        self,
+        ctx: AgentContext,
+        shutdown_checker: ShutdownChecker | None,
+        turns: list[TurnRecord],
+    ) -> ExecutionResult | None:
+        """Return a termination result if a shutdown has been requested."""
+        if shutdown_checker is None:
+            return None
+        try:
+            shutting_down = shutdown_checker()
+        except MemoryError, RecursionError:
+            raise
+        except Exception as exc:
+            error_msg = f"Shutdown checker failed: {type(exc).__name__}: {exc}"
+            logger.exception(
+                EXECUTION_LOOP_ERROR,
+                execution_id=ctx.execution_id,
+                turn=ctx.turn_count,
+                error=error_msg,
+            )
+            return _build_result(
+                ctx,
+                TerminationReason.ERROR,
+                turns,
+                error_message=error_msg,
+            )
+        if not shutting_down:
+            return None
+        logger.info(
+            EXECUTION_LOOP_SHUTDOWN,
+            execution_id=ctx.execution_id,
+            turn=ctx.turn_count,
+        )
+        return _build_result(ctx, TerminationReason.SHUTDOWN, turns)
 
     def _check_budget(
         self,
@@ -230,10 +290,16 @@ class ReactLoop:
         turns: list[TurnRecord],
     ) -> CompletionResponse | ExecutionResult:
         """Call provider.complete(), returning an error result on failure."""
-        logger.debug(
+        # Estimate input tokens from message character count (rough
+        # heuristic: ~4 chars per token).  The exact count is only
+        # available *after* the provider call.
+        char_count = sum(len(m.content or "") for m in ctx.conversation)
+        logger.info(
             EXECUTION_LOOP_TURN_START,
             execution_id=ctx.execution_id,
             turn=turn_number,
+            message_count=len(ctx.conversation),
+            input_token_estimate=char_count // 4,
         )
         try:
             return await provider.complete(

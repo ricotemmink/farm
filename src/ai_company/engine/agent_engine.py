@@ -16,10 +16,12 @@ from ai_company.engine.errors import ExecutionStateError
 from ai_company.engine.loop_protocol import (
     ExecutionResult,
     TerminationReason,
+    make_budget_checker,
 )
 from ai_company.engine.metrics import TaskCompletionMetrics
 from ai_company.engine.prompt import (
     SystemPrompt,
+    build_error_prompt,
     build_system_prompt,
     format_task_instruction,
 )
@@ -48,7 +50,11 @@ if TYPE_CHECKING:
     from ai_company.budget.tracker import CostTracker
     from ai_company.core.agent import AgentIdentity
     from ai_company.core.task import Task
-    from ai_company.engine.loop_protocol import BudgetChecker, ExecutionLoop
+    from ai_company.engine.loop_protocol import (
+        BudgetChecker,
+        ExecutionLoop,
+        ShutdownChecker,
+    )
     from ai_company.providers.models import CompletionConfig, ToolDefinition
     from ai_company.providers.protocol import CompletionProvider
     from ai_company.tools.registry import ToolRegistry
@@ -62,8 +68,8 @@ _EXECUTABLE_STATUSES = frozenset({TaskStatus.ASSIGNED, TaskStatus.IN_PROGRESS})
 """Task statuses the engine will accept for execution.
 
 CREATED tasks lack an assignee; terminal statuses (COMPLETED, CANCELLED),
-BLOCKED, IN_REVIEW, and FAILED are not executable.  FAILED tasks must be
-reassigned (FAILED -> ASSIGNED) before re-execution.
+BLOCKED, IN_REVIEW, FAILED, and INTERRUPTED are not executable.  FAILED
+and INTERRUPTED tasks must be reassigned (-> ASSIGNED) before re-execution.
 """
 
 
@@ -83,9 +89,12 @@ class AgentEngine:
         recovery_strategy: Crash recovery strategy. Defaults to a
             shared ``FailAndReassignStrategy`` instance. Pass ``None``
             to disable.
+        shutdown_checker: Optional callback; returns ``True`` when a
+            graceful shutdown has been requested.  Passed through to
+            the execution loop.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         provider: CompletionProvider,
@@ -93,12 +102,14 @@ class AgentEngine:
         tool_registry: ToolRegistry | None = None,
         cost_tracker: CostTracker | None = None,
         recovery_strategy: RecoveryStrategy | None = _DEFAULT_RECOVERY_STRATEGY,
+        shutdown_checker: ShutdownChecker | None = None,
     ) -> None:
         self._provider = provider
         self._loop: ExecutionLoop = execution_loop or ReactLoop()
         self._tool_registry = tool_registry
         self._cost_tracker = cost_tracker
         self._recovery_strategy = recovery_strategy
+        self._shutdown_checker = shutdown_checker
         logger.debug(
             EXECUTION_ENGINE_CREATED,
             loop_type=self._loop.get_loop_type(),
@@ -206,7 +217,7 @@ class AgentEngine:
         tool_invoker: ToolInvoker | None = None,
     ) -> AgentRunResult:
         """Run execution loop, record costs, apply transitions, and build result."""
-        budget_checker = _make_budget_checker(task)
+        budget_checker = make_budget_checker(task)
 
         logger.debug(
             EXECUTION_ENGINE_PROMPT_BUILT,
@@ -322,6 +333,7 @@ class AgentEngine:
             provider=self._provider,
             tool_invoker=tool_invoker,
             budget_checker=budget_checker,
+            shutdown_checker=self._shutdown_checker,
             completion_config=completion_config,
         )
         if timeout_seconds is None:
@@ -515,14 +527,22 @@ class AgentEngine:
     ) -> ExecutionResult:
         """Apply post-execution task transitions based on termination reason.
 
-        Only COMPLETED triggers IN_PROGRESS -> IN_REVIEW -> COMPLETED.
+        COMPLETED triggers IN_PROGRESS -> IN_REVIEW -> COMPLETED.
+        SHUTDOWN triggers current status -> INTERRUPTED.
         Transition failures are logged but never discard the result.
         """
         ctx = execution_result.context
         if ctx.task_execution is None:
             return execution_result
 
-        if execution_result.termination_reason != TerminationReason.COMPLETED:
+        reason = execution_result.termination_reason
+
+        if reason == TerminationReason.SHUTDOWN:
+            return self._transition_to_interrupted(
+                execution_result, ctx, agent_id, task_id
+            )
+
+        if reason != TerminationReason.COMPLETED:
             return execution_result
 
         try:
@@ -571,6 +591,37 @@ class AgentEngine:
             to_status=TaskStatus.COMPLETED.value,
         )
         return ctx
+
+    def _transition_to_interrupted(
+        self,
+        execution_result: ExecutionResult,
+        ctx: AgentContext,
+        agent_id: str,
+        task_id: str,
+    ) -> ExecutionResult:
+        """Transition task to INTERRUPTED on graceful shutdown."""
+        try:
+            prev_status = ctx.task_execution.status  # type: ignore[union-attr]
+            ctx = ctx.with_task_transition(
+                TaskStatus.INTERRUPTED,
+                reason="Graceful shutdown requested",
+            )
+            logger.info(
+                EXECUTION_ENGINE_TASK_TRANSITION,
+                agent_id=agent_id,
+                task_id=task_id,
+                from_status=prev_status.value,
+                to_status=TaskStatus.INTERRUPTED.value,
+            )
+            return execution_result.model_copy(update={"context": ctx})
+        except (ValueError, ExecutionStateError) as exc:
+            logger.exception(
+                EXECUTION_ENGINE_ERROR,
+                agent_id=agent_id,
+                task_id=task_id,
+                error=f"Post-execution INTERRUPTED transition failed: {exc}",
+            )
+            return execution_result
 
     async def _apply_recovery(
         self,
@@ -691,7 +742,7 @@ class AgentEngine:
                 error_msg,
                 ctx,
             )
-            error_prompt = _build_error_prompt(
+            error_prompt = build_error_prompt(
                 identity,
                 agent_id,
                 system_prompt,
@@ -720,7 +771,7 @@ class AgentEngine:
                 error=f"Failed to build error result: {build_exc}",
                 original_error=error_msg,
             )
-            raise exc from None
+            raise exc from build_exc
 
     async def _build_error_execution(  # noqa: PLR0913
         self,
@@ -743,44 +794,3 @@ class AgentEngine:
             agent_id,
             task_id,
         )
-
-
-def _build_error_prompt(
-    identity: AgentIdentity,
-    agent_id: str,
-    system_prompt: SystemPrompt | None,
-) -> SystemPrompt:
-    """Return the existing system prompt or a minimal error placeholder."""
-    if system_prompt is not None:
-        return system_prompt
-    return SystemPrompt(
-        content="",
-        template_version="error",
-        estimated_tokens=0,
-        sections=(),
-        metadata={
-            "agent_id": agent_id,
-            "name": identity.name,
-            "role": identity.role,
-            "department": identity.department,
-            "level": identity.level.value,
-        },
-    )
-
-
-def _make_budget_checker(task: Task) -> BudgetChecker | None:
-    """Create a budget checker if the task has a positive budget limit.
-
-    The returned callable returns ``True`` when accumulated cost meets
-    or exceeds the limit (budget exhausted), ``False`` otherwise.
-    Returns ``None`` when there is no positive budget limit.
-    """
-    if task.budget_limit <= 0:
-        return None
-
-    limit = task.budget_limit
-
-    def _check(ctx: AgentContext) -> bool:
-        return ctx.accumulated_cost.cost_usd >= limit
-
-    return _check

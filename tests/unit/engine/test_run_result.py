@@ -9,12 +9,12 @@ from pydantic import ValidationError
 from ai_company.core.agent import AgentIdentity, ModelConfig
 from ai_company.core.enums import Priority, SeniorityLevel, TaskStatus, TaskType
 from ai_company.core.task import Task
-from ai_company.engine.agent_engine import _make_budget_checker
 from ai_company.engine.context import AgentContext
 from ai_company.engine.loop_protocol import (
     ExecutionResult,
     TerminationReason,
     TurnRecord,
+    make_budget_checker,
 )
 from ai_company.engine.prompt import SystemPrompt, format_task_instruction
 from ai_company.engine.run_result import AgentRunResult
@@ -158,6 +158,12 @@ class TestAgentRunResultComputedFields:
         )
         assert result.is_success is False
 
+    def test_is_success_false_on_shutdown(self) -> None:
+        result = _make_run_result(
+            termination_reason=TerminationReason.SHUTDOWN,
+        )
+        assert result.is_success is False
+
 
 @pytest.mark.unit
 class TestAgentRunResultValidation:
@@ -290,7 +296,7 @@ class TestFormatTaskInstruction:
 
 @pytest.mark.unit
 class TestMakeBudgetChecker:
-    """Test _make_budget_checker closure logic."""
+    """Test make_budget_checker closure logic."""
 
     def test_returns_none_for_zero_budget(self) -> None:
         task = Task(
@@ -304,7 +310,7 @@ class TestMakeBudgetChecker:
             status=TaskStatus.ASSIGNED,
             budget_limit=0.0,
         )
-        assert _make_budget_checker(task) is None
+        assert make_budget_checker(task) is None
 
     def test_returns_none_for_default_budget(self) -> None:
         """Default budget_limit (0.0) returns None."""
@@ -318,7 +324,7 @@ class TestMakeBudgetChecker:
             assigned_to="someone",
             status=TaskStatus.ASSIGNED,
         )
-        assert _make_budget_checker(task) is None
+        assert make_budget_checker(task) is None
 
     def test_returns_callable_for_positive_budget(self) -> None:
         task = Task(
@@ -332,7 +338,7 @@ class TestMakeBudgetChecker:
             status=TaskStatus.ASSIGNED,
             budget_limit=5.0,
         )
-        checker = _make_budget_checker(task)
+        checker = make_budget_checker(task)
         assert checker is not None
         assert callable(checker)
 
@@ -348,7 +354,7 @@ class TestMakeBudgetChecker:
             status=TaskStatus.ASSIGNED,
             budget_limit=5.0,
         )
-        checker = _make_budget_checker(task)
+        checker = make_budget_checker(task)
         assert checker is not None
 
         identity = _test_identity()
@@ -377,7 +383,7 @@ class TestMakeBudgetChecker:
             status=TaskStatus.ASSIGNED,
             budget_limit=5.0,
         )
-        checker = _make_budget_checker(task)
+        checker = make_budget_checker(task)
         assert checker is not None
 
         identity = _test_identity()
@@ -405,7 +411,7 @@ class TestMakeBudgetChecker:
             status=TaskStatus.ASSIGNED,
             budget_limit=5.0,
         )
-        checker = _make_budget_checker(task)
+        checker = make_budget_checker(task)
         assert checker is not None
 
         identity = _test_identity()
