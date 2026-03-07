@@ -14,11 +14,9 @@ import contextlib
 import signal
 import sys
 import time
+import types  # noqa: TC003 — used in runtime-visible annotation
 from collections.abc import Callable, Coroutine, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
-
-if TYPE_CHECKING:
-    import types
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,6 +24,7 @@ from ai_company.core.types import NotBlankStr  # noqa: TC001
 from ai_company.observability import get_logger
 from ai_company.observability.events.execution import (
     EXECUTION_SHUTDOWN_CLEANUP,
+    EXECUTION_SHUTDOWN_CLEANUP_FAILED,
     EXECUTION_SHUTDOWN_CLEANUP_TIMEOUT,
     EXECUTION_SHUTDOWN_COMPLETE,
     EXECUTION_SHUTDOWN_FORCE_CANCEL,
@@ -243,12 +242,40 @@ class CooperativeTimeoutStrategy:
                 pending,
                 timeout=self._CANCEL_PROPAGATION_TIMEOUT,
             )
-            for task in cancel_done:
-                if not task.cancelled():
-                    with contextlib.suppress(Exception):
-                        task.exception()
+            self._log_post_cancel_exceptions(cancel_done)
 
         return tasks_completed, len(pending)
+
+    def _log_post_cancel_exceptions(
+        self,
+        tasks: set[asyncio.Task[Any]],
+    ) -> None:
+        """Retrieve and log exceptions from post-cancel tasks.
+
+        Retrieving the exception prevents asyncio's "Task exception was
+        never retrieved" warning.  Non-cancelled tasks with exceptions
+        are logged at DEBUG.
+        """
+        for task in tasks:
+            if task.cancelled():
+                continue
+            try:
+                exc = task.exception()
+            except asyncio.InvalidStateError:
+                logger.debug(
+                    EXECUTION_SHUTDOWN_TASK_ERROR,
+                    error="Failed to inspect post-cancel task: InvalidStateError",
+                    task_name=task.get_name(),
+                )
+            else:
+                if exc is not None:
+                    logger.debug(
+                        EXECUTION_SHUTDOWN_TASK_ERROR,
+                        error=(
+                            f"Post-cancel task exception: {type(exc).__name__}: {exc}"
+                        ),
+                        task_name=task.get_name(),
+                    )
 
     async def _run_cleanup(
         self,
@@ -279,10 +306,9 @@ class CooperativeTimeoutStrategy:
                 except Exception:
                     all_succeeded = False
                     logger.exception(
-                        EXECUTION_SHUTDOWN_CLEANUP,
+                        EXECUTION_SHUTDOWN_CLEANUP_FAILED,
                         callback_index=i,
                         callback_count=len(callbacks),
-                        error="Cleanup callback failed",
                     )
 
         try:
@@ -358,8 +384,12 @@ class ShutdownManager:
             logger.exception(
                 EXECUTION_SHUTDOWN_SIGNAL,
                 signal=sig.name,
-                error="request_shutdown() raised in signal handler",
+                error="request_shutdown() raised — falling back to loop.stop()",
             )
+            # If request_shutdown() itself fails, stop the event loop as
+            # a last resort to avoid a process that ignores signals.
+            with contextlib.suppress(Exception):
+                asyncio.get_running_loop().stop()
 
     def _handle_signal_threadsafe(
         self,
@@ -387,17 +417,28 @@ class ShutdownManager:
                 logger.exception(
                     EXECUTION_SHUTDOWN_SIGNAL,
                     signal=sig_name,
-                    error="request_shutdown() raised in signal handler",
+                    error="request_shutdown() raised — falling back to loop.stop()",
                 )
+                with contextlib.suppress(Exception):
+                    asyncio.get_running_loop().stop()
 
         try:
             loop = asyncio.get_running_loop()
             loop.call_soon_threadsafe(_on_loop)
         except RuntimeError:
             # No running event loop — call directly (best-effort).
-            # Cannot log safely without a loop, so suppress all errors.
-            with contextlib.suppress(Exception):
+            # Cannot use structlog (acquires locks) so fall back to
+            # stderr for last-resort visibility.
+            try:
                 self._strategy.request_shutdown()
+            except Exception:
+                try:
+                    sys.stderr.write(
+                        f"[shutdown] request_shutdown() failed for signal {sig_name}\n"
+                    )
+                    sys.stderr.flush()
+                except Exception:  # noqa: S110
+                    pass
 
     def register_task(
         self,

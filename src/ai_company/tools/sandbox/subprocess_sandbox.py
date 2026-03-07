@@ -24,10 +24,12 @@ from ai_company.observability.events.sandbox import (
     SANDBOX_EXECUTE_TIMEOUT,
     SANDBOX_HEALTH_CHECK,
     SANDBOX_KILL_FAILED,
+    SANDBOX_KILL_FALLBACK,
     SANDBOX_PATH_FALLBACK,
     SANDBOX_SPAWN_FAILED,
     SANDBOX_WORKSPACE_VIOLATION,
 )
+from ai_company.tools._process_cleanup import close_subprocess_transport
 from ai_company.tools.sandbox.config import SubprocessSandboxConfig
 from ai_company.tools.sandbox.errors import (
     SandboxError,
@@ -188,18 +190,24 @@ class SubprocessSandbox:
                 return True
         return False
 
-    @staticmethod
-    def _get_safe_path_prefixes() -> tuple[str, ...]:
-        """Return safe PATH prefixes for the current platform."""
+    def _get_safe_path_prefixes(self) -> tuple[str, ...]:
+        """Return safe PATH prefixes for the current platform.
+
+        Combines built-in platform defaults with any extra prefixes
+        from ``SubprocessSandboxConfig.extra_safe_path_prefixes``.
+        """
+        defaults: tuple[str, ...]
         if os.name == "nt":
             system_root = os.environ.get("SYSTEMROOT", r"C:\WINDOWS")
-            return (
+            defaults = (
                 system_root,
                 str(Path(system_root) / "system32"),
                 r"C:\Program Files\Git",
                 r"C:\Program Files (x86)\Git",
             )
-        return ("/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin")
+        else:
+            defaults = ("/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin")
+        return defaults + self._config.extra_safe_path_prefixes
 
     def _build_filtered_env(
         self,
@@ -280,10 +288,15 @@ class SubprocessSandbox:
         """
         if _HAS_PROCESS_GROUPS:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)  # type: ignore[attr-defined]
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]
             except ProcessLookupError:
                 return
-            except OSError:
+            except OSError as kill_exc:
+                logger.warning(
+                    SANDBOX_KILL_FALLBACK,
+                    pid=proc.pid,
+                    error=str(kill_exc),
+                )
                 with contextlib.suppress(ProcessLookupError):
                     proc.kill()
                 return
@@ -291,6 +304,16 @@ class SubprocessSandbox:
                 return
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
+
+    @staticmethod
+    def _close_process(proc: asyncio.subprocess.Process) -> None:
+        """Close subprocess transport to prevent ResourceWarning on Windows.
+
+        Delegates to :func:`close_subprocess_transport` — see its
+        docstring for details on the CPython-internal ``_transport``
+        access and error handling.
+        """
+        close_subprocess_transport(proc)
 
     async def _spawn_process(
         self,
@@ -399,7 +422,7 @@ class SubprocessSandbox:
                 pid=proc.pid,
                 error="process did not terminate 5s after kill",
             )
-            return b"", b""
+            return b"", b"[sandbox] process did not terminate after kill"
 
     async def execute(
         self,
@@ -443,12 +466,19 @@ class SubprocessSandbox:
         )
 
         proc = await self._spawn_process(command, args, work_dir, env)
-        stdout_bytes, stderr_bytes, timed_out = await self._communicate_with_timeout(
-            proc,
-            command,
-            args,
-            effective_timeout,
-        )
+        try:
+            (
+                stdout_bytes,
+                stderr_bytes,
+                timed_out,
+            ) = await self._communicate_with_timeout(
+                proc,
+                command,
+                args,
+                effective_timeout,
+            )
+        finally:
+            self._close_process(proc)
 
         stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
         stderr = stderr_bytes.decode("utf-8", errors="replace").strip()

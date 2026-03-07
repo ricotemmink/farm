@@ -37,6 +37,7 @@ from ai_company.observability.events.git import (
     GIT_REF_INJECTION_BLOCKED,
     GIT_WORKSPACE_VIOLATION,
 )
+from ai_company.tools._process_cleanup import close_subprocess_transport
 from ai_company.tools.base import BaseTool, ToolExecutionResult
 from ai_company.tools.sandbox.errors import SandboxError
 
@@ -71,9 +72,25 @@ _SECRET_SUBSTRINGS: Final[tuple[str, ...]] = (
 )
 
 
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]+")
+_MAX_STDERR_FRAGMENT: Final[int] = 500
+
+
 def _sanitize_command(args: list[str]) -> list[str]:
     """Redact embedded credentials from git command args for logging."""
     return [_CREDENTIAL_RE.sub(r"\1***@", a) for a in args]
+
+
+def _sanitize_stderr(raw: str) -> str:
+    """Replace control characters, redact credentials, and truncate.
+
+    All control characters (including newlines, tabs, and carriage
+    returns) are collapsed into single spaces to prevent log injection
+    and LLM prompt injection via stderr content.  Embedded credentials
+    (``https://user:token@host``) are redacted before truncation.
+    """
+    sanitized = _CONTROL_CHAR_RE.sub(" ", raw).strip()
+    return _CREDENTIAL_RE.sub(r"\1***@", sanitized)[:_MAX_STDERR_FRAGMENT]
 
 
 class _BaseGitTool(BaseTool, ABC):
@@ -185,7 +202,7 @@ class _BaseGitTool(BaseTool, ABC):
                 )
         return None
 
-    def _check_ref(
+    def _check_git_arg(
         self,
         value: str,
         *,
@@ -193,8 +210,11 @@ class _BaseGitTool(BaseTool, ABC):
     ) -> ToolExecutionResult | None:
         """Reject values starting with ``-`` to prevent flag injection.
 
+        Used for refs, branch names, author filters, date strings, and
+        any other git argument that must not be interpreted as a flag.
+
         Args:
-            value: The ref or branch name string to validate.
+            value: The argument string to validate.
             param: Parameter name for the error message.
 
         Returns:
@@ -305,8 +325,15 @@ class _BaseGitTool(BaseTool, ABC):
         except TimeoutError:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
+            stderr_fragment = ""
             try:
-                await asyncio.wait_for(proc.communicate(), timeout=5.0)
+                _, raw_stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=5.0,
+                )
+                raw = raw_stderr.decode("utf-8", errors="replace").strip()
+                # Sanitize: strip control chars and truncate for safety.
+                stderr_fragment = _sanitize_stderr(raw)
             except TimeoutError:
                 logger.warning(
                     GIT_COMMAND_FAILED,
@@ -317,9 +344,13 @@ class _BaseGitTool(BaseTool, ABC):
                 GIT_COMMAND_TIMEOUT,
                 command=_sanitize_command(["git", *args]),
                 deadline=deadline,
+                stderr_fragment=stderr_fragment,
             )
+            msg = f"Git command timed out after {deadline}s"
+            if stderr_fragment:
+                msg += f": {stderr_fragment}"
             return ToolExecutionResult(
-                content=f"Git command timed out after {deadline}s",
+                content=msg,
                 is_error=True,
             )
 
@@ -385,13 +416,20 @@ class _BaseGitTool(BaseTool, ABC):
             A ``ToolExecutionResult`` with the appropriate content.
         """
         if result.timed_out:
+            stderr_fragment = (
+                _sanitize_stderr(result.stderr.strip()) if result.stderr else ""
+            )
             logger.warning(
                 GIT_COMMAND_TIMEOUT,
                 command=_sanitize_command(["git", *args]),
                 deadline=deadline,
+                stderr_fragment=stderr_fragment,
             )
+            msg = f"Git command timed out after {deadline}s"
+            if stderr_fragment:
+                msg += f": {stderr_fragment}"
             return ToolExecutionResult(
-                content=result.stderr or "Git command timed out",
+                content=msg,
                 is_error=True,
             )
         if result.returncode != 0:
@@ -498,18 +536,21 @@ class _BaseGitTool(BaseTool, ABC):
         if isinstance(proc_or_err, ToolExecutionResult):
             return proc_or_err
 
-        output_or_err = await self._await_git_process(
-            proc_or_err,
-            args,
-            deadline=deadline,
-        )
-        if isinstance(output_or_err, ToolExecutionResult):
-            return output_or_err
+        try:
+            output_or_err = await self._await_git_process(
+                proc_or_err,
+                args,
+                deadline=deadline,
+            )
+            if isinstance(output_or_err, ToolExecutionResult):
+                return output_or_err
 
-        stdout_bytes, stderr_bytes = output_or_err
-        return self._process_git_output(
-            args,
-            proc_or_err.returncode,
-            stdout_bytes,
-            stderr_bytes,
-        )
+            stdout_bytes, stderr_bytes = output_or_err
+            return self._process_git_output(
+                args,
+                proc_or_err.returncode,
+                stdout_bytes,
+                stderr_bytes,
+            )
+        finally:
+            close_subprocess_transport(proc_or_err)
