@@ -188,3 +188,40 @@ class ProjectStatus(StrEnum):
     ON_HOLD = "on_hold"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+
+
+class ToolAccessLevel(StrEnum):
+    """Access level for tool permissions.
+
+    Determines which tool categories an agent can use.
+    Levels ``SANDBOXED`` through ``ELEVATED`` form a hierarchy
+    where each includes all categories from lower levels.
+    ``CUSTOM`` uses only explicit allow/deny lists, ignoring
+    the hierarchy.
+
+    The concrete category sets for each level are defined in
+    ``ToolPermissionChecker._LEVEL_CATEGORIES``.
+    """
+
+    SANDBOXED = "sandboxed"
+    RESTRICTED = "restricted"
+    STANDARD = "standard"
+    ELEVATED = "elevated"
+    CUSTOM = "custom"
+
+
+class ToolCategory(StrEnum):
+    """Category of a tool for access-level gating."""
+
+    FILE_SYSTEM = "file_system"
+    CODE_EXECUTION = "code_execution"
+    VERSION_CONTROL = "version_control"
+    WEB = "web"
+    DATABASE = "database"
+    TERMINAL = "terminal"
+    DESIGN = "design"
+    COMMUNICATION = "communication"
+    ANALYTICS = "analytics"
+    DEPLOYMENT = "deployment"
+    MCP = "mcp"
+    OTHER = "other"

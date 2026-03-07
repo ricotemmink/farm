@@ -20,7 +20,11 @@ from ai_company.engine.loop_protocol import (
     TurnRecord,
 )
 from ai_company.engine.metrics import TaskCompletionMetrics
-from ai_company.engine.prompt import SystemPrompt, build_system_prompt
+from ai_company.engine.prompt import (
+    SystemPrompt,
+    build_system_prompt,
+    format_task_instruction,
+)
 from ai_company.engine.react_loop import ReactLoop
 from ai_company.engine.run_result import AgentRunResult
 from ai_company.observability import get_logger
@@ -41,6 +45,7 @@ from ai_company.observability.events.execution import (
 from ai_company.providers.enums import MessageRole
 from ai_company.providers.models import ChatMessage
 from ai_company.tools.invoker import ToolInvoker
+from ai_company.tools.permissions import ToolPermissionChecker
 
 if TYPE_CHECKING:
     from ai_company.budget.tracker import CostTracker
@@ -157,6 +162,7 @@ class AgentEngine:
         ctx: AgentContext | None = None
         system_prompt: SystemPrompt | None = None
         try:
+            tool_invoker = self._make_tool_invoker(identity)
             ctx, system_prompt = self._prepare_context(
                 identity=identity,
                 task=task,
@@ -164,6 +170,7 @@ class AgentEngine:
                 task_id=task_id,
                 max_turns=max_turns,
                 memory_messages=memory_messages,
+                tool_invoker=tool_invoker,
             )
             return await self._execute(
                 identity=identity,
@@ -175,6 +182,7 @@ class AgentEngine:
                 system_prompt=system_prompt,
                 start=start,
                 timeout_seconds=timeout_seconds,
+                tool_invoker=tool_invoker,
             )
         except MemoryError, RecursionError:
             logger.error(
@@ -209,6 +217,7 @@ class AgentEngine:
         system_prompt: SystemPrompt,
         start: float,
         timeout_seconds: float | None = None,
+        tool_invoker: ToolInvoker | None = None,
     ) -> AgentRunResult:
         """Run execution loop, record costs, apply transitions, and build result.
 
@@ -217,7 +226,6 @@ class AgentEngine:
         recording, post-execution task transitions, and metrics logging.
         """
         budget_checker = _make_budget_checker(task)
-        tool_invoker = self._make_tool_invoker()
 
         logger.debug(
             EXECUTION_ENGINE_PROMPT_BUILT,
@@ -254,6 +262,8 @@ class AgentEngine:
         )
         try:
             self._log_completion(result, agent_id, task_id, duration)
+        except MemoryError, RecursionError:
+            raise
         except Exception:
             logger.exception(
                 EXECUTION_ENGINE_ERROR,
@@ -330,9 +340,10 @@ class AgentEngine:
         task_id: str,
         max_turns: int,
         memory_messages: tuple[ChatMessage, ...],
+        tool_invoker: ToolInvoker | None = None,
     ) -> tuple[AgentContext, SystemPrompt]:
         """Build system prompt and prepare execution context."""
-        tool_defs = self._get_tool_definitions()
+        tool_defs = self._get_tool_definitions(tool_invoker)
         system_prompt = build_system_prompt(
             agent=identity,
             task=task,
@@ -352,7 +363,7 @@ class AgentEngine:
         ctx = ctx.with_message(
             ChatMessage(
                 role=MessageRole.USER,
-                content=_format_task_instruction(task),
+                content=format_task_instruction(task),
             ),
         )
 
@@ -437,11 +448,14 @@ class AgentEngine:
 
     # ── Helpers ──────────────────────────────────────────────────
 
-    def _get_tool_definitions(self) -> tuple[ToolDefinition, ...]:
-        """Extract tool definitions from the registry for prompt building."""
-        if self._tool_registry is None:
+    def _get_tool_definitions(
+        self,
+        tool_invoker: ToolInvoker | None,
+    ) -> tuple[ToolDefinition, ...]:
+        """Extract permitted tool definitions for prompt building."""
+        if tool_invoker is None:
             return ()
-        return self._tool_registry.to_definitions()
+        return tool_invoker.get_permitted_definitions()
 
     def _transition_task_if_needed(
         self,
@@ -541,11 +555,15 @@ class AgentEngine:
 
         return execution_result.model_copy(update={"context": ctx})
 
-    def _make_tool_invoker(self) -> ToolInvoker | None:
-        """Create a ToolInvoker from the registry, or None."""
+    def _make_tool_invoker(
+        self,
+        identity: AgentIdentity,
+    ) -> ToolInvoker | None:
+        """Create a ToolInvoker with permission checking, or None."""
         if self._tool_registry is None:
             return None
-        return ToolInvoker(self._tool_registry)
+        checker = ToolPermissionChecker.from_permissions(identity.tools)
+        return ToolInvoker(self._tool_registry, permission_checker=checker)
 
     def _log_completion(
         self,
@@ -758,26 +776,6 @@ class AgentEngine:
                 original_error=error_msg,
             )
             raise exc from None
-
-
-def _format_task_instruction(task: Task) -> str:
-    """Format a task into a user message for the initial conversation."""
-    parts = [f"# Task: {task.title}", "", task.description]
-
-    if task.acceptance_criteria:
-        parts.append("")
-        parts.append("## Acceptance Criteria")
-        parts.extend(f"- {c.description}" for c in task.acceptance_criteria)
-
-    if task.budget_limit > 0:
-        parts.append("")
-        parts.append(f"**Budget limit:** ${task.budget_limit:.2f} USD")
-
-    if task.deadline:
-        parts.append("")
-        parts.append(f"**Deadline:** {task.deadline}")
-
-    return "\n".join(parts)
 
 
 def _make_budget_checker(task: Task) -> BudgetChecker | None:
