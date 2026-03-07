@@ -820,14 +820,15 @@ The agent execution loop defines how an agent processes a task from start to fin
 All loop implementations satisfy the `ExecutionLoop` runtime-checkable protocol (defined in `engine/loop_protocol.py`):
 
 - **`get_loop_type() -> str`** — returns a unique identifier (e.g. `"react"`)
-- **`execute(...) -> ExecutionResult`** — runs the loop to completion, accepting `AgentContext`, `CompletionProvider`, optional `ToolInvoker`, optional `BudgetChecker`, and optional `CompletionConfig`
+- **`execute(...) -> ExecutionResult`** — runs the loop to completion, accepting `AgentContext`, `CompletionProvider`, optional `ToolInvoker`, optional `BudgetChecker`, optional `ShutdownChecker`, and optional `CompletionConfig`
 
 Supporting models:
 
-- **`TerminationReason`** — enum: `COMPLETED`, `MAX_TURNS`, `BUDGET_EXHAUSTED`, `ERROR`
+- **`TerminationReason`** — enum: `COMPLETED`, `MAX_TURNS`, `BUDGET_EXHAUSTED`, `SHUTDOWN`, `ERROR`
 - **`TurnRecord`** — frozen per-turn stats (tokens, cost, tool calls, finish reason)
 - **`ExecutionResult`** — frozen outcome with final context, termination reason, turn records, and optional error message (required when reason is `ERROR`)
 - **`BudgetChecker`** — callback type `Callable[[AgentContext], bool]` invoked before each LLM call
+- **`ShutdownChecker`** — callback type `Callable[[], bool]` checked at turn boundaries to initiate cooperative shutdown
 
 #### Loop 1: ReAct (Default for Simple Tasks)
 
@@ -943,7 +944,7 @@ Pipeline steps:
 6. **Prepare tools and budget** — creates `ToolInvoker` from registry and `BudgetChecker` from task budget limit.
 7. **Delegate to loop** — calls `ExecutionLoop.execute()` with context, provider, tool invoker, budget checker, and completion config. If `timeout_seconds` is set, wraps the call in `asyncio.wait_for`; on expiry the run returns with `TerminationReason.ERROR` but cost recording and post-execution processing still occur.
 8. **Record costs** — records accumulated `TokenUsage` to `CostTracker` (if available). Cost recording failures are logged but do not affect the result.
-9. **Apply post-execution transitions** — on `COMPLETED` termination: IN_PROGRESS → IN_REVIEW → COMPLETED (two-hop auto-complete in M3; reviewers deferred to M4+). All other termination reasons leave the task in its current state. Transition failures are logged but do not discard the successful execution result.
+9. **Apply post-execution transitions** — on `COMPLETED` termination: IN_PROGRESS → IN_REVIEW → COMPLETED (two-hop auto-complete in M3; reviewers deferred to M4+). On `SHUTDOWN` termination: current status → INTERRUPTED (see §6.7). On `ERROR` termination: recovery strategy is applied (default `FailAndReassignStrategy` transitions to FAILED; see §6.6). All other termination reasons (`MAX_TURNS`, `BUDGET_EXHAUSTED`) leave the task in its current state. Transition failures are logged but do not discard the successful execution result.
 10. **Return result** — wraps `ExecutionResult` in `AgentRunResult` with engine-level metadata.
 
 Error handling: `MemoryError` and `RecursionError` propagate unconditionally. All other exceptions are caught and wrapped in an `AgentRunResult` with `TerminationReason.ERROR`.
