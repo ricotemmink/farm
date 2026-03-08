@@ -35,6 +35,8 @@ from tests.unit.communication.meeting.conftest import (
     make_mock_agent_caller,
 )
 
+pytestmark = pytest.mark.timeout(30)
+
 
 def _make_orchestrator(
     *,
@@ -119,6 +121,21 @@ class TestMeetingOrchestratorValidation:
                 agenda=simple_agenda,
                 leader_id="leader",
                 participant_ids=("leader", "agent-b"),
+                token_budget=2000,
+            )
+
+    async def test_duplicate_participants_raises(
+        self,
+        simple_agenda: MeetingAgenda,
+    ) -> None:
+        orchestrator = _make_orchestrator()
+        with pytest.raises(MeetingParticipantError, match="Duplicate participant"):
+            await orchestrator.run_meeting(
+                meeting_type_name="standup",
+                protocol_config=MeetingProtocolConfig(),
+                agenda=simple_agenda,
+                leader_id="leader",
+                participant_ids=("agent-a", "agent-b", "agent-a"),
                 token_budget=2000,
             )
 

@@ -234,6 +234,39 @@ class MeetingMinutes(BaseModel):
             raise ValueError(msg)
         return self
 
+    @model_validator(mode="after")
+    def _validate_token_aggregates(self) -> Self:
+        """Ensure aggregate token counts match sum of contributions.
+
+        Skipped when no contributions are present (allows default
+        zero totals).
+        """
+        if not self.contributions:
+            if self.total_input_tokens != 0 or self.total_output_tokens != 0:
+                msg = (
+                    "total_input_tokens and total_output_tokens must "
+                    "be 0 when contributions are empty"
+                )
+                raise ValueError(msg)
+            return self
+        sum_input = sum(c.input_tokens for c in self.contributions)
+        sum_output = sum(c.output_tokens for c in self.contributions)
+        if self.total_input_tokens != sum_input:
+            msg = (
+                f"total_input_tokens ({self.total_input_tokens}) "
+                f"does not match sum of contributions "
+                f"({sum_input})"
+            )
+            raise ValueError(msg)
+        if self.total_output_tokens != sum_output:
+            msg = (
+                f"total_output_tokens ({self.total_output_tokens})"
+                f" does not match sum of contributions "
+                f"({sum_output})"
+            )
+            raise ValueError(msg)
+        return self
+
 
 class MeetingRecord(BaseModel):
     """Audit trail entry for a meeting execution.
@@ -262,7 +295,7 @@ class MeetingRecord(BaseModel):
         default=None,
         description="Complete minutes on success",
     )
-    error_message: str | None = Field(
+    error_message: NotBlankStr | None = Field(
         default=None,
         description="Error description on failure",
     )

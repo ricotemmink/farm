@@ -46,7 +46,6 @@ from ai_company.observability.events.communication import (
     COMM_SUBSCRIPTION_CREATED,
     COMM_SUBSCRIPTION_NOT_FOUND,
     COMM_SUBSCRIPTION_REMOVED,
-    COMM_UNSUBSCRIBE_SENTINEL_FAILED,
 )
 
 logger = get_logger(__name__)
@@ -100,6 +99,7 @@ class InMemoryMessageBus:
         self._queues: dict[tuple[str, str], asyncio.Queue[DeliveryEnvelope | None]] = {}
         self._history: dict[str, deque[Message]] = {}
         self._known_agents: set[str] = set()
+        self._waiters: dict[tuple[str, str], int] = {}
         self._running = False
         self._shutdown_event = asyncio.Event()
 
@@ -399,17 +399,17 @@ class InMemoryMessageBus:
             self._channels[channel_name] = channel.model_copy(
                 update={"subscribers": new_subs},
             )
-            queue = self._queues.pop((channel_name, subscriber_id), None)
+            key = (channel_name, subscriber_id)
+            queue = self._queues.pop(key, None)
             if queue is not None:
-                try:
+                # Put a sentinel for each pending waiter so all
+                # concurrent receive() calls are woken up.
+                # Safe to use put_nowait: queues are unbounded
+                # (maxsize=0), so QueueFull cannot be raised.
+                pending = self._waiters.pop(key, 0)
+                sentinels = max(1, pending)
+                for _ in range(sentinels):
                     queue.put_nowait(None)
-                except asyncio.QueueFull:
-                    logger.exception(
-                        COMM_UNSUBSCRIBE_SENTINEL_FAILED,
-                        channel=channel_name,
-                        subscriber=subscriber_id,
-                        detail="Queue full — unsubscribe sentinel not delivered",
-                    )
         logger.info(
             COMM_SUBSCRIPTION_REMOVED,
             channel=channel_name,
@@ -429,19 +429,18 @@ class InMemoryMessageBus:
         the bus is stopped.  When ``timeout`` is ``None``, awaits
         indefinitely (or until shutdown).
 
-        Note: Only one ``receive()`` call should be pending per
-        ``(channel_name, subscriber_id)`` pair at a time.  The
-        unsubscribe sentinel wakes a single waiter; concurrent
-        receivers on the same subscription are not supported.
-
         Args:
             channel_name: Channel to receive from.
             subscriber_id: Agent ID receiving.
             timeout: Seconds to wait before returning ``None``.
 
         Returns:
-            A delivery envelope, or ``None`` on timeout, shutdown,
-            or when an in-flight receive is woken by :meth:`unsubscribe`.
+            The next delivery envelope, or ``None`` when:
+
+            - *timeout* expires without a message arriving.
+            - The bus is shut down while waiting.
+            - The subscription is cancelled via :meth:`unsubscribe`
+              while a ``receive()`` call is in flight.
 
         Raises:
             MessageBusNotRunningError: If the bus is not running.
@@ -460,25 +459,50 @@ class InMemoryMessageBus:
             ):
                 _raise_not_subscribed(channel_name, subscriber_id)
             queue = self._ensure_queue(channel_name, subscriber_id)
-        result = await self._await_with_shutdown(queue, timeout)
+            key = (channel_name, subscriber_id)
+            self._waiters[key] = self._waiters.get(key, 0) + 1
+        try:
+            result = await self._await_with_shutdown(queue, timeout)
+        finally:
+            # Decrement outside the lock: no ``await`` separates the
+            # read and write of ``_waiters``, so no other coroutine
+            # can interleave in a single-threaded asyncio event loop.
+            # The asymmetry with the lock-guarded increment is
+            # intentional — the decrement must happen after
+            # _await_with_shutdown completes.
+            current = self._waiters.get(key)
+            if current is None:
+                # Key was removed (e.g. by unsubscribe); don't recreate.
+                pass
+            elif current <= 1:
+                self._waiters.pop(key, None)
+            else:
+                self._waiters[key] = current - 1
         if result is None:
-            self._log_receive_null(channel_name, subscriber_id, timeout)
+            await self._log_receive_null(channel_name, subscriber_id, timeout)
         return result
 
-    def _log_receive_null(
+    async def _log_receive_null(
         self,
         channel_name: str,
         subscriber_id: str,
-        timeout: float | None,
+        timeout_seconds: float | None,
     ) -> None:
-        """Log the cause when ``receive()`` returns ``None``."""
-        if self._shutdown_event.is_set():
+        """Log the cause when ``receive()`` returns ``None``.
+
+        Acquires the lock to safely inspect bus state (queue map
+        and shutdown flag) so the inferred reason is not racy.
+        """
+        async with self._lock:
+            is_shutdown = self._shutdown_event.is_set()
+            is_unsubscribed = (channel_name, subscriber_id) not in self._queues
+        if is_shutdown:
             logger.debug(
                 COMM_RECEIVE_SHUTDOWN,
                 channel=channel_name,
                 subscriber=subscriber_id,
             )
-        elif (channel_name, subscriber_id) not in self._queues:
+        elif is_unsubscribed:
             logger.debug(
                 COMM_RECEIVE_UNSUBSCRIBED,
                 channel=channel_name,
@@ -489,7 +513,7 @@ class InMemoryMessageBus:
                 COMM_RECEIVE_TIMEOUT,
                 channel=channel_name,
                 subscriber=subscriber_id,
-                timeout=timeout,
+                timeout=timeout_seconds,
             )
 
     async def _await_with_shutdown(

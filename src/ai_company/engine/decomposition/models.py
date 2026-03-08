@@ -148,11 +148,22 @@ class DecompositionResult(BaseModel):
         if len(self.created_tasks) != len(self.plan.subtasks):
             msg = (
                 f"created_tasks count ({len(self.created_tasks)}) "
-                f"does not match plan subtask count ({len(self.plan.subtasks)})"
+                f"does not match plan subtask count "
+                f"({len(self.plan.subtasks)})"
             )
             raise ValueError(msg)
 
         task_ids = {t.id for t in self.created_tasks}
+        plan_ids = {s.id for s in self.plan.subtasks}
+        if task_ids != plan_ids:
+            missing = sorted(plan_ids - task_ids)
+            extra = sorted(task_ids - plan_ids)
+            msg = (
+                f"created_tasks IDs do not match plan subtask IDs"
+                f" (missing={missing}, extra={extra})"
+            )
+            raise ValueError(msg)
+
         edge_ids = {eid for edge in self.dependency_edges for eid in edge}
         unknown_edge_ids = edge_ids - task_ids
         if unknown_edge_ids:
@@ -174,6 +185,10 @@ class SubtaskStatusRollup(BaseModel):
     between the sum of tracked counts and ``total`` accounts for
     these. The ``derived_parent_status`` treats any such remainder
     as work still pending (IN_PROGRESS).
+
+    When all subtasks are in terminal states but with a mix of
+    completed and cancelled, ``derived_parent_status`` returns
+    ``CANCELLED`` (some work was abandoned).
 
     Attributes:
         parent_task_id: ID of the parent task.
@@ -234,9 +249,12 @@ class SubtaskStatusRollup(BaseModel):
         if self.blocked > 0:
             return TaskStatus.BLOCKED
 
-        # All subtasks in terminal states (completed + cancelled mix)
+        # All subtasks in terminal states but mixed completed + cancelled
+        # — not fully completed (pure completed already handled above),
+        # and not fully cancelled (pure cancelled already handled above).
+        # Report as CANCELLED since some work was abandoned.
         if self.completed + self.cancelled == self.total:
-            return TaskStatus.COMPLETED
+            return TaskStatus.CANCELLED
 
         return TaskStatus.IN_PROGRESS
 

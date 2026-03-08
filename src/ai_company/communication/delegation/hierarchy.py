@@ -32,7 +32,7 @@ class HierarchyResolver:
         HierarchyResolutionError: If a cycle is detected.
     """
 
-    __slots__ = ("_reports_of", "_supervisor_of")
+    __slots__ = ("_known_agents", "_reports_of", "_supervisor_of")
 
     def __init__(self, company: Company) -> None:
         supervisor_of: dict[str, str] = {}
@@ -78,6 +78,11 @@ class HierarchyResolver:
         )
         self._reports_of: MappingProxyType[str, tuple[str, ...]] = MappingProxyType(
             {k: tuple(v) for k, v in reports_of.items()}
+        )
+        self._known_agents: frozenset[str] = frozenset(
+            set(supervisor_of.keys())
+            | set(supervisor_of.values())
+            | set(reports_of.keys())
         )
 
         logger.debug(
@@ -217,7 +222,8 @@ class HierarchyResolver:
         """Find the lowest common manager of two agents.
 
         If one agent is an ancestor of the other, that agent is
-        returned as the LCM.
+        returned as the LCM.  When both arguments refer to the same
+        agent, that agent is returned directly.
 
         Args:
             agent_a: First agent name.
@@ -227,6 +233,10 @@ class HierarchyResolver:
             Name of the lowest common manager, or None if no
             common manager exists.
         """
+        if agent_a == agent_b:
+            if agent_a not in self._known_agents:
+                return None
+            return agent_a
         ancestors_a = self.get_ancestors(agent_a)
         ancestors_b_set = set(self.get_ancestors(agent_b))
         # Check if agent_a is an ancestor of agent_b

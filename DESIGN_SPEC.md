@@ -602,13 +602,12 @@ conflict_resolution:
 
 #### Strategy 2: Structured Debate + Judge
 
-Both agents present arguments (1 round each, capped at `max_tokens_per_argument`). A judge — their shared manager, the CEO, or a configurable arbitrator agent — evaluates both positions and decides. The judge's reasoning and both arguments are logged as a dissent record.
+Both agents present arguments (1 round each). A judge — their shared manager, the CEO, or a configurable arbitrator agent — evaluates both positions and decides. The judge's reasoning and both arguments are logged as a dissent record.
 
 ```yaml
 conflict_resolution:
   strategy: "debate"
   debate:
-    max_tokens_per_argument: 500
     judge: "shared_manager"        # shared_manager, ceo, designated_agent
 ```
 
@@ -631,7 +630,7 @@ conflict_resolution:
 
 Combines strategies with an intelligent review layer:
 
-1. Both agents present arguments (1 round, capped tokens) — preserving dissent
+1. Both agents present arguments (1 round) — preserving dissent
 2. A **conflict review agent** evaluates the result:
    - If the resolution is **clear** (one position is objectively better, or authority applies cleanly) → resolve automatically, log dissent record
    - If the resolution is **ambiguous** (genuine trade-offs, no clear winner) → escalate to human queue with both positions + the review agent's analysis
@@ -640,7 +639,6 @@ Combines strategies with an intelligent review layer:
 conflict_resolution:
   strategy: "hybrid"
   hybrid:
-    max_tokens_per_argument: 500
     review_agent: "conflict_reviewer"  # dedicated agent or role
     escalate_on_ambiguity: true
 ```
@@ -652,7 +650,7 @@ conflict_resolution:
 
 Meetings (§5.1 Pattern 3) follow configurable protocols that determine how agents interact during structured multi-agent conversations. Different meeting types naturally suit different protocols. All protocols implement a `MeetingProtocol` protocol, making the system extensible — new protocols can be registered and selected per meeting type. Cost bounds are enforced by `duration_tokens` in meeting config (§5.4).
 
-> **Current state (M4 complete):** All 3 meeting protocols are implemented in `communication/meeting/`: `RoundRobinProtocol`, `PositionPapersProtocol`, and `StructuredPhasesProtocol`. The `MeetingOrchestrator` runs meetings end-to-end with token budget enforcement via `TokenTracker`. All protocols implement the `MeetingProtocol` protocol interface.
+> **Current state (M4 complete):** All 3 meeting protocols are implemented in `communication/meeting/`: `RoundRobinProtocol`, `PositionPapersProtocol`, and `StructuredPhasesProtocol`. The `MeetingOrchestrator` runs meetings end-to-end with token budget enforcement via `TokenTracker`. Shared LLM response parsing for decisions and action items is in `_parsing.py`. All protocols implement the `MeetingProtocol` protocol interface.
 
 #### Protocol 1: Round-Robin Transcript
 
@@ -2414,7 +2412,7 @@ ai-company/
 │       │   ├── config.py           # Communication config
 │       │   ├── conflict_resolution/ # Conflict resolution subsystem (§5.6)
 │       │   │   ├── __init__.py   # Package exports
-│       │   │   ├── _helpers.py   # Shared utility (find_loser)
+│       │   │   ├── _helpers.py   # Shared utility (find_losers, pick_highest_seniority)
 │       │   │   ├── authority_strategy.py # AuthorityResolver (Strategy 1)
 │       │   │   ├── config.py     # ConflictResolutionConfig, DebateConfig, HybridConfig
 │       │   │   ├── debate_strategy.py   # DebateResolver (Strategy 2)
@@ -2446,12 +2444,13 @@ ai-company/
 │       │   ├── message.py          # Message model
 │       │   ├── meeting/             # Meeting protocol subsystem
 │       │   │   ├── __init__.py    # Package exports
+│       │   │   ├── _parsing.py   # Shared helpers for parsing decisions and action items
 │       │   │   ├── _prompts.py    # LLM prompt templates for meeting phases
 │       │   │   ├── _token_tracker.py # TokenTracker for duration_tokens enforcement
 │       │   │   ├── config.py      # MeetingProtocolConfig, protocol-specific config models
 │       │   │   ├── enums.py       # MeetingProtocolType, MeetingPhase enums
 │       │   │   ├── errors.py      # Meeting error hierarchy
-│       │   │   ├── models.py      # MeetingRecord, AgendaItem, ActionItem, etc.
+│       │   │   ├── models.py      # MeetingRecord, MeetingAgendaItem, ActionItem, etc.
 │       │   │   ├── orchestrator.py # MeetingOrchestrator (runs meetings end-to-end)
 │       │   │   ├── position_papers.py # PositionPapersProtocol implementation
 │       │   │   ├── protocol.py    # MeetingProtocol protocol interface
@@ -2647,7 +2646,7 @@ These conventions were established during the M0–M2+ review cycle. **Adopted**
 | **Pydantic alias for YAML directives** | Adopted (M2.5) | `Field(alias="_remove")` in `TemplateAgentConfig` — YAML uses `_remove: true`, Python accesses `agent.remove`. Keeps the YAML-facing name (underscore prefix signals internal directive) separate from the Python attribute name. | Underscore-prefixed YAML keys signal merge directives vs regular fields. Pydantic alias bridges the naming convention gap cleanly. |
 | **Communication foundation** | Adopted (M4) | `MessageBus` protocol with `InMemoryMessageBus` backend (asyncio queues, pull-model `receive()` with shutdown signaling via `asyncio.Event`). `MessageDispatcher` routes to concurrent handlers via `asyncio.TaskGroup` with pre-allocated error collection. `AgentMessenger` per-agent facade auto-fills sender/timestamp/ID; deterministic direct-channel naming `@{sorted_a}:{sorted_b}`. `DeliveryEnvelope` for delivery tracking. `NotBlankStr` validation on all protocol boundary identifiers. | Pull-model avoids callback complexity and enables agents to consume at their own pace. Protocol + backend split enables future persistent/distributed bus implementations. Deterministic DM channel names prevent duplicates. See §5. |
 | **Delegation & loop prevention** | Adopted (M4) | `HierarchyResolver` resolves org hierarchy from `Company` at construction (cycle-detected, `MappingProxyType`-frozen). `AuthorityValidator` checks chain-of-command + role permissions. `DelegationGuard` orchestrates five mechanisms (ancestry, depth, dedup, rate limit, circuit breaker) in sequence, short-circuiting on first rejection. `DelegationService` is synchronous (CPU-only); messaging integration deferred. Stateful mechanisms use injectable clock for deterministic testing. Task model extended with `parent_task_id` and `delegation_chain` fields. | Synchronous delegation avoids async complexity for CPU-only validation. Five-mechanism guard provides defence-in-depth against all loop patterns. Injectable clocks enable deterministic testing. See §5.4, §5.5. |
-| **Conflict resolution** | Adopted (M4) | `ConflictResolver` protocol with async `resolve()` + sync `build_dissent_record()` split (resolve may call LLM, dissent record is pure construction). Four strategies: `AuthorityResolver` (seniority comparison iterating all N positions, hierarchy proximity tiebreaker via `get_lowest_common_manager`), `DebateResolver` (LLM judge via `JudgeEvaluator` protocol, authority fallback when absent), `HumanEscalationResolver` (stub, returns `ESCALATED_TO_HUMAN`), `HybridResolver` (LLM review + ambiguity escalation/authority fallback). `ConflictResolutionService` follows `DelegationService` pattern (`__slots__`, keyword-only constructor, `MappingProxyType`-wrapped resolver mapping, audit trail). `DissentRecord` preserves losing agent's reasoning. `Conflict.is_cross_department` is a `@computed_field` derived from positions. `HierarchyResolver` extended with `get_lowest_common_manager()` and `get_delegation_depth()`. | Protocol + strategy pattern enables adding new resolution approaches without modifying existing code. Async resolve accommodates LLM calls; sync dissent record avoids unnecessary async overhead. Shared `find_loser` utility prevents code duplication across strategies. See §5.6. |
+| **Conflict resolution** | Adopted (M4) | `ConflictResolver` protocol with async `resolve()` + sync `build_dissent_records()` split (resolve may call LLM, dissent record is pure construction). Four strategies: `AuthorityResolver` (seniority comparison iterating all N positions, hierarchy proximity tiebreaker via `get_lowest_common_manager`), `DebateResolver` (LLM judge via `JudgeEvaluator` protocol, authority fallback when absent), `HumanEscalationResolver` (stub, returns `ESCALATED_TO_HUMAN`), `HybridResolver` (LLM review + ambiguity escalation/authority fallback). `ConflictResolutionService` follows `DelegationService` pattern (`__slots__`, keyword-only constructor, `MappingProxyType`-wrapped resolver mapping, audit trail). `DissentRecord` preserves losing agent's reasoning. `Conflict.is_cross_department` is a `@computed_field` derived from positions. `HierarchyResolver` extended with `get_lowest_common_manager()` and `get_delegation_depth()`. | Protocol + strategy pattern enables adding new resolution approaches without modifying existing code. Async resolve accommodates LLM calls; sync dissent record avoids unnecessary async overhead. Shared `find_losers` utility prevents code duplication across strategies. See §5.6. |
 
 ---
 

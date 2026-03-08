@@ -8,6 +8,10 @@ growth.
 
 from datetime import UTC, datetime
 
+from ai_company.communication.meeting._parsing import (
+    parse_action_items,
+    parse_decisions,
+)
 from ai_company.communication.meeting._prompts import build_agenda_prompt
 from ai_company.communication.meeting._token_tracker import TokenTracker
 from ai_company.communication.meeting.config import RoundRobinConfig  # noqa: TC001
@@ -19,6 +23,7 @@ from ai_company.communication.meeting.errors import (
     MeetingBudgetExhaustedError,
 )
 from ai_company.communication.meeting.models import (
+    ActionItem,
     MeetingAgenda,
     MeetingContribution,
     MeetingMinutes,
@@ -69,9 +74,12 @@ def _build_summary_prompt(
     parts.extend(transcript)
     parts.append("")
     parts.append(
-        "Please summarize this meeting. List the key decisions made "
-        "and any action items with assignees. Format decisions as a "
-        "numbered list and action items as a bulleted list."
+        "Please summarize this meeting using exactly these section "
+        "headers:\n\n"
+        "Decisions:\n"
+        "1. <decision>\n\n"
+        "Action Items:\n"
+        "- <action item> (assigned to <agent_id>)"
     )
     return "\n".join(parts)
 
@@ -122,7 +130,11 @@ class RoundRobinProtocol:
         tracker = TokenTracker(budget=token_budget)
         agenda_text = build_agenda_prompt(agenda)
 
-        summary_reserve = int(token_budget * _SUMMARY_RESERVE_FRACTION)
+        summary_reserve = (
+            int(token_budget * _SUMMARY_RESERVE_FRACTION)
+            if self._config.leader_summarizes
+            else 0
+        )
         discussion_budget = token_budget - summary_reserve
 
         contributions = await self._run_discussion_rounds(
@@ -139,6 +151,8 @@ class RoundRobinProtocol:
 
         # Summary phase
         summary = ""
+        decisions: tuple[str, ...] = ()
+        action_items: tuple[ActionItem, ...] = ()
         all_contributions: tuple[MeetingContribution, ...] = tuple(contributions)
         if self._config.leader_summarizes and not tracker.is_exhausted:
             summary, summary_contribution = await self._run_summary(
@@ -151,6 +165,14 @@ class RoundRobinProtocol:
                 turn_number=turn_number,
             )
             all_contributions = (*contributions, summary_contribution)
+            decisions = parse_decisions(summary)
+            raw_action_items = parse_action_items(summary)
+            allowed_assignees = set(participant_ids) | {leader_id}
+            action_items = tuple(
+                item
+                for item in raw_action_items
+                if item.assignee_id is None or item.assignee_id in allowed_assignees
+            )
         elif self._config.leader_summarizes and tracker.is_exhausted:
             logger.warning(
                 MEETING_SUMMARY_SKIPPED,
@@ -190,6 +212,8 @@ class RoundRobinProtocol:
             agenda=agenda,
             contributions=all_contributions,
             summary=summary,
+            decisions=decisions,
+            action_items=action_items,
             total_input_tokens=tracker.input_tokens,
             total_output_tokens=tracker.output_tokens,
             started_at=started_at,

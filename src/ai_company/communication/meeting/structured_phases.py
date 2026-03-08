@@ -9,6 +9,10 @@ meetings.
 import asyncio
 from datetime import UTC, datetime
 
+from ai_company.communication.meeting._parsing import (
+    parse_action_items,
+    parse_decisions,
+)
 from ai_company.communication.meeting._prompts import build_agenda_prompt
 from ai_company.communication.meeting._token_tracker import TokenTracker
 from ai_company.communication.meeting.config import (
@@ -37,6 +41,7 @@ from ai_company.observability.events.meeting import (
     MEETING_BUDGET_EXHAUSTED,
     MEETING_CONFLICT_DETECTED,
     MEETING_CONTRIBUTION_RECORDED,
+    MEETING_INTERNAL_ERROR,
     MEETING_PHASE_COMPLETED,
     MEETING_PHASE_STARTED,
     MEETING_SUMMARY_GENERATED,
@@ -46,7 +51,7 @@ from ai_company.observability.events.meeting import (
 
 logger = get_logger(__name__)
 
-# Reserve 20% of budget for later phases (conflict check + synthesis).
+# Reserve 20% of remaining budget for the synthesis phase.
 _SYNTHESIS_RESERVE_FRACTION = 0.20
 
 
@@ -129,9 +134,11 @@ def _build_synthesis_prompt(
     parts.append("")
     parts.append(
         "As the meeting leader, synthesize all inputs and discussion "
-        "into final decisions and action items. List decisions as a "
-        "numbered list and action items as a bulleted list with "
-        "assignees."
+        "into your output using exactly these section headers:\n\n"
+        "Decisions:\n"
+        "1. <decision>\n\n"
+        "Action Items:\n"
+        "- <action item> (assigned to <agent_id>)"
     )
     return "\n".join(parts)
 
@@ -272,6 +279,15 @@ class StructuredPhasesProtocol:
             synthesis_contribution,
         )
 
+        decisions = parse_decisions(summary)
+        raw_action_items = parse_action_items(summary)
+        allowed_assignees = set(participant_ids) | {leader_id}
+        action_items = tuple(
+            item
+            for item in raw_action_items
+            if item.assignee_id is None or item.assignee_id in allowed_assignees
+        )
+
         logger.debug(
             MEETING_TOKENS_RECORDED,
             meeting_id=meeting_id,
@@ -290,6 +306,8 @@ class StructuredPhasesProtocol:
             agenda=agenda,
             contributions=contributions,
             summary=summary,
+            decisions=decisions,
+            action_items=action_items,
             conflicts_detected=conflicts_detected,
             total_input_tokens=tracker.input_tokens,
             total_output_tokens=tracker.output_tokens,
@@ -389,12 +407,22 @@ class StructuredPhasesProtocol:
 
         # All slots must be filled — TaskGroup propagates ExceptionGroup
         # on any task failure, so reaching this point means all succeeded.
-        assert all(r is not None for r in result_inputs), (  # noqa: S101
-            f"Expected {num_participants} inputs but some slots are None"
-        )
-        assert all(c is not None for c in result_contributions), (  # noqa: S101
-            f"Expected {num_participants} contributions but some slots are None"
-        )
+        if not all(r is not None for r in result_inputs):
+            msg = f"Expected {num_participants} inputs but some slots are None"
+            logger.error(
+                MEETING_INTERNAL_ERROR,
+                error=msg,
+                meeting_id=meeting_id,
+            )
+            raise RuntimeError(msg)
+        if not all(c is not None for c in result_contributions):
+            msg = f"Expected {num_participants} contributions but some slots are None"
+            logger.error(
+                MEETING_INTERNAL_ERROR,
+                error=msg,
+                meeting_id=meeting_id,
+            )
+            raise RuntimeError(msg)
         inputs: list[tuple[str, str]] = list(result_inputs)  # type: ignore[arg-type]
         input_contributions: list[MeetingContribution] = list(
             result_contributions,  # type: ignore[arg-type]
@@ -476,12 +504,6 @@ class StructuredPhasesProtocol:
             meeting_id=meeting_id,
             conflicts_found=conflicts_detected,
         )
-        logger.debug(
-            MEETING_CONFLICT_DETECTED,
-            meeting_id=meeting_id,
-            conflicts_found=conflicts_detected,
-            raw_response=conflict_response.content,
-        )
 
         should_discuss = conflicts_detected or (
             not self._config.skip_discussion_if_no_conflicts
@@ -540,9 +562,13 @@ class StructuredPhasesProtocol:
             phase=MeetingPhase.DISCUSSION,
         )
 
+        # Reserve tokens for the synthesis phase that follows
+        # discussion so that discussion cannot exhaust the budget.
+        synthesis_reserve = int(tracker.remaining * _SYNTHESIS_RESERVE_FRACTION)
+        available_for_discussion = max(0, tracker.remaining - synthesis_reserve)
         discussion_budget = min(
             self._config.max_discussion_tokens,
-            tracker.remaining,
+            available_for_discussion,
         )
         tokens_per_agent = max(
             1,
@@ -551,9 +577,10 @@ class StructuredPhasesProtocol:
 
         round_contributions: list[MeetingContribution] = []
         round_discussion: list[tuple[str, str]] = []
+        discussion_used = 0
 
         for pid in participant_ids:
-            if tracker.is_exhausted:
+            if tracker.is_exhausted or discussion_used >= discussion_budget:
                 logger.warning(
                     MEETING_BUDGET_EXHAUSTED,
                     meeting_id=meeting_id,
@@ -576,15 +603,17 @@ class StructuredPhasesProtocol:
                 phase=MeetingPhase.DISCUSSION,
             )
 
+            remaining_discussion = discussion_budget - discussion_used
             disc_response = await agent_caller(
                 pid,
                 disc_prompt,
-                min(tokens_per_agent, tracker.remaining),
+                min(tokens_per_agent, remaining_discussion),
             )
             tracker.record(
                 disc_response.input_tokens,
                 disc_response.output_tokens,
             )
+            discussion_used += disc_response.input_tokens + disc_response.output_tokens
 
             disc_contribution = MeetingContribution(
                 agent_id=pid,

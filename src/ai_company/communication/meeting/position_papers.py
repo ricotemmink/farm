@@ -9,6 +9,10 @@ bias and no quadratic context growth.
 import asyncio
 from datetime import UTC, datetime
 
+from ai_company.communication.meeting._parsing import (
+    parse_action_items,
+    parse_decisions,
+)
 from ai_company.communication.meeting._prompts import build_agenda_prompt
 from ai_company.communication.meeting._token_tracker import TokenTracker
 from ai_company.communication.meeting.config import PositionPapersConfig  # noqa: TC001
@@ -30,6 +34,7 @@ from ai_company.observability.events.meeting import (
     MEETING_AGENT_CALLED,
     MEETING_AGENT_RESPONDED,
     MEETING_CONTRIBUTION_RECORDED,
+    MEETING_INTERNAL_ERROR,
     MEETING_PHASE_COMPLETED,
     MEETING_PHASE_STARTED,
     MEETING_SUMMARY_GENERATED,
@@ -65,8 +70,12 @@ def _build_synthesis_prompt(
     parts.append("")
     parts.append(
         "Please synthesize these position papers. Identify areas of "
-        "agreement, conflicts, and produce a list of decisions and "
-        "action items with assignees."
+        "agreement and conflicts, then produce your output using "
+        "exactly these section headers:\n\n"
+        "Decisions:\n"
+        "1. <decision>\n\n"
+        "Action Items:\n"
+        "- <action item> (assigned to <agent_id>)"
     )
     return "\n".join(parts)
 
@@ -146,6 +155,16 @@ class PositionPapersProtocol:
             synthesis_contribution,
         )
 
+        synthesis_text = synthesis_contribution.content
+        decisions = parse_decisions(synthesis_text)
+        raw_action_items = parse_action_items(synthesis_text)
+        allowed_assignees = set(participant_ids) | {leader_id}
+        action_items = tuple(
+            item
+            for item in raw_action_items
+            if item.assignee_id is None or item.assignee_id in allowed_assignees
+        )
+
         logger.debug(
             MEETING_TOKENS_RECORDED,
             meeting_id=meeting_id,
@@ -163,7 +182,9 @@ class PositionPapersProtocol:
             participant_ids=participant_ids,
             agenda=agenda,
             contributions=tuple(contributions),
-            summary=synthesis_contribution.content,
+            summary=synthesis_text,
+            decisions=decisions,
+            action_items=action_items,
             total_input_tokens=tracker.input_tokens,
             total_output_tokens=tracker.output_tokens,
             started_at=started_at,
@@ -269,12 +290,22 @@ class PositionPapersProtocol:
 
         # All slots must be filled — TaskGroup propagates ExceptionGroup
         # on any task failure, so reaching this point means all succeeded.
-        assert all(r is not None for r in results), (  # noqa: S101
-            f"Expected {n} position papers but some slots are None"
-        )
-        assert all(c is not None for c in contrib_results), (  # noqa: S101
-            f"Expected {n} contributions but some slots are None"
-        )
+        if not all(r is not None for r in results):
+            msg = f"Expected {n} position papers but some slots are None"
+            logger.error(
+                MEETING_INTERNAL_ERROR,
+                error=msg,
+                meeting_id=meeting_id,
+            )
+            raise RuntimeError(msg)
+        if not all(c is not None for c in contrib_results):
+            msg = f"Expected {n} contributions but some slots are None"
+            logger.error(
+                MEETING_INTERNAL_ERROR,
+                error=msg,
+                meeting_id=meeting_id,
+            )
+            raise RuntimeError(msg)
         papers: list[tuple[str, str]] = list(results)  # type: ignore[arg-type]
         paper_contributions: list[MeetingContribution] = list(contrib_results)  # type: ignore[arg-type]
 

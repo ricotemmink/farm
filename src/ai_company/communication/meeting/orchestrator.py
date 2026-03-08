@@ -5,7 +5,9 @@ configured protocol, executes the meeting, optionally creates tasks
 from action items, and records audit trail entries.
 """
 
+from collections import Counter
 from collections.abc import Mapping  # noqa: TC003
+from types import MappingProxyType
 from uuid import uuid4
 
 from ai_company.communication.meeting.config import MeetingProtocolConfig  # noqa: TC001
@@ -91,7 +93,9 @@ class MeetingOrchestrator:
         agent_caller: AgentCaller,
         task_creator: TaskCreator | None = None,
     ) -> None:
-        self._protocol_registry = protocol_registry
+        self._protocol_registry: MappingProxyType[
+            MeetingProtocolType, MeetingProtocol
+        ] = MappingProxyType(dict(protocol_registry))
         self._agent_caller = agent_caller
         self._task_creator = task_creator
         self._records: list[MeetingRecord] = []
@@ -129,8 +133,8 @@ class MeetingOrchestrator:
         Raises:
             MeetingProtocolNotFoundError: If the configured protocol
                 is not in the registry.
-            MeetingParticipantError: If participant list is empty or
-                leader is in participants.
+            MeetingParticipantError: If participant list is empty,
+                contains duplicates, or leader is in participants.
             ValueError: If token_budget is not positive.
         """
         meeting_id = f"mtg-{uuid4().hex[:12]}"
@@ -366,8 +370,8 @@ class MeetingOrchestrator:
         """Validate meeting inputs.
 
         Raises:
-            MeetingParticipantError: If participants are empty or leader
-                is in participants.
+            MeetingParticipantError: If participants are empty, contain
+                duplicates, or leader is in participants.
             ValueError: If token_budget is not positive.
         """
         if token_budget <= 0:
@@ -389,6 +393,22 @@ class MeetingOrchestrator:
             raise MeetingParticipantError(
                 msg,
                 context={"meeting_id": meeting_id},
+            )
+        if len(participant_ids) != len(set(participant_ids)):
+            dupes = sorted(v for v, c in Counter(participant_ids).items() if c > 1)
+            logger.warning(
+                MEETING_VALIDATION_FAILED,
+                meeting_id=meeting_id,
+                error="duplicate participant_ids",
+                duplicates=dupes,
+            )
+            msg = f"Duplicate participant IDs: {dupes}"
+            raise MeetingParticipantError(
+                msg,
+                context={
+                    "meeting_id": meeting_id,
+                    "duplicates": dupes,
+                },
             )
         if leader_id in participant_ids:
             logger.warning(

@@ -24,6 +24,8 @@ from ai_company.core.enums import Priority
 _NOW = datetime(2026, 3, 8, 10, 0, tzinfo=UTC)
 _LATER = datetime(2026, 3, 8, 10, 30, tzinfo=UTC)
 
+pytestmark = pytest.mark.timeout(30)
+
 
 @pytest.mark.unit
 class TestAgentResponse:
@@ -187,7 +189,17 @@ class TestMeetingMinutes:
         assert minutes.conflicts_detected is False
 
     def test_total_tokens_computed(self) -> None:
+        contrib = MeetingContribution(
+            agent_id="agent-a",
+            content="Input",
+            phase=MeetingPhase.ROUND_ROBIN_TURN,
+            turn_number=0,
+            input_tokens=100,
+            output_tokens=50,
+            timestamp=_NOW,
+        )
         minutes = self._make_minutes(
+            contributions=(contrib,),
             total_input_tokens=100,
             total_output_tokens=50,
         )
@@ -223,7 +235,11 @@ class TestMeetingMinutes:
             output_tokens=20,
             timestamp=_NOW,
         )
-        minutes = self._make_minutes(contributions=(contrib,))
+        minutes = self._make_minutes(
+            contributions=(contrib,),
+            total_input_tokens=10,
+            total_output_tokens=20,
+        )
         assert len(minutes.contributions) == 1
 
     def test_with_action_items(self) -> None:
@@ -382,6 +398,18 @@ class TestMeetingRecord:
                 token_budget=2000,
             )
 
+    def test_blank_error_message_rejected(self) -> None:
+        """Whitespace-only error_message is rejected via NotBlankStr."""
+        with pytest.raises(ValidationError):
+            MeetingRecord(
+                meeting_id="m-1",
+                meeting_type_name="standup",
+                protocol_type=MeetingProtocolType.ROUND_ROBIN,
+                status=MeetingStatus.FAILED,
+                error_message="   ",
+                token_budget=2000,
+            )
+
     def test_frozen(self) -> None:
         record = MeetingRecord(
             meeting_id="m-1",
@@ -392,3 +420,77 @@ class TestMeetingRecord:
         )
         with pytest.raises(ValidationError):
             record.status = MeetingStatus.COMPLETED  # type: ignore[misc]
+
+
+@pytest.mark.unit
+class TestMeetingMinutesTokenAggregates:
+    """Tests for MeetingMinutes token aggregate validation."""
+
+    def test_mismatched_input_tokens_rejected(self) -> None:
+        """total_input_tokens != sum of contributions raises."""
+        contrib = MeetingContribution(
+            agent_id="agent-a",
+            content="Input",
+            phase=MeetingPhase.ROUND_ROBIN_TURN,
+            turn_number=0,
+            input_tokens=10,
+            output_tokens=20,
+            timestamp=_NOW,
+        )
+        with pytest.raises(ValidationError, match="total_input_tokens"):
+            MeetingMinutes(
+                meeting_id="m-1",
+                protocol_type=MeetingProtocolType.ROUND_ROBIN,
+                leader_id="leader",
+                participant_ids=("agent-a",),
+                agenda=MeetingAgenda(title="Test"),
+                contributions=(contrib,),
+                total_input_tokens=999,
+                total_output_tokens=20,
+                started_at=_NOW,
+                ended_at=_LATER,
+            )
+
+    def test_mismatched_output_tokens_rejected(self) -> None:
+        """total_output_tokens != sum of contributions raises."""
+        contrib = MeetingContribution(
+            agent_id="agent-a",
+            content="Input",
+            phase=MeetingPhase.ROUND_ROBIN_TURN,
+            turn_number=0,
+            input_tokens=10,
+            output_tokens=20,
+            timestamp=_NOW,
+        )
+        with pytest.raises(ValidationError, match="total_output_tokens"):
+            MeetingMinutes(
+                meeting_id="m-1",
+                protocol_type=MeetingProtocolType.ROUND_ROBIN,
+                leader_id="leader",
+                participant_ids=("agent-a",),
+                agenda=MeetingAgenda(title="Test"),
+                contributions=(contrib,),
+                total_input_tokens=10,
+                total_output_tokens=999,
+                started_at=_NOW,
+                ended_at=_LATER,
+            )
+
+    def test_empty_contributions_non_zero_totals_rejected(self) -> None:
+        """Empty contributions with non-zero totals raises."""
+        with pytest.raises(
+            ValidationError,
+            match="must be 0 when contributions are empty",
+        ):
+            MeetingMinutes(
+                meeting_id="m-1",
+                protocol_type=MeetingProtocolType.ROUND_ROBIN,
+                leader_id="leader",
+                participant_ids=("agent-a",),
+                agenda=MeetingAgenda(title="Test"),
+                contributions=(),
+                total_input_tokens=100,
+                total_output_tokens=0,
+                started_at=_NOW,
+                ended_at=_LATER,
+            )

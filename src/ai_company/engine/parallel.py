@@ -178,7 +178,9 @@ class ParallelExecutor:
             if task_error is not None:
                 task_error.add_note(lock_msg)
             else:
-                raise ParallelExecutionError(lock_msg) from release_error
+                raise ParallelExecutionError(
+                    lock_msg,
+                ) from release_error
 
         if task_error is not None:
             raise task_error
@@ -242,7 +244,7 @@ class ParallelExecutor:
             # TaskGroup wraps exceptions in ExceptionGroup when
             # _run_guarded re-raises (fail_fast enabled).
             # Individual errors already logged in _record_error_outcome.
-            logger.debug(
+            logger.warning(
                 PARALLEL_GROUP_SUPPRESSED,
                 error=f"ExceptionGroup suppressed: {eg!r}",
                 group_id=group.group_id,
