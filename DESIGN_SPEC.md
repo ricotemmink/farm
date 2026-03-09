@@ -12,7 +12,7 @@
 4. [Company Structure](#4-company-structure)
 5. [Communication Architecture](#5-communication-architecture) — 5.6 Conflict Resolution, 5.7 Meeting Protocol
 6. [Task & Workflow Engine](#6-task--workflow-engine) — 6.5 Execution Loop, 6.6 Crash Recovery, **6.7 Graceful Shutdown**, **6.8 Workspace Isolation**, **6.9 Task Decomposability & Coordination Topology**
-7. [Memory & Persistence](#7-memory--persistence) — **7.5 Memory Backend Protocol**, 7.4 Shared Org Memory (Research Directions), **7.6 Operational Data Persistence**
+7. [Memory & Persistence](#7-memory--persistence) — 7.4 Shared Org Memory (Research Directions), **7.5 Memory Backend Protocol**, **7.6 Operational Data Persistence**
 8. [HR & Workforce Management](#8-hr--workforce-management)
 9. [Model Provider Layer](#9-model-provider-layer)
 10. [Cost & Budget Management](#10-cost--budget-management)
@@ -1359,7 +1359,7 @@ class MemoryBackend(Protocol):
     @property
     def is_connected(self) -> bool: ...
     @property
-    def backend_name(self) -> str: ...
+    def backend_name(self) -> NotBlankStr: ...
 
     async def store(self, agent_id: NotBlankStr, request: MemoryStoreRequest) -> NotBlankStr: ...
     async def retrieve(self, agent_id: NotBlankStr, query: MemoryQuery) -> tuple[MemoryEntry, ...]: ...
@@ -1482,7 +1482,7 @@ class PersistenceBackend(Protocol):
     @property
     def is_connected(self) -> bool: ...
     @property
-    def backend_name(self) -> str: ...
+    def backend_name(self) -> NotBlankStr: ...
 
     @property
     def tasks(self) -> TaskRepository: ...
@@ -1694,7 +1694,7 @@ providers:
         cost_per_1k_output: 0.0
 ```
 
-### 9.3 LiteLLM Integration (Candidate)
+### 9.3 LiteLLM Integration
 
 Use **LiteLLM** as the provider abstraction layer:
 - Unified API across 100+ providers
@@ -2778,6 +2778,7 @@ ai-company/
 │       │   ├── events/             # Per-domain event constants
 │       │   │   ├── __init__.py    # Package marker with usage docs; no re-exports
 │       │   │   ├── budget.py      # BUDGET_* constants
+│       │   │   ├── classification.py # CLASSIFICATION_* constants
 │       │   │   ├── company.py      # COMPANY_* constants
 │       │   │   ├── communication.py # COMM_* constants
 │       │   │   ├── conflict.py    # CONFLICT_* constants

@@ -37,9 +37,11 @@ class ErrorFinding(BaseModel):
         severity: Severity level of the finding.
         description: Human-readable description of the error.
         evidence: Supporting evidence extracted from the conversation.
-        turn_range: (start, end) message index range where the error
-            was observed, or ``None`` if the error cannot be
-            attributed to specific messages.
+        turn_range: (start, end) 0-based index range where the error
+            was observed, or ``None`` if the error cannot be attributed
+            to specific positions.  For conversation-based detectors
+            this is the message index; for turn-based detectors this
+            is the index into the turns tuple.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -53,7 +55,12 @@ class ErrorFinding(BaseModel):
     )
     turn_range: tuple[int, int] | None = Field(
         default=None,
-        description="Message index range (start, end) where error observed",
+        description=(
+            "0-based index range (start, end) where error was observed.  "
+            "For conversation-based detectors this is the message "
+            "index in the conversation tuple; for turn-based "
+            "detectors this is the index into the turns tuple."
+        ),
     )
 
     @model_validator(mode="after")
@@ -61,7 +68,7 @@ class ErrorFinding(BaseModel):
         if self.turn_range is not None:
             start, end = self.turn_range
             if start < 0 or end < 0:
-                msg = "turn_range indices must be non-negative"
+                msg = "turn_range positions must be non-negative"
                 raise ValueError(msg)
             if start > end:
                 msg = f"turn_range start ({start}) must not exceed end ({end})"
