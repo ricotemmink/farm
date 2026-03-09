@@ -8,6 +8,16 @@ import pytest
 
 from ai_company.observability import events
 from ai_company.observability.events.budget import BUDGET_RECORD_ADDED
+from ai_company.observability.events.classification import (
+    CLASSIFICATION_COMPLETE,
+    CLASSIFICATION_ERROR,
+    CLASSIFICATION_FINDING,
+    CLASSIFICATION_SKIPPED,
+    CLASSIFICATION_START,
+    DETECTOR_COMPLETE,
+    DETECTOR_ERROR,
+    DETECTOR_START,
+)
 from ai_company.observability.events.communication import (
     COMM_BUS_ALREADY_RUNNING,
     COMM_BUS_NOT_RUNNING,
@@ -166,6 +176,7 @@ class TestEventConstants:
         """Every expected domain module is found by pkgutil discovery."""
         expected = {
             "budget",
+            "classification",
             "communication",
             "company",
             "config",
@@ -453,3 +464,13 @@ class TestEventConstants:
         from ai_company.observability.events import persistence as mod
 
         assert getattr(mod, constant_name) == expected
+
+    def test_classification_events_exist(self) -> None:
+        assert CLASSIFICATION_START == "classification.start"
+        assert CLASSIFICATION_COMPLETE == "classification.complete"
+        assert CLASSIFICATION_FINDING == "classification.finding"
+        assert CLASSIFICATION_ERROR == "classification.error"
+        assert CLASSIFICATION_SKIPPED == "classification.skipped"
+        assert DETECTOR_START == "classification.detector.start"
+        assert DETECTOR_COMPLETE == "classification.detector.complete"
+        assert DETECTOR_ERROR == "classification.detector.error"
