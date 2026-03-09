@@ -971,21 +971,22 @@ hybrid:
 Pipeline steps:
 
 1. **Validate inputs** — agent must be `ACTIVE`, task must be `ASSIGNED` or `IN_PROGRESS`. Raises `ExecutionStateError` on violation.
-2. **Build system prompt** — calls `build_system_prompt()` with agent identity, task, and available tool definitions.
-3. **Create context** — `AgentContext.from_identity()` with the configured `max_turns`.
-4. **Seed conversation** — injects system prompt, optional memory messages, and formatted task instruction as initial messages.
-5. **Transition task** — `ASSIGNED` → `IN_PROGRESS` (pass-through if already `IN_PROGRESS`).
-6. **Prepare tools and budget** — creates `ToolInvoker` from registry and `BudgetChecker` from task budget limit.
-7. **Delegate to loop** — calls `ExecutionLoop.execute()` with context, provider, tool invoker, budget checker, and completion config. If `timeout_seconds` is set, wraps the call in `asyncio.wait_for`; on expiry the run returns with `TerminationReason.ERROR` but cost recording and post-execution processing still occur.
-8. **Record costs** — records accumulated `TokenUsage` to `CostTracker` (if available). Cost recording failures are logged but do not affect the result.
-9. **Apply post-execution transitions** — on `COMPLETED` termination: IN_PROGRESS → IN_REVIEW → COMPLETED (two-hop auto-complete in M3; reviewers deferred to M4+). On `SHUTDOWN` termination: current status → INTERRUPTED (see §6.7). On `ERROR` termination: recovery strategy is applied (default `FailAndReassignStrategy` transitions to FAILED; see §6.6). All other termination reasons (`MAX_TURNS`, `BUDGET_EXHAUSTED`) leave the task in its current state. Transition failures are logged but do not discard the successful execution result.
-10. **Return result** — wraps `ExecutionResult` in `AgentRunResult` with engine-level metadata.
+2. **Pre-flight budget enforcement** — if `BudgetEnforcer` is provided, check monthly hard stop and daily limit via `check_can_execute()`, then apply auto-downgrade via `resolve_model()`. Raises `BudgetExhaustedError` or `DailyLimitExceededError` on violation.
+3. **Build system prompt** — calls `build_system_prompt()` with agent identity, task, and available tool definitions.
+4. **Create context** — `AgentContext.from_identity()` with the configured `max_turns`.
+5. **Seed conversation** — injects system prompt, optional memory messages, and formatted task instruction as initial messages.
+6. **Transition task** — `ASSIGNED` → `IN_PROGRESS` (pass-through if already `IN_PROGRESS`).
+7. **Prepare tools and budget** — creates `ToolInvoker` from registry and `BudgetChecker` from `BudgetEnforcer` (task + monthly + daily limits with pre-computed baselines and alert deduplication) or from task budget limit alone when no enforcer is configured.
+8. **Delegate to loop** — calls `ExecutionLoop.execute()` with context, provider, tool invoker, budget checker, and completion config. If `timeout_seconds` is set, wraps the call in `asyncio.wait_for`; on expiry the run returns with `TerminationReason.ERROR` but cost recording and post-execution processing still occur.
+9. **Record costs** — records accumulated `TokenUsage` to `CostTracker` (if available). Cost recording failures are logged but do not affect the result.
+10. **Apply post-execution transitions** — on `COMPLETED` termination: IN_PROGRESS → IN_REVIEW → COMPLETED (two-hop auto-complete in M3; reviewers deferred to M4+). On `SHUTDOWN` termination: current status → INTERRUPTED (see §6.7). On `ERROR` termination: recovery strategy is applied (default `FailAndReassignStrategy` transitions to FAILED; see §6.6). All other termination reasons (`MAX_TURNS`, `BUDGET_EXHAUSTED`) leave the task in its current state. Transition failures are logged but do not discard the successful execution result.
+11. **Return result** — wraps `ExecutionResult` in `AgentRunResult` with engine-level metadata.
 
-Error handling: `MemoryError` and `RecursionError` propagate unconditionally. All other exceptions are caught and wrapped in an `AgentRunResult` with `TerminationReason.ERROR`.
+Error handling: `MemoryError` and `RecursionError` propagate unconditionally. `BudgetExhaustedError` (including `DailyLimitExceededError`) returns `TerminationReason.BUDGET_EXHAUSTED` without recovery — budget exhaustion is a controlled stop, not a crash. All other exceptions are caught and wrapped in an `AgentRunResult` with `TerminationReason.ERROR`.
 
-Constructor accepts: `provider` (required), `execution_loop` (defaults to `ReactLoop`), `tool_registry`, `cost_tracker`. The `run()` method also accepts `memory_messages` — optional working memory to inject between the system prompt and task instruction (memory retrieval is M5; the engine provides the injection hook).
+Constructor accepts: `provider` (required), `execution_loop` (defaults to `ReactLoop`), `tool_registry`, `cost_tracker`, `recovery_strategy` (defaults to `FailAndReassignStrategy`), `shutdown_checker`, `budget_enforcer`. The `run()` method also accepts `memory_messages` — optional working memory to inject between the system prompt and task instruction (memory retrieval is M5; the engine provides the injection hook).
 
-Logs structured events under the `execution.engine.*` namespace (12 constants in `events/execution.py`): creation, start, prompt built, completion, errors, invalid input, task transitions, cost recording outcomes, task metrics, and timeout.
+Logs structured events under the `execution.engine.*` namespace (13 constants in `events/execution.py`): creation, start, prompt built, completion, errors, budget stopped, invalid input, task transitions, cost recording outcomes, task metrics, and timeout.
 
 **`AgentRunResult`** — frozen Pydantic model wrapping `ExecutionResult` with engine metadata:
 
@@ -1778,7 +1779,7 @@ Every API call is tracked (illustrative schema):
 
 ### 10.3 CFO Agent Responsibilities
 
-> **MVP: Not in M3.** Budget tracking and per-task cost recording exist (M2), but the CFO agent is M5+. Cost controls (§10.4) are enforced by the engine, not by an agent.
+> **MVP: Not in M3.** Budget tracking and per-task cost recording exist (M2); cost controls (§10.4) are now enforced by `BudgetEnforcer` (a service the engine composes, not an agent — M5). The CFO agent is M5+.
 
 The CFO agent (when enabled) acts as a cost management system:
 
@@ -1804,6 +1805,7 @@ The CFO agent (when enabled) acts as a cost management system:
 ```yaml
 budget:
   total_monthly: 100.00
+  reset_day: 1
   alerts:
     warn_at: 75               # percent
     critical_at: 90
@@ -1821,6 +1823,15 @@ budget:
 ```
 
 > **Auto-downgrade boundary:** Model downgrades apply only at **task assignment time**, never mid-execution. An agent halfway through an architecture review cannot be switched to a cheaper model — the task completes on its assigned model. The next task assignment respects the downgrade threshold. This prevents quality degradation from mid-thought model switches.
+
+> **Implementation note (M5):** `BudgetEnforcer` composes `CostTracker` +
+> `BudgetConfig` to provide three enforcement layers: (1) pre-flight checks
+> via `check_can_execute` (monthly hard stop + per-agent daily limit), (2)
+> in-flight budget checking via a sync `BudgetChecker` closure with
+> pre-computed baselines (task + monthly + daily limits, alert deduplication),
+> and (3) task-boundary auto-downgrade via `resolve_model`. Billing periods
+> are scoped by `billing_period_start(reset_day)`. `DailyLimitExceededError`
+> is a subclass of `BudgetExhaustedError` for granular error handling.
 
 ### 10.5 LLM Call Analytics
 
@@ -2637,6 +2648,7 @@ ai-company/
 │       │   ├── recovery.py         # Crash recovery strategies (RecoveryStrategy protocol)
 │       │   ├── cost_recording.py   # Per-turn cost recording helpers
 │       │   ├── run_result.py       # AgentRunResult outcome model
+│       │   ├── _validation.py      # Input validation helpers for AgentEngine
 │       │   ├── agent_engine.py     # Agent execution engine
 │       │   ├── parallel.py         # Parallel agent executor (TaskGroup + Semaphore)
 │       │   ├── parallel_models.py  # AgentAssignment, ParallelExecutionGroup, AgentOutcome, ParallelExecutionResult, ParallelProgress
@@ -2864,7 +2876,8 @@ ai-company/
 │       │   ├── spending_summary.py # _SpendingTotals base + spending summary models
 │       │   ├── hierarchy.py        # BudgetHierarchy, BudgetConfig
 │       │   ├── enums.py            # Budget-related enums
-│       │   ├── limits.py           # Budget enforcement (M5)
+│       │   ├── billing.py          # Billing period computation utilities
+│       │   ├── enforcer.py         # BudgetEnforcer service (pre-flight, in-flight, auto-downgrade)
 │       │   ├── optimizer.py        # Cost optimization / CFO logic (M5)
 │       │   └── reports.py          # Spending reports (M5)
 │       ├── api/                     # REST + WebSocket API (M6, stubs only)

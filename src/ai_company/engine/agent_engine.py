@@ -10,10 +10,18 @@ import time
 from typing import TYPE_CHECKING
 
 from ai_company.core.enums import TaskStatus
+from ai_company.engine._validation import (
+    validate_agent,
+    validate_run_inputs,
+    validate_task,
+)
 from ai_company.engine.classification.pipeline import classify_execution_errors
 from ai_company.engine.context import DEFAULT_MAX_TURNS, AgentContext
 from ai_company.engine.cost_recording import record_execution_costs
-from ai_company.engine.errors import ExecutionStateError
+from ai_company.engine.errors import (
+    BudgetExhaustedError,
+    ExecutionStateError,
+)
 from ai_company.engine.loop_protocol import (
     ExecutionResult,
     TerminationReason,
@@ -29,13 +37,9 @@ from ai_company.engine.prompt import (
 from ai_company.engine.react_loop import ReactLoop
 from ai_company.engine.recovery import FailAndReassignStrategy, RecoveryStrategy
 from ai_company.engine.run_result import AgentRunResult
-from ai_company.engine.validation import (
-    validate_agent,
-    validate_run_inputs,
-    validate_task,
-)
 from ai_company.observability import get_logger
 from ai_company.observability.events.execution import (
+    EXECUTION_ENGINE_BUDGET_STOPPED,
     EXECUTION_ENGINE_COMPLETE,
     EXECUTION_ENGINE_CREATED,
     EXECUTION_ENGINE_ERROR,
@@ -53,6 +57,7 @@ from ai_company.tools.permissions import ToolPermissionChecker
 
 if TYPE_CHECKING:
     from ai_company.budget.coordination_config import ErrorTaxonomyConfig
+    from ai_company.budget.enforcer import BudgetEnforcer
     from ai_company.budget.tracker import CostTracker
     from ai_company.core.agent import AgentIdentity
     from ai_company.core.task import Task
@@ -61,7 +66,7 @@ if TYPE_CHECKING:
         ExecutionLoop,
         ShutdownChecker,
     )
-    from ai_company.providers.models import CompletionConfig, ToolDefinition
+    from ai_company.providers.models import CompletionConfig
     from ai_company.providers.protocol import CompletionProvider
     from ai_company.tools.registry import ToolRegistry
 
@@ -80,19 +85,16 @@ class AgentEngine:
 
     Args:
         provider: LLM completion provider (required).
-        execution_loop: Loop implementation. Defaults to ``ReactLoop()``.
+        execution_loop: Defaults to ``ReactLoop()``.
         tool_registry: Optional tools available to the agent.
-        cost_tracker: Optional cost recording service. When ``None``,
-            cost recording is skipped silently.
-        recovery_strategy: Crash recovery strategy. Defaults to a
-            shared ``FailAndReassignStrategy`` instance. Pass ``None``
-            to disable.
-        shutdown_checker: Optional callback; returns ``True`` when a
-            graceful shutdown has been requested.  Passed through to
-            the execution loop.
-        error_taxonomy_config: Optional error taxonomy configuration.
-            When provided and enabled, runs post-execution
-            classification of coordination errors.
+        cost_tracker: Falls back to ``budget_enforcer.cost_tracker``
+            when ``None`` and ``budget_enforcer`` is provided. Must
+            match ``budget_enforcer.cost_tracker`` if both supplied.
+        recovery_strategy: Defaults to ``FailAndReassignStrategy``.
+        shutdown_checker: Returns ``True`` for graceful shutdown.
+        error_taxonomy_config: Post-execution error classification.
+        budget_enforcer: Pre-flight checks, auto-downgrade, and
+            enhanced in-flight budget checking.
     """
 
     def __init__(  # noqa: PLR0913
@@ -105,11 +107,26 @@ class AgentEngine:
         recovery_strategy: RecoveryStrategy | None = _DEFAULT_RECOVERY_STRATEGY,
         shutdown_checker: ShutdownChecker | None = None,
         error_taxonomy_config: ErrorTaxonomyConfig | None = None,
+        budget_enforcer: BudgetEnforcer | None = None,
     ) -> None:
         self._provider = provider
         self._loop: ExecutionLoop = execution_loop or ReactLoop()
         self._tool_registry = tool_registry
-        self._cost_tracker = cost_tracker
+        self._budget_enforcer = budget_enforcer
+        self._cost_tracker: CostTracker | None
+        if budget_enforcer is not None:
+            if (
+                cost_tracker is not None
+                and cost_tracker is not budget_enforcer.cost_tracker
+            ):
+                msg = (
+                    "cost_tracker must match budget_enforcer.cost_tracker "
+                    "when budget_enforcer is provided"
+                )
+                raise ValueError(msg)
+            self._cost_tracker = budget_enforcer.cost_tracker
+        else:
+            self._cost_tracker = cost_tracker
         self._recovery_strategy = recovery_strategy
         self._shutdown_checker = shutdown_checker
         self._error_taxonomy_config = error_taxonomy_config
@@ -118,6 +135,7 @@ class AgentEngine:
             loop_type=self._loop.get_loop_type(),
             has_tool_registry=self._tool_registry is not None,
             has_cost_tracker=self._cost_tracker is not None,
+            has_budget_enforcer=self._budget_enforcer is not None,
         )
 
     async def run(  # noqa: PLR0913
@@ -162,6 +180,11 @@ class AgentEngine:
         ctx: AgentContext | None = None
         system_prompt: SystemPrompt | None = None
         try:
+            # Pre-flight budget enforcement
+            if self._budget_enforcer:
+                await self._budget_enforcer.check_can_execute(agent_id)
+                identity = await self._budget_enforcer.resolve_model(identity)
+
             tool_invoker = self._make_tool_invoker(identity)
             ctx, system_prompt = self._prepare_context(
                 identity=identity,
@@ -185,14 +208,24 @@ class AgentEngine:
                 tool_invoker=tool_invoker,
             )
         except MemoryError, RecursionError:
-            logger.error(
+            logger.exception(
                 EXECUTION_ENGINE_ERROR,
                 agent_id=agent_id,
                 task_id=task_id,
                 error="non-recoverable error in run()",
-                exc_info=True,
             )
             raise
+        except BudgetExhaustedError as exc:
+            return self._handle_budget_error(
+                exc=exc,
+                identity=identity,
+                task=task,
+                agent_id=agent_id,
+                task_id=task_id,
+                duration_seconds=time.monotonic() - start,
+                ctx=ctx,
+                system_prompt=system_prompt,
+            )
         except Exception as exc:
             return await self._handle_fatal_error(
                 exc=exc,
@@ -220,7 +253,14 @@ class AgentEngine:
         tool_invoker: ToolInvoker | None = None,
     ) -> AgentRunResult:
         """Run execution loop, record costs, apply transitions, and build result."""
-        budget_checker = make_budget_checker(task)
+        budget_checker: BudgetChecker | None
+        if self._budget_enforcer:
+            budget_checker = await self._budget_enforcer.make_budget_checker(
+                task,
+                agent_id,
+            )
+        else:
+            budget_checker = make_budget_checker(task)
 
         logger.debug(
             EXECUTION_ENGINE_PROMPT_BUILT,
@@ -402,7 +442,7 @@ class AgentEngine:
         tool_invoker: ToolInvoker | None = None,
     ) -> tuple[AgentContext, SystemPrompt]:
         """Build system prompt and prepare execution context."""
-        tool_defs = self._get_tool_definitions(tool_invoker)
+        tool_defs = tool_invoker.get_permitted_definitions() if tool_invoker else ()
         system_prompt = build_system_prompt(
             agent=identity,
             task=task,
@@ -430,15 +470,6 @@ class AgentEngine:
         return ctx, system_prompt
 
     # ── Helpers ──────────────────────────────────────────────────
-
-    def _get_tool_definitions(
-        self,
-        tool_invoker: ToolInvoker | None,
-    ) -> tuple[ToolDefinition, ...]:
-        """Extract permitted tool definitions for prompt building."""
-        if tool_invoker is None:
-            return ()
-        return tool_invoker.get_permitted_definitions()
 
     def _transition_task_if_needed(
         self,
@@ -653,6 +684,54 @@ class AgentEngine:
             duration_seconds=metrics.duration_seconds,
         )
 
+    def _handle_budget_error(  # noqa: PLR0913
+        self,
+        *,
+        exc: BudgetExhaustedError,
+        identity: AgentIdentity,
+        task: Task,
+        agent_id: str,
+        task_id: str,
+        duration_seconds: float,
+        ctx: AgentContext | None = None,
+        system_prompt: SystemPrompt | None = None,
+    ) -> AgentRunResult:
+        """Build a BUDGET_EXHAUSTED result (no recovery — controlled stop)."""
+        logger.warning(
+            EXECUTION_ENGINE_BUDGET_STOPPED,
+            agent_id=agent_id,
+            task_id=task_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        try:
+            error_ctx = ctx or AgentContext.from_identity(identity, task=task)
+            budget_result = ExecutionResult(
+                context=error_ctx,
+                termination_reason=TerminationReason.BUDGET_EXHAUSTED,
+            )
+            error_prompt = build_error_prompt(
+                identity,
+                agent_id,
+                system_prompt,
+            )
+            return AgentRunResult(
+                execution_result=budget_result,
+                system_prompt=error_prompt,
+                duration_seconds=duration_seconds,
+                agent_id=agent_id,
+                task_id=task_id,
+            )
+        except MemoryError, RecursionError:
+            raise
+        except Exception as build_exc:
+            logger.exception(
+                EXECUTION_ENGINE_ERROR,
+                agent_id=agent_id,
+                task_id=task_id,
+                error=f"Failed to build budget-exhausted result: {build_exc}",
+            )
+            raise exc from None
+
     async def _handle_fatal_error(  # noqa: PLR0913
         self,
         *,
@@ -700,12 +779,11 @@ class AgentEngine:
                 task_id=task_id,
             )
         except MemoryError, RecursionError:
-            logger.error(
+            logger.exception(
                 EXECUTION_ENGINE_ERROR,
                 agent_id=agent_id,
                 task_id=task_id,
                 error="non-recoverable error while building error result",
-                exc_info=True,
             )
             raise
         except Exception as build_exc:
@@ -716,7 +794,7 @@ class AgentEngine:
                 error=f"Failed to build error result: {build_exc}",
                 original_error=error_msg,
             )
-            raise exc from build_exc
+            raise exc from None
 
     async def _build_error_execution(  # noqa: PLR0913
         self,
