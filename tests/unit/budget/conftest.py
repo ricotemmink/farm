@@ -19,12 +19,15 @@ from ai_company.budget.hierarchy import (
     DepartmentBudget,
     TeamBudget,
 )
+from ai_company.budget.optimizer import CostOptimizer
+from ai_company.budget.optimizer_models import CostOptimizerConfig
 from ai_company.budget.quota import (
     QuotaLimit,
     QuotaWindow,
     SubscriptionConfig,
 )
 from ai_company.budget.quota_tracker import QuotaTracker
+from ai_company.budget.reports import ReportGenerator
 from ai_company.budget.spending_summary import (
     AgentSpending,
     DepartmentSpending,
@@ -32,6 +35,8 @@ from ai_company.budget.spending_summary import (
     SpendingSummary,
 )
 from ai_company.budget.tracker import CostTracker
+from ai_company.providers.routing.models import ResolvedModel
+from ai_company.providers.routing.resolver import ModelResolver
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -103,6 +108,10 @@ class SpendingSummaryFactory(ModelFactory[SpendingSummary]):
     period = PeriodSpendingFactory
     by_agent = ()
     by_department = ()
+
+
+class CostOptimizerConfigFactory(ModelFactory[CostOptimizerConfig]):
+    __model__ = CostOptimizerConfig
 
 
 class CostTierDefinitionFactory(ModelFactory[CostTierDefinition]):
@@ -297,4 +306,99 @@ def make_cost_record(  # noqa: PLR0913
         output_tokens=output_tokens,
         cost_usd=cost_usd,
         timestamp=timestamp or datetime(2026, 2, 15, 12, 0, 0, tzinfo=UTC),
+    )
+
+
+# ── CostOptimizer test helpers ───────────────────────────────────
+
+OPT_START = datetime(2026, 2, 1, tzinfo=UTC)
+OPT_END = datetime(2026, 3, 1, tzinfo=UTC)
+
+
+def make_optimizer(
+    *,
+    budget_config: BudgetConfig | None = None,
+    config: CostOptimizerConfig | None = None,
+    model_resolver: ModelResolver | None = None,
+) -> tuple[CostOptimizer, CostTracker]:
+    """Build a CostOptimizer with a fresh CostTracker."""
+    bc = budget_config or BudgetConfig(total_monthly=100.0)
+    tracker = CostTracker(budget_config=bc)
+    optimizer = CostOptimizer(
+        cost_tracker=tracker,
+        budget_config=bc,
+        config=config,
+        model_resolver=model_resolver,
+    )
+    return optimizer, tracker
+
+
+def make_resolver(
+    models: list[ResolvedModel] | None = None,
+) -> ModelResolver:
+    """Build a ModelResolver from a list of ResolvedModel."""
+    if models is None:
+        models = [
+            ResolvedModel(
+                provider_name="test-provider",
+                model_id="test-large-001",
+                alias="large",
+                cost_per_1k_input=0.03,
+                cost_per_1k_output=0.06,
+            ),
+            ResolvedModel(
+                provider_name="test-provider",
+                model_id="test-medium-001",
+                alias="medium",
+                cost_per_1k_input=0.01,
+                cost_per_1k_output=0.02,
+            ),
+            ResolvedModel(
+                provider_name="test-provider",
+                model_id="test-small-001",
+                alias="small",
+                cost_per_1k_input=0.001,
+                cost_per_1k_output=0.002,
+            ),
+        ]
+    index: dict[str, ResolvedModel] = {}
+    for m in models:
+        index[m.model_id] = m
+        if m.alias is not None:
+            index[m.alias] = m
+    return ModelResolver(index)
+
+
+# ── CFO / CostOptimizer fixtures ─────────────────────────────────
+
+
+@pytest.fixture
+def cost_optimizer_config() -> CostOptimizerConfig:
+    """Default CostOptimizerConfig for tests."""
+    return CostOptimizerConfig()
+
+
+@pytest.fixture
+def cost_optimizer(
+    budget_config_for_tracker: BudgetConfig,
+    cost_tracker: CostTracker,
+    cost_optimizer_config: CostOptimizerConfig,
+) -> CostOptimizer:
+    """CostOptimizer wired with tracker and config."""
+    return CostOptimizer(
+        cost_tracker=cost_tracker,
+        budget_config=budget_config_for_tracker,
+        config=cost_optimizer_config,
+    )
+
+
+@pytest.fixture
+def report_generator(
+    budget_config_for_tracker: BudgetConfig,
+    cost_tracker: CostTracker,
+) -> ReportGenerator:
+    """ReportGenerator wired with tracker and config."""
+    return ReportGenerator(
+        cost_tracker=cost_tracker,
+        budget_config=budget_config_for_tracker,
     )

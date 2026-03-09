@@ -4,8 +4,8 @@ Provides an append-only in-memory store for :class:`CostRecord` entries and
 aggregation queries consumed by the CFO agent and budget monitoring.
 
 Service layer for the cost tracking schema defined in DESIGN_SPEC Section 10.2.
-Persistence (SQLite) is deferred to M5; the current implementation is purely
-in-memory.
+The current implementation is purely in-memory; persistence integration is
+planned as part of M5.
 """
 
 import asyncio
@@ -36,6 +36,7 @@ from ai_company.observability.events.budget import (
     BUDGET_ORCHESTRATION_RATIO_ALERT,
     BUDGET_ORCHESTRATION_RATIO_QUERIED,
     BUDGET_RECORD_ADDED,
+    BUDGET_RECORDS_QUERIED,
     BUDGET_SUMMARY_BUILT,
     BUDGET_TIME_RANGE_INVALID,
     BUDGET_TOTAL_COST_QUERIED,
@@ -180,6 +181,48 @@ class CostTracker:
         """
         async with self._lock:
             return len(self._records)
+
+    async def get_records(
+        self,
+        *,
+        agent_id: str | None = None,
+        task_id: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> tuple[CostRecord, ...]:
+        """Return filtered cost records.
+
+        Returns an immutable snapshot of records matching the filters.
+
+        Args:
+            agent_id: Filter by agent.
+            task_id: Filter by task.
+            start: Inclusive lower bound on ``timestamp``.
+            end: Exclusive upper bound on ``timestamp``.
+
+        Returns:
+            Immutable tuple of matching cost records.
+
+        Raises:
+            ValueError: If both *start* and *end* are given and
+                ``start >= end``.
+        """
+        _validate_time_range(start, end)
+        logger.debug(
+            BUDGET_RECORDS_QUERIED,
+            agent_id=agent_id,
+            task_id=task_id,
+            start=start,
+            end=end,
+        )
+        snapshot = await self._snapshot()
+        return _filter_records(
+            snapshot,
+            agent_id=agent_id,
+            task_id=task_id,
+            start=start,
+            end=end,
+        )
 
     async def build_summary(
         self,
