@@ -6,7 +6,6 @@ lifecycle hooks (startup/shutdown).
 """
 
 import time
-from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -25,7 +24,7 @@ from ai_company.api.channels import CHANNEL_APPROVALS, create_channels_plugin
 from ai_company.api.controllers import ALL_CONTROLLERS
 from ai_company.api.controllers.ws import ws_handler
 from ai_company.api.exception_handlers import EXCEPTION_HANDLERS
-from ai_company.api.middleware import RequestLoggingMiddleware
+from ai_company.api.middleware import CSPMiddleware, RequestLoggingMiddleware
 from ai_company.api.state import AppState
 from ai_company.api.ws_models import WsEvent, WsEventType
 from ai_company.budget.tracker import CostTracker  # noqa: TC001
@@ -44,6 +43,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from litestar.channels import ChannelsPlugin
+    from litestar.types import Middleware
 
     from ai_company.api.config import ApiConfig
 
@@ -335,12 +335,8 @@ def create_app(
                 name="Permissions-Policy",
                 value="geolocation=(), camera=(), microphone=()",
             ),
-            ResponseHeader(
-                name="Content-Security-Policy",
-                value="default-src 'self'; script-src 'self'",
-            ),
         ],
-        middleware=middleware,  # type: ignore[arg-type]
+        middleware=middleware,
         plugins=plugins,
         exception_handlers=EXCEPTION_HANDLERS,  # type: ignore[arg-type]
         openapi_config=OpenAPIConfig(
@@ -366,11 +362,11 @@ def _build_bridge(
     return MessageBusBridge(message_bus, channels_plugin)
 
 
-def _build_middleware(api_config: ApiConfig) -> list[object]:
+def _build_middleware(api_config: ApiConfig) -> list[Middleware]:
     """Build the middleware stack from configuration."""
     rl = api_config.rate_limit
     rate_limit = LitestarRateLimitConfig(
         rate_limit=(rl.time_unit, rl.max_requests),  # type: ignore[arg-type]
         exclude=list(rl.exclude_paths),
     )
-    return [RequestLoggingMiddleware, rate_limit.middleware]
+    return [CSPMiddleware, RequestLoggingMiddleware, rate_limit.middleware]

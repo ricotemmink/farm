@@ -1,0 +1,241 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Extract app version from pyproject.toml (single source of truth)
+  version:
+    name: Extract Version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      app_version: ${{ steps.version.outputs.app_version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Extract version from pyproject.toml
+        id: version
+        run: |
+          VERSION=$(python3 -c "
+          import tomllib
+          import sys
+          try:
+              with open('pyproject.toml', 'rb') as f:
+                  data = tomllib.load(f)
+              print(data['tool']['commitizen']['version'])
+          except (KeyError, FileNotFoundError) as e:
+              print(f'::error::Failed to extract version: {e}', file=sys.stderr)
+              sys.exit(1)
+          ")
+          echo "app_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "App version: ${VERSION}"
+
+  build-backend:
+    name: Build Backend
+    needs: [version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/aureliolo/ai-company-backend
+          tags: |
+            type=raw,value=${{ needs.version.outputs.app_version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,prefix=sha-
+
+      # Build locally first, scan, then push only if scans pass
+      - name: Build image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/backend/Dockerfile
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      # SHA tag always exists (version/semver tags only on v* tags)
+      - name: Compute scan image ref
+        id: scan-ref
+        run: echo "ref=ghcr.io/aureliolo/ai-company-backend:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ steps.scan-ref.outputs.ref }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+
+      - name: Grype scan
+        uses: anchore/scan-action@1638637db639e0ade3258b51db49a9a137574c3e # v6
+        with:
+          image: ${{ steps.scan-ref.outputs.ref }}
+          fail-build: true
+          severity-cutoff: high
+
+      # Push only after both scans pass — prevents publishing vulnerable images.
+      # NOTE: This is a separate build invocation from the scan step. GHA cache
+      # ensures deterministic layer content, but the manifest digest differs due
+      # to SBOM + provenance attestation layers added only on push.
+      - name: Push image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/backend/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          platforms: linux/amd64
+          sbom: true
+          provenance: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Sign image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          if [ -z "$DIGEST" ]; then
+            echo "::error::Push step did not produce a digest — cannot sign image"
+            exit 1
+          fi
+          cosign sign --yes ghcr.io/aureliolo/ai-company-backend@${DIGEST}
+
+  build-web:
+    name: Build Web
+    needs: [version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/aureliolo/ai-company-web
+          tags: |
+            type=raw,value=${{ needs.version.outputs.app_version }},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha,prefix=sha-
+
+      # Build locally first, scan, then push only if scans pass
+      - name: Build image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/web/Dockerfile
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      # SHA tag always exists (version/semver tags only on v* tags)
+      - name: Compute scan image ref
+        id: scan-ref
+        run: echo "ref=ghcr.io/aureliolo/ai-company-web:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ steps.scan-ref.outputs.ref }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+
+      - name: Grype scan
+        uses: anchore/scan-action@1638637db639e0ade3258b51db49a9a137574c3e # v6
+        with:
+          image: ${{ steps.scan-ref.outputs.ref }}
+          fail-build: true
+          severity-cutoff: high
+
+      # Push only after both scans pass — prevents publishing vulnerable images.
+      # NOTE: Separate build invocation; GHA cache ensures deterministic layers,
+      # but manifest digest differs due to SBOM + provenance attestation layers.
+      - name: Push image
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/web/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          platforms: linux/amd64
+          sbom: true
+          provenance: true
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Sign image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          if [ -z "$DIGEST" ]; then
+            echo "::error::Push step did not produce a digest — cannot sign image"
+            exit 1
+          fi
+          cosign sign --yes ghcr.io/aureliolo/ai-company-web@${DIGEST}
