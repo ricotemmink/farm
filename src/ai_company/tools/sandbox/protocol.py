@@ -19,8 +19,7 @@ class SandboxBackend(Protocol):
 
     Implementations execute commands in an isolated environment with
     environment filtering, workspace enforcement, and timeout support.
-    Subprocess is the initial backend; Docker/K8s are planned for
-    future milestones.
+    Subprocess and Docker are built-in backends.
     """
 
     async def execute(
@@ -38,7 +37,7 @@ class SandboxBackend(Protocol):
             command: Executable name or path.
             args: Command arguments.
             cwd: Working directory (defaults to sandbox workspace root).
-            env_overrides: Extra env vars applied on top of filtered env.
+            env_overrides: Extra environment variables for the sandbox.
             timeout: Seconds before the process is killed. Falls back
                 to the backend's default timeout if ``None``.
 
