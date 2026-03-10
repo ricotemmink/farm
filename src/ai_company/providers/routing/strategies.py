@@ -7,9 +7,8 @@ singletons registered in a module-level mapping.
 
 from collections.abc import Mapping  # noqa: TC003
 from types import MappingProxyType
-from typing import Final, NoReturn, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, NoReturn, Protocol, runtime_checkable
 
-from ai_company.config.schema import RoutingConfig  # noqa: TC001
 from ai_company.core.enums import SeniorityLevel  # noqa: TC001
 from ai_company.core.role_catalog import get_seniority_info
 from ai_company.observability import get_logger
@@ -34,6 +33,9 @@ from ._strategy_helpers import (
 from .errors import ModelResolutionError, NoAvailableModelError
 from .models import RoutingDecision, RoutingRequest
 from .resolver import ModelResolver  # noqa: TC001
+
+if TYPE_CHECKING:
+    from ai_company.config.schema import RoutingConfig
 
 logger = get_logger(__name__)
 

@@ -7,8 +7,8 @@ immutability after construction.
 """
 
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
-from ai_company.config.schema import ProviderConfig  # noqa: TC001
 from ai_company.observability import get_logger
 from ai_company.observability.events.routing import (
     ROUTING_MODEL_RESOLUTION_FAILED,
@@ -18,6 +18,9 @@ from ai_company.observability.events.routing import (
 
 from .errors import ModelResolutionError
 from .models import ResolvedModel
+
+if TYPE_CHECKING:
+    from ai_company.config.schema import ProviderConfig
 
 logger = get_logger(__name__)
 
