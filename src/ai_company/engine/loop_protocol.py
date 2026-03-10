@@ -32,6 +32,7 @@ class TerminationReason(StrEnum):
     MAX_TURNS = "max_turns"
     BUDGET_EXHAUSTED = "budget_exhausted"
     SHUTDOWN = "shutdown"
+    PARKED = "parked"
     ERROR = "error"
 
 
@@ -122,6 +123,10 @@ class ExecutionResult(BaseModel):
         if self.termination_reason == TerminationReason.ERROR:
             if self.error_message is None:
                 msg = "error_message is required when termination_reason is ERROR"
+                raise ValueError(msg)
+        elif self.termination_reason == TerminationReason.PARKED:
+            if self.error_message is not None:
+                msg = "error_message must be None for PARKED termination"
                 raise ValueError(msg)
         elif self.error_message is not None:
             msg = "error_message must be None when termination_reason is not ERROR"

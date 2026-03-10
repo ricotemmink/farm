@@ -43,6 +43,8 @@ from ai_company.core.enums import (
 from ai_company.core.project import Project
 from ai_company.core.role import Authority, CustomRole, Role, SeniorityInfo, Skill
 from ai_company.core.task import AcceptanceCriterion, Task
+from ai_company.security.autonomy.models import AutonomyConfig
+from ai_company.security.timeout.config import WaitForeverConfig
 
 # ── Factories ──────────────────────────────────────────────────────
 
@@ -130,6 +132,8 @@ class DepartmentFactory(ModelFactory[Department]):
 
 class CompanyConfigFactory(ModelFactory[CompanyConfig]):
     __model__ = CompanyConfig
+    autonomy = AutonomyConfig()
+    approval_timeout = WaitForeverConfig()
 
 
 class HRRegistryFactory(ModelFactory[HRRegistry]):
@@ -153,6 +157,7 @@ class CompanyFactory(ModelFactory[Company]):
     departments = ()
     workflow_handoffs = ()
     escalation_paths = ()
+    config = CompanyConfigFactory
 
 
 class ExpectedArtifactFactory(ModelFactory[ExpectedArtifact]):

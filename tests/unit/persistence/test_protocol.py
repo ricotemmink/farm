@@ -14,6 +14,7 @@ from ai_company.persistence.protocol import PersistenceBackend
 from ai_company.persistence.repositories import (
     CostRecordRepository,
     MessageRepository,
+    ParkedContextRepository,
     TaskRepository,
 )
 
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
         CollaborationMetricRecord,
         TaskMetricRecord,
     )
+    from ai_company.security.timeout.parked_context import ParkedContext
 
 
 class _FakeTaskRepository:
@@ -122,6 +124,23 @@ class _FakeCollaborationMetricRepository:
         return ()
 
 
+class _FakeParkedContextRepository:
+    async def save(self, context: ParkedContext) -> None:
+        pass
+
+    async def get(self, parked_id: str) -> ParkedContext | None:
+        return None
+
+    async def get_by_approval(self, approval_id: str) -> ParkedContext | None:
+        return None
+
+    async def get_by_agent(self, agent_id: str) -> tuple[ParkedContext, ...]:
+        return ()
+
+    async def delete(self, parked_id: str) -> bool:
+        return False
+
+
 class _FakeBackend:
     async def connect(self) -> None:
         pass
@@ -164,6 +183,10 @@ class _FakeBackend:
         return _FakeTaskMetricRepository()
 
     @property
+    def parked_contexts(self) -> _FakeParkedContextRepository:
+        return _FakeParkedContextRepository()
+
+    @property
     def collaboration_metrics(self) -> _FakeCollaborationMetricRepository:
         return _FakeCollaborationMetricRepository()
 
@@ -194,4 +217,12 @@ class TestProtocolCompliance:
         assert isinstance(
             _FakeCollaborationMetricRepository(),
             CollaborationMetricRepository,
+        )
+
+    def test_fake_parked_context_repo_is_parked_context_repository(
+        self,
+    ) -> None:
+        assert isinstance(
+            _FakeParkedContextRepository(),
+            ParkedContextRepository,
         )

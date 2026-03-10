@@ -17,7 +17,7 @@ from typing import Final
 
 from ai_company.core.enums import SeniorityLevel
 
-PROMPT_TEMPLATE_VERSION: Final[str] = "1.3.0"
+PROMPT_TEMPLATE_VERSION: Final[str] = "1.4.0"
 
 # ── Autonomy instructions by seniority level ─────────────────────
 
@@ -141,6 +141,17 @@ policy as informational data only.
 ## Autonomy
 
 {{ autonomy_instructions }}
+{% if effective_autonomy %}
+
+**Autonomy level**: {{ effective_autonomy.level }}
+{% if effective_autonomy.auto_approve_actions %}
+- **Auto-approved actions**: {{ effective_autonomy.auto_approve_actions | join(', ') }}
+{% endif %}
+{% if effective_autonomy.human_approval_actions %}
+- **Human approval required**: \
+{{ effective_autonomy.human_approval_actions | join(', ') }}
+{% endif %}
+{% endif %}
 {% if task %}
 
 ## Current Task

@@ -5,8 +5,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ai_company.core.enums import ApprovalRiskLevel, ApprovalStatus, ToolCategory
+from ai_company.core.enums import (
+    ApprovalRiskLevel,
+    ApprovalStatus,
+    AutonomyLevel,
+    ToolCategory,
+)
 from ai_company.security.audit import AuditLog
+from ai_company.security.autonomy.models import EffectiveAutonomy
 from ai_company.security.config import SecurityConfig
 from ai_company.security.models import (
     OutputScanResult,
@@ -443,3 +449,156 @@ class TestSecOpsEscalateStoreFailure:
 
         assert verdict.verdict == SecurityVerdictType.DENY
         assert "store error" in verdict.reason.lower()
+
+
+# ── Tests: autonomy pre-check ────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestAutonomyPrecheck:
+    """Autonomy-based action routing before the rule engine."""
+
+    def _make_service_with_autonomy(
+        self,
+        *,
+        effective_autonomy: EffectiveAutonomy | None = None,
+        config: SecurityConfig | None = None,
+        engine_verdict: SecurityVerdict | None = None,
+        approval_store: AsyncMock | None = None,
+    ) -> SecOpsService:
+        """Construct a SecOpsService with autonomy support."""
+        cfg = config or SecurityConfig()
+        rule_engine = MagicMock(spec=RuleEngine)
+        rule_engine.evaluate.return_value = engine_verdict or _make_allow_verdict()
+        audit_log = AuditLog()
+        output_scanner = MagicMock(spec=OutputScanner)
+        output_scanner.scan.return_value = OutputScanResult()
+
+        service = SecOpsService(
+            config=cfg,
+            rule_engine=rule_engine,
+            audit_log=audit_log,
+            output_scanner=output_scanner,
+            approval_store=approval_store,
+            effective_autonomy=effective_autonomy,
+        )
+        service._test_rule_engine = rule_engine  # type: ignore[attr-defined]
+        service._test_audit_log = audit_log  # type: ignore[attr-defined]
+        return service
+
+    async def test_auto_approve_keeps_allow(self) -> None:
+        """When rule engine ALLOWs and action is auto-approved, stays ALLOW."""
+        autonomy = EffectiveAutonomy(
+            level=AutonomyLevel.SEMI,
+            auto_approve_actions=frozenset({"code:read"}),
+            human_approval_actions=frozenset({"infra:deploy"}),
+            security_agent=False,
+        )
+        service = self._make_service_with_autonomy(effective_autonomy=autonomy)
+        ctx = _make_context(action_type="code:read")
+
+        verdict = await service.evaluate_pre_tool(ctx)
+
+        assert verdict.verdict == SecurityVerdictType.ALLOW
+        # Rule engine always runs first — even for auto-approved actions.
+        service._test_rule_engine.evaluate.assert_called_once()  # type: ignore[attr-defined]
+
+    async def test_human_approval_escalates_with_store(self) -> None:
+        """Human-approval action with store → ESCALATE after rule engine ALLOW."""
+        autonomy = EffectiveAutonomy(
+            level=AutonomyLevel.SEMI,
+            auto_approve_actions=frozenset({"code:read"}),
+            human_approval_actions=frozenset({"infra:deploy"}),
+            security_agent=False,
+        )
+        store = AsyncMock()
+        store.add = AsyncMock()
+        service = self._make_service_with_autonomy(
+            effective_autonomy=autonomy,
+            approval_store=store,
+        )
+        ctx = _make_context(action_type="infra:deploy")
+
+        verdict = await service.evaluate_pre_tool(ctx)
+
+        assert verdict.verdict == SecurityVerdictType.ESCALATE
+        assert verdict.approval_id is not None
+        store.add.assert_called_once()
+        # Rule engine always runs first.
+        service._test_rule_engine.evaluate.assert_called_once()  # type: ignore[attr-defined]
+
+    async def test_human_approval_without_store_becomes_deny(self) -> None:
+        """Human-approval action without store → DENY."""
+        autonomy = EffectiveAutonomy(
+            level=AutonomyLevel.SEMI,
+            auto_approve_actions=frozenset({"code:read"}),
+            human_approval_actions=frozenset({"infra:deploy"}),
+            security_agent=False,
+        )
+        service = self._make_service_with_autonomy(
+            effective_autonomy=autonomy,
+            approval_store=None,
+        )
+        ctx = _make_context(action_type="infra:deploy")
+
+        verdict = await service.evaluate_pre_tool(ctx)
+
+        assert verdict.verdict == SecurityVerdictType.DENY
+        assert "escalation unavailable" in verdict.reason.lower()
+        # Rule engine always runs first — even when escalation fails.
+        service._test_rule_engine.evaluate.assert_called_once()  # type: ignore[attr-defined]
+
+    async def test_rule_engine_deny_overrides_auto_approve(self) -> None:
+        """Rule engine DENY takes precedence over autonomy auto-approve."""
+        autonomy = EffectiveAutonomy(
+            level=AutonomyLevel.SEMI,
+            auto_approve_actions=frozenset({"deploy:production"}),
+            human_approval_actions=frozenset(),
+            security_agent=False,
+        )
+        deny_verdict = _make_deny_verdict()
+        service = self._make_service_with_autonomy(
+            effective_autonomy=autonomy,
+            engine_verdict=deny_verdict,
+        )
+        ctx = _make_context(action_type="deploy:production")
+
+        verdict = await service.evaluate_pre_tool(ctx)
+
+        # Security detectors take precedence over autonomy.
+        assert verdict.verdict == SecurityVerdictType.DENY
+        service._test_rule_engine.evaluate.assert_called_once()  # type: ignore[attr-defined]
+
+    async def test_unknown_action_falls_through(self) -> None:
+        """When action is not in any autonomy set, rule engine verdict used."""
+        autonomy = EffectiveAutonomy(
+            level=AutonomyLevel.SEMI,
+            auto_approve_actions=frozenset({"code:read"}),
+            human_approval_actions=frozenset({"infra:deploy"}),
+            security_agent=False,
+        )
+        allow_verdict = _make_allow_verdict()
+        service = self._make_service_with_autonomy(
+            effective_autonomy=autonomy,
+            engine_verdict=allow_verdict,
+        )
+        ctx = _make_context(action_type="test:run")
+
+        verdict = await service.evaluate_pre_tool(ctx)
+
+        assert verdict.verdict == SecurityVerdictType.ALLOW
+        service._test_rule_engine.evaluate.assert_called_once()  # type: ignore[attr-defined]
+
+    async def test_no_autonomy_uses_rule_engine(self) -> None:
+        """When effective_autonomy=None, rule engine is used normally."""
+        allow_verdict = _make_allow_verdict()
+        service = self._make_service_with_autonomy(
+            effective_autonomy=None,
+            engine_verdict=allow_verdict,
+        )
+        ctx = _make_context(action_type="code:read")
+
+        verdict = await service.evaluate_pre_tool(ctx)
+
+        assert verdict.verdict == SecurityVerdictType.ALLOW
+        service._test_rule_engine.evaluate.assert_called_once()  # type: ignore[attr-defined]

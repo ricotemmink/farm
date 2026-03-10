@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ai_company.core.enums import (
     AgentStatus,
+    AutonomyLevel,
     CollaborationPreference,
     CommunicationVerbosity,
     ConflictApproach,
@@ -316,8 +317,26 @@ class AgentIdentity(BaseModel):
         default_factory=Authority,
         description="Authority scope",
     )
+    autonomy_level: AutonomyLevel | None = Field(
+        default=None,
+        description="Per-agent autonomy level override (D6)",
+    )
     hiring_date: date = Field(description="Date the agent was hired")
     status: AgentStatus = Field(
         default=AgentStatus.ACTIVE,
         description="Current lifecycle status",
     )
+
+    @model_validator(mode="after")
+    def _validate_seniority_autonomy(self) -> Self:
+        """Reject JUNIOR agents with FULL autonomy (D6)."""
+        if (
+            self.autonomy_level == AutonomyLevel.FULL
+            and self.level == SeniorityLevel.JUNIOR
+        ):
+            msg = (
+                "JUNIOR agents cannot have FULL autonomy — "
+                "maximum is SEMI (DESIGN_SPEC D6)"
+            )
+            raise ValueError(msg)
+        return self
