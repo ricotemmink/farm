@@ -69,7 +69,7 @@ The MVP validates the core hypothesis: **a single agent can complete a real task
 > **How to read this spec:** Sections describe the full vision. The full design is documented upfront to inform architecture decisions — protocol interfaces are designed even for features that are not yet implemented.
 
 > **Implementation snapshot (2026-03-10):**
-> All major subsystems are implemented: config/core models, provider layer, single-agent engine, multi-agent orchestration (message bus, delegation, loop prevention, conflict resolution, meeting protocols), API surface (REST + WebSocket), Docker sandbox, MCP bridge, code runner, HR engine (hiring/firing/onboarding/offboarding/registry, performance tracking, promotion/demotion), memory layer (retrieval pipeline, shared org memory, consolidation/archival — backend selected per [ADR-001](docs/decisions/ADR-001-memory-layer.md)), persistence (SQLite backend, audit entry persistence), budget enforcement (BudgetEnforcer, cost tiers, quota/subscription tracking, CFO cost optimization), SecOps agent (rule engine, audit log, output scanner, output scan response policies, risk classifier, ToolInvoker integration), progressive trust (4 strategies behind TrustStrategy protocol), autonomy levels (presets, resolver, change strategy), and approval timeout policies (4 policies, park/resume service, risk tier classifier).
+> All major subsystems are implemented: config/core models, provider layer, single-agent engine, multi-agent orchestration (message bus, delegation, loop prevention, conflict resolution, meeting protocols), API surface (REST + WebSocket), Docker sandbox, MCP bridge, code runner, HR engine (hiring/firing/onboarding/offboarding/registry, performance tracking, promotion/demotion), memory layer (retrieval pipeline, shared org memory, consolidation/archival — backend selected per [ADR-001](decisions/ADR-001-memory-layer.md)), persistence (SQLite backend, audit entry persistence), budget enforcement (BudgetEnforcer, cost tiers, quota/subscription tracking, CFO cost optimization), SecOps agent (rule engine, audit log, output scanner, output scan response policies, risk classifier, ToolInvoker integration), progressive trust (4 strategies behind TrustStrategy protocol), autonomy levels (presets, resolver, change strategy), and approval timeout policies (4 policies, park/resume service, risk tier classifier).
 > - **Remaining:** Mem0 adapter backend, approval workflow gates.
 
 ### 1.5 Configuration Philosophy
@@ -961,7 +961,7 @@ Pipeline steps:
 2. **Pre-flight budget enforcement** — if `BudgetEnforcer` is provided, check monthly hard stop and daily limit via `check_can_execute()`, then apply auto-downgrade via `resolve_model()`. Raises `BudgetExhaustedError` or `DailyLimitExceededError` on violation.
 3. **Build system prompt** — calls `build_system_prompt()` with agent identity and task. Tool definitions are NOT included — they are supplied via the API's `tools` parameter (see D22 below). Follows the **non-inferable-only principle**: system prompts include only information the agent cannot discover by reading the codebase or environment (role constraints, custom conventions, organizational policies). Generic architecture overviews and file structure descriptions are excluded — [research](https://arxiv.org/abs/2602.11988) shows they reduce success rates while increasing costs 20%+.
 
-> **Decision ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D22):** Do NOT list available tools in the system prompt — the API's `tools` parameter already injects richer tool definitions including JSON schemas. The system prompt listing is strictly inferior (no schemas) and wastes 200-400+ tokens per call. Behavioral guidance ("when to use tool X vs Y") may be added later as non-redundant value.
+> **Decision ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D22):** Do NOT list available tools in the system prompt — the API's `tools` parameter already injects richer tool definitions including JSON schemas. The system prompt listing is strictly inferior (no schemas) and wastes 200-400+ tokens per call. Behavioral guidance ("when to use tool X vs Y") may be added later as non-redundant value.
 4. **Create context** — `AgentContext.from_identity()` with the configured `max_turns`.
 5. **Seed conversation** — injects system prompt, optional memory messages, and formatted task instruction as initial messages.
 6. **Transition task** — `ASSIGNED` → `IN_PROGRESS` (pass-through if already `IN_PROGRESS`).
@@ -1595,7 +1595,7 @@ receives memories.
 
 > **Non-inferable filter:** Retrieved memories should be filtered before injection to exclude content the agent can discover by reading the codebase or environment. Only inject memories containing non-inferable information: prior decisions, learned conventions, interpersonal context, historical outcomes. [Research](https://arxiv.org/abs/2602.11988) shows generic context increases cost 20%+ with minimal success improvement; LLM-generated context can actually reduce success rates.
 >
-> **Decision ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D23):** Pluggable `MemoryFilterStrategy` protocol. Initial: tag-based at write time. Define `non-inferable` tag convention with advisory validation at `MemoryBackend.store()` boundary (warns on missing tags, never blocks). System prompt instructs agents what qualifies: design rationale, team decisions, "why not X", cross-repo knowledge = non-inferable; code structure, API signatures, file contents = inferable. Uses existing `MemoryMetadata.tags` and `MemoryQuery.tags` — zero new models needed. Future strategies: LLM classification at retrieval, keyword/pattern heuristic.
+> **Decision ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D23):** Pluggable `MemoryFilterStrategy` protocol. Initial: tag-based at write time. Define `non-inferable` tag convention with advisory validation at `MemoryBackend.store()` boundary (warns on missing tags, never blocks). System prompt instructs agents what qualifies: design rationale, team decisions, "why not X", cross-repo knowledge = non-inferable; code structure, API signatures, file contents = inferable. Uses existing `MemoryMetadata.tags` and `MemoryQuery.tags` — zero new models needed. Future strategies: LLM classification at retrieval, keyword/pattern heuristic.
 
 Pipeline: `MemoryBackend.retrieve()` -> rank by relevance+recency ->
 filter by min_relevance -> apply `MemoryFilterStrategy` (D23, optional) ->
@@ -1663,7 +1663,7 @@ The HR system manages the agent workforce dynamically:
 4. Approved candidates are instantiated and onboarded
 5. Onboarding includes: company context, project briefing, team introductions.
 
-> **Decisions ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D8):**
+> **Decisions ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D8):**
 >
 > - **D8.1 — Source:** Templates + LLM customization. Templates for common roles (reuses existing template system §14.1). LLM generates config for novel roles not covered by templates. Approval gate catches invalid/bad configs before instantiation.
 > - **D8.2 — Persistence:** Operational store via `PersistenceBackend` (§7.6). YAML stays as bootstrap seed — operational store wins for runtime state. Enables rehiring, auditable history.
@@ -1676,7 +1676,7 @@ The HR system manages the agent workforce dynamically:
 3. Active tasks are reassigned
 4. Team is notified
 
-> **Decisions ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D9, D10):**
+> **Decisions ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D9, D10):**
 >
 > - **D9 — Task Reassignment:** Pluggable `TaskReassignmentStrategy` protocol. Initial: queue-return — tasks return to unassigned queue, existing `TaskRoutingService` (§6.4) re-routes with priority boost for reassigned tasks. Future strategies: same-department/lowest-load, manager-decides (LLM), HR agent decides.
 > - **D10 — Memory Archival:** Pluggable `MemoryArchivalStrategy` protocol. Initial: full snapshot, read-only. Pipeline: retrieve all → archive to `ArchivalStore` → selectively promote semantic+procedural to `OrgMemoryBackend` (rule-based) → clean hot store → mark TERMINATED. Rehiring = restore archived memories into new `AgentIdentity`. Future strategies: selective discard, full-accessible.
@@ -1694,7 +1694,7 @@ agent_metrics:
   last_review_date: "2026-02-20"
 ```
 
-> **Decisions ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D2, D3, D11, D12):**
+> **Decisions ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D2, D3, D11, D12):**
 >
 > - **D2 — Quality Scoring:** Pluggable `QualityScoringStrategy` protocol. Initial: layered combination — (1) FREE: objective CI signals (test pass/fail, lint, coverage delta), (2) ~$1/day: small-model LLM judge (different family than agent) evaluates output vs acceptance criteria, (3) on-demand: human override via API, highest weight. Start with Layer 1 only; add layers incrementally. Future strategies: CI-only, LLM-only, human-only.
 > - **D3 — Collaboration Scoring:** Pluggable `CollaborationScoringStrategy` protocol. Initial: automated behavioral telemetry — `collaboration_score = weighted_average(delegation_success_rate, delegation_response_latency, conflict_resolution_constructiveness, meeting_contribution_rate, loop_prevention_score, handoff_completeness)`. Weights configurable per-role. Optional: periodic LLM sampling (1%) for calibration + human override via API. Future strategies: LLM evaluation, peer ratings, human-provided.
@@ -1709,7 +1709,7 @@ Agents can move between seniority levels based on performance:
 - Promotions can unlock higher tool access levels (see Progressive Trust)
 - Model upgrades/downgrades may accompany level changes (configurable)
 
-> **Decisions ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D13, D14, D15):**
+> **Decisions ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D13, D14, D15):**
 >
 > - **D13 — Promotion Criteria:** Pluggable `PromotionCriteriaStrategy` protocol. Initial: configurable threshold gates. `ThresholdEvaluator` with `min_criteria_met: int` (N of M) + `required_criteria: list[str]`. Setting min=total gives AND; min=1 gives OR. Default: junior→mid = 2 of 3 criteria, mid→senior = all. Future strategies: pure AND, pure OR.
 > - **D14 — Promotion Approval:** Pluggable `PromotionApprovalStrategy` protocol. Initial: senior+ requires human approval. Junior→mid auto-promotes (low cost impact: small→medium ~4x). Demotions: auto-apply for cost-saving (model downgrade), human approval for authority-reducing demotions. Future strategies: all-human, configurable-per-level.
@@ -2093,7 +2093,7 @@ Tool execution requires safety boundaries proportional to the risk of each tool 
 
 > **MVP: Subprocess sandbox for file/git tools. Docker optional for code execution.** K8s is future.
 >
-> **Decision ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D16):** Docker MVP only via `aiodocker` (async-native, Python 3.14 support). Pre-built image (Python 3.14 + Node.js LTS + basic utils, <500MB) + user-configurable via `docker.image` config. **Fail with clear error** if Docker unavailable — no unsafe subprocess fallback for code execution (file/git tools already use `SubprocessSandbox`). gVisor (`--runtime=runsc`) as free config-level hardening upgrade. WASM/Firecracker evaluation planned. `SandboxBackend` protocol makes adding backends trivial.
+> **Decision ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D16):** Docker MVP only via `aiodocker` (async-native, Python 3.14 support). Pre-built image (Python 3.14 + Node.js LTS + basic utils, <500MB) + user-configurable via `docker.image` config. **Fail with clear error** if Docker unavailable — no unsafe subprocess fallback for code execution (file/git tools already use `SubprocessSandbox`). gVisor (`--runtime=runsc`) as free config-level hardening upgrade. WASM/Firecracker evaluation planned. `SandboxBackend` protocol makes adding backends trivial.
 
 #### Sandbox Backends
 
@@ -2148,14 +2148,14 @@ sandboxing:
 
 ### 11.1.3 MCP Integration
 
-> **Decisions ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D17, D18):**
+> **Decisions ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D17, D18):**
 >
 > - **D17 — MCP SDK:** Official `mcp` Python SDK, pinned `==1.26.0`. Thin `MCPBridgeTool` adapter layer isolates the rest of the codebase from SDK API changes. Support **stdio** (local/dev) and **Streamable HTTP** (remote/production) transports. Skip deprecated SSE. v2 migration planned — pin range prevents accidental breaking upgrade.
 > - **D18 — MCP Result Mapping:** Adapter in `MCPBridgeTool` keeps `ToolResult` as-is. Mapping: text blocks → concatenate to `content: str`; image/audio → `[image: {mimeType}]` placeholder + base64 in `metadata["attachments"]`; `structuredContent` → `metadata["structured_content"]`; `isError` → `is_error` (1:1). Future: extend `ToolResult` with optional `attachments` when multi-modal LLM tool results are needed.
 
 ### 11.1.4 Action Type System
 
-> **Decisions ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D1):**
+> **Decisions ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D1):**
 >
 > Action types classify agent actions for use by autonomy presets (§12.2), SecOps validation (§12.3), tiered timeout policies (§12.4), and progressive trust (§11.3). Three sub-decisions:
 >
@@ -2395,7 +2395,7 @@ autonomy:
       security_agent: true        # still runs for audit logging, but human is approval authority
 ```
 
-> **Decisions ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D6, D7):**
+> **Decisions ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D6, D7):**
 >
 > - **D6 — Autonomy Scope:** Three-level resolution chain: per-agent → per-department → company default. Optional `autonomy_level` on `AgentIdentity` and department config. Resolution: `agent.autonomy_level or department.autonomy_level or company.autonomy.level`. Seniority validation: Juniors/Interns cannot be set to `full`.
 > - **D7 — Autonomy Changes at Runtime:** Pluggable `AutonomyChangeStrategy` protocol. Initial: **(a+c hybrid)** — human-only promotion via REST API (no agent including CEO can escalate privileges) **plus** automatic downgrade on: high error rate → one level down, budget exhausted → supervised, security incident → locked. Recovery from auto-downgrade: human-only. Precedent: no real-world security system automatically grants higher privileges. Future strategies: fully configurable conditions.
@@ -2411,7 +2411,7 @@ A special meta-agent that reviews all actions before execution:
 - Escalates uncertain cases to human queue with explanation
 - **Cannot be overridden by other agents** (only human can override)
 
-> **Decisions ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D4, D5):**
+> **Decisions ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D4, D5):**
 >
 > - **D4 — LLM vs Rule-based:** Hybrid approach. Rule engine for known patterns (credentials, path traversal, destructive ops) — sub-ms, covers ~95% of cases. LLM fallback only for uncertain cases (~5%). Full autonomy mode: rules + audit logging only, no LLM path. Hard safety rules (credential exposure, data destruction) **never bypass** regardless of autonomy level. Precedent: AWS GuardDuty, LlamaFirewall, NeMo Guardrails all use hybrid.
 > - **D5 — Integration Point:** Pluggable `SecurityInterceptionStrategy` protocol. Initial: before every tool invocation — slots into existing `ToolInvoker` between permission check and tool execution. Policy strictness (not interception point) configurable per autonomy level. Add post-tool-call scanning for sensitive data in outputs. Performance: sub-ms rule check is invisible against seconds of LLM inference. Future strategies: batch-level (before task step), assignment-only.
@@ -2509,7 +2509,7 @@ approval_timeout:
 
 > **Task Suspension and Resumption:** The park/resume mechanism relies on `AgentContext` snapshots (frozen Pydantic models). When a task is parked, the full context is persisted. When approval arrives, the framework loads the snapshot, restores the agent's conversation and state, and resumes execution from the exact point of suspension. This works naturally with the `model_copy(update=...)` immutability pattern — the snapshot is a complete, self-contained state.
 
-> **Decisions ([ADR-002](docs/decisions/ADR-002-design-decisions-batch-1.md) D19, D20, D21):**
+> **Decisions ([ADR-002](decisions/ADR-002-design-decisions-batch-1.md) D19, D20, D21):**
 >
 > - **D19 — Risk Tier Classification:** Pluggable `RiskTierClassifier` protocol. Initial: configurable YAML mapping — `RiskTierMapping` config model with `dict[str, ApprovalRiskLevel]`. Sensible defaults matching examples above (e.g. `code:write` → low, `deploy:production` → critical). Unknown action types default to HIGH (fail-safe). Hot-reloadable. Leaves door open for future SecOps override. Future strategies: SecOps-assigned, fixed-per-type.
 > - **D20 — Context Serialization:** Pydantic JSON via persistence backend. `ParkedContext` model with metadata columns (`execution_id`, `agent_id`, `task_id`, `parked_at`) + `context_json` blob. `ParkedContextRepository` protocol via existing `PersistenceBackend` (§7.6). Conversation stored **verbatim** — summarization is a context window management concern at resume time, not a persistence concern.
@@ -2734,7 +2734,7 @@ Circular inheritance is detected via chain tracking and raises `TemplateInherita
 | **Language** | Python 3.14+ | Best AI/ML ecosystem, all major frameworks use it, LiteLLM/MCP and memory layer candidates all Python-native. PEP 649 native lazy annotations, PEP 758 except syntax. |
 | **API Framework** | Litestar | Async-native, built-in channels (pub/sub WebSocket), auto OpenAPI 3.1 docs, class-based controllers, native route guards, built-in rate limiting / CSRF / compression middleware, explicit DI, Pydantic v2 support via plugin. Chosen over FastAPI — see §15.4 |
 | **LLM Abstraction** | LiteLLM | 100+ providers, unified API, built-in cost tracking, retries/fallbacks |
-| **Agent Memory** | Mem0 (Qdrant + SQLite) → custom (Neo4j + Qdrant) | Mem0 in-process as initial backend behind pluggable `MemoryBackend` protocol ([ADR-001](docs/decisions/ADR-001-memory-layer.md)). Qdrant embedded + SQLite for persistence. Custom stack (Neo4j + Qdrant external) as future upgrade. Config-driven backend selection |
+| **Agent Memory** | Mem0 (Qdrant + SQLite) → custom (Neo4j + Qdrant) | Mem0 in-process as initial backend behind pluggable `MemoryBackend` protocol ([ADR-001](decisions/ADR-001-memory-layer.md)). Qdrant embedded + SQLite for persistence. Custom stack (Neo4j + Qdrant external) as future upgrade. Config-driven backend selection |
 | **Message Bus** | Internal (async queues) → Redis | Start with Python asyncio queues, upgrade to Redis for multi-process/distributed |
 | **Task Queue** | Internal → Celery/Redis | Start simple, scale with Celery when needed |
 | **Database** | SQLite (aiosqlite) → PostgreSQL / MariaDB | Pluggable `PersistenceBackend` protocol (§7.6). SQLite ships first via aiosqlite async driver. PostgreSQL, MariaDB as future backends — swap via config, no app code changes |
@@ -3288,7 +3288,7 @@ synthorg/
 | Language | Python 3.14+ | TypeScript, Go, Rust | AI ecosystem, LiteLLM/MCP and memory layer candidates are Python-native, PEP 649 lazy annotations, PEP 758 except syntax |
 | API | Litestar | FastAPI, Flask, Django, aiohttp | Built-in channels (pub/sub WebSocket), class-based controllers, native route guards, middleware (rate limiting, CSRF, compression), explicit DI. FastAPI considered but Litestar offers more batteries-included for less custom code — see rationale below |
 | LLM Layer | LiteLLM | Direct APIs, OpenRouter only | 100+ providers, cost tracking, fallbacks, load balancing built-in |
-| Memory | Mem0 (initial) → custom stack (future) + SQLite | Graphiti, Letta, Cognee, custom | Mem0 in-process as initial backend behind pluggable `MemoryBackend` protocol ([ADR-001](docs/decisions/ADR-001-memory-layer.md)). Custom stack (Neo4j + Qdrant) as future upgrade. Must support episodic, semantic, procedural memory types (§7.1–7.3). Org memory served via `OrgMemoryBackend` protocol (§7.4) |
+| Memory | Mem0 (initial) → custom stack (future) + SQLite | Graphiti, Letta, Cognee, custom | Mem0 in-process as initial backend behind pluggable `MemoryBackend` protocol ([ADR-001](decisions/ADR-001-memory-layer.md)). Custom stack (Neo4j + Qdrant) as future upgrade. Must support episodic, semantic, procedural memory types (§7.1–7.3). Org memory served via `OrgMemoryBackend` protocol (§7.4) |
 | Message Bus | asyncio queues → Redis | Kafka, RabbitMQ, NATS | Start simple, Redis well-supported, Kafka overkill for local |
 | Config | YAML + Pydantic | JSON, TOML, Python dicts | Human-friendly, strict validation, good IDE support |
 | CLI | Deferred (TBD) | Typer, Click, argparse | Thin API wrapper if needed. Scalar interactive docs at `/docs/api` + `curl`/`httpie` may suffice |
@@ -3428,7 +3428,7 @@ What we **plan to leverage** (not fork) — subject to evaluation:
 | 11 | What is the agent execution loop architecture? | High | **Resolved** | Multiple configurable loops — see §6.5 Agent Execution Loop |
 | 12 | How should shared organizational memory work? | High | **Resolved** | Modular backends behind protocol — see §7.4 Shared Organizational Memory |
 | 13 | What happens when humans don't respond to approvals? | High | **Resolved** | Configurable timeout policies with task suspension — see §12.4 Approval Timeout |
-| 14 | Which memory layer library to use? | Medium | **Resolved** | Mem0 (initial) → custom stack (future) behind pluggable `MemoryBackend` protocol — see [ADR-001](docs/decisions/ADR-001-memory-layer.md) |
+| 14 | Which memory layer library to use? | Medium | **Resolved** | Mem0 (initial) → custom stack (future) behind pluggable `MemoryBackend` protocol — see [ADR-001](decisions/ADR-001-memory-layer.md) |
 | 15 | How to handle agent crashes mid-task? | High | **Resolved** | Pluggable `RecoveryStrategy` protocol — see §6.6 Agent Crash Recovery |
 | 16 | How to test non-deterministic agent behavior? | High | **Resolved** | Scripted providers for unit tests + behavioral assertions for integration — see §15.5 Engineering Conventions |
 | 17 | How to detect orchestration overhead? | Medium | **Resolved** | Incremental LLM call analytics with proxy metrics → full categorization — see §10.5 |

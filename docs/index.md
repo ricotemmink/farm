@@ -6,29 +6,27 @@ SynthOrg lets you define agents with roles, hierarchy, budgets, and tools, then 
 
 ---
 
-## Quick Start
+## Get Started
 
-```bash
-git clone https://github.com/Aureliolo/synthorg.git
-cd synthorg
-uv sync
-```
+<div class="grid cards" markdown>
 
-```python
-import asyncio
+-   :material-play-circle:{ .lg .middle } **Use SynthOrg**
 
-from ai_company.config.loader import load_config
-from ai_company.engine.agent_engine import AgentEngine
+    ---
 
-async def main():
-    config = load_config("company.yaml")
-    engine = AgentEngine(config)
-    result = await engine.run("Build a REST API for user management")
+    Pick a template and run your first synthetic org via Docker.
 
-asyncio.run(main())
-```
+    [:octicons-arrow-right-24: User Guide](user_guide.md)
 
-*API shown is illustrative — see [Getting Started](getting_started.md) for full setup.*
+-   :material-code-braces:{ .lg .middle } **Develop SynthOrg**
+
+    ---
+
+    Clone the repo, set up your dev environment, and contribute.
+
+    [:octicons-arrow-right-24: Developer Setup](getting_started.md)
+
+</div>
 
 ---
 
@@ -45,18 +43,19 @@ asyncio.run(main())
 
 ---
 
-## Documentation Sections
+## Documentation
 
 | Section | Description |
 |---------|-------------|
-| [Getting Started](getting_started.md) | Development setup, installation, IDE config |
-| [Architecture](architecture/index.md) | System overview, module map, design principles |
-| [API Reference](api/index.md) | Auto-generated from source code docstrings |
+| [User Guide](user_guide.md) | Install, configure, and run SynthOrg |
+| [Developer Setup](getting_started.md) | Clone, test, lint, and contribute |
+| [Architecture](architecture/index.md) | System overview, design principles |
+| [API Reference](api/index.md) | Auto-generated from docstrings |
 
 ---
 
 ## Links
 
 - [GitHub Repository](https://github.com/Aureliolo/synthorg)
-- [Design Specification](https://github.com/Aureliolo/synthorg/blob/main/DESIGN_SPEC.md)
+- [Design Specification](design_spec.md)
 - [License](https://github.com/Aureliolo/synthorg/blob/main/LICENSE) (BSL 1.1 → Apache 2.0 on 2030-02-27)
