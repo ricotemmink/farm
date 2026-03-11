@@ -2,14 +2,14 @@
 
 from datetime import UTC, datetime, timedelta
 
+import jwt
 import pytest
 
 from ai_company.api.auth.config import AuthConfig
 from ai_company.api.auth.models import User
-from ai_company.api.auth.service import AuthService
+from ai_company.api.auth.service import AuthService, SecretNotConfiguredError
 from ai_company.api.guards import HumanRole
-
-_SECRET = "test-secret-that-is-at-least-32-characters-long"
+from tests.unit.api.conftest import _TEST_JWT_SECRET as _SECRET
 
 
 def _make_service() -> AuthService:
@@ -59,13 +59,19 @@ class TestPasswordHashing:
         # Different salts produce different hashes
         assert h1 != h2
 
-    def test_verify_password_with_corrupted_hash(self) -> None:
-        svc = _make_service()
-        assert not svc.verify_password("my-password", "not-a-valid-argon2-hash")
+    def test_verify_password_with_corrupted_hash_raises(self) -> None:
+        import argon2.exceptions
 
-    def test_verify_password_with_empty_hash(self) -> None:
         svc = _make_service()
-        assert not svc.verify_password("my-password", "")
+        with pytest.raises(argon2.exceptions.InvalidHashError):
+            svc.verify_password("my-password", "not-a-valid-argon2-hash")
+
+    def test_verify_password_with_empty_hash_raises(self) -> None:
+        import argon2.exceptions
+
+        svc = _make_service()
+        with pytest.raises(argon2.exceptions.InvalidHashError):
+            svc.verify_password("my-password", "")
 
 
 @pytest.mark.unit
@@ -83,8 +89,6 @@ class TestJWT:
         assert claims["role"] == "ceo"
 
     def test_expired_token_raises(self) -> None:
-        import jwt
-
         config = AuthConfig(jwt_secret=_SECRET, jwt_expiry_minutes=1)
         svc = AuthService(config)
         user = _make_user()
@@ -104,8 +108,6 @@ class TestJWT:
             svc.decode_token(expired_token)
 
     def test_invalid_signature_raises(self) -> None:
-        import jwt
-
         svc = _make_service()
         user = _make_user()
         token, _ = svc.create_token(user)
@@ -125,8 +127,6 @@ class TestJWT:
         assert claims["must_change_password"] is True
 
     def test_decode_token_missing_sub_claim(self) -> None:
-        import jwt as pyjwt
-
         svc = _make_service()
         payload = {
             "username": "admin",
@@ -134,33 +134,57 @@ class TestJWT:
             "iat": datetime.now(UTC),
             "exp": datetime.now(UTC) + timedelta(hours=1),
         }
-        token = pyjwt.encode(payload, _SECRET, algorithm="HS256")
-        with pytest.raises(pyjwt.MissingRequiredClaimError):
+        token = jwt.encode(payload, _SECRET, algorithm="HS256")
+        with pytest.raises(jwt.MissingRequiredClaimError):
             svc.decode_token(token)
 
     def test_create_token_empty_secret_raises(self) -> None:
         svc = AuthService(AuthConfig())
         user = _make_user()
-        with pytest.raises(RuntimeError, match="JWT secret not configured"):
+        with pytest.raises(SecretNotConfiguredError, match="JWT secret not configured"):
             svc.create_token(user)
 
     def test_decode_token_empty_secret_raises(self) -> None:
         svc = AuthService(AuthConfig())
-        with pytest.raises(RuntimeError, match="JWT secret not configured"):
+        with pytest.raises(SecretNotConfiguredError, match="JWT secret not configured"):
             svc.decode_token("any.token.here")
 
 
 @pytest.mark.unit
 class TestApiKeyHashing:
     def test_hash_deterministic(self) -> None:
-        h1 = AuthService.hash_api_key("my-key")
-        h2 = AuthService.hash_api_key("my-key")
+        svc = _make_service()
+        h1 = svc.hash_api_key("my-key")
+        h2 = svc.hash_api_key("my-key")
         assert h1 == h2
 
     def test_different_keys_different_hashes(self) -> None:
-        h1 = AuthService.hash_api_key("key-one")
-        h2 = AuthService.hash_api_key("key-two")
+        svc = _make_service()
+        h1 = svc.hash_api_key("key-one")
+        h2 = svc.hash_api_key("key-two")
         assert h1 != h2
+
+    def test_hash_requires_secret(self) -> None:
+        svc = AuthService(AuthConfig())
+        with pytest.raises(SecretNotConfiguredError, match="JWT secret not configured"):
+            svc.hash_api_key("some-key")
+
+    def test_different_secrets_produce_different_hashes(self) -> None:
+        svc_a = AuthService(
+            AuthConfig(jwt_secret="secret-a-that-is-at-least-32-characters!")
+        )
+        svc_b = AuthService(
+            AuthConfig(jwt_secret="secret-b-that-is-at-least-32-characters!")
+        )
+        h_a = svc_a.hash_api_key("same-key")
+        h_b = svc_b.hash_api_key("same-key")
+        assert h_a != h_b
+
+    def test_hash_output_is_64_char_hex(self) -> None:
+        svc = _make_service()
+        result = svc.hash_api_key("test-key")
+        assert len(result) == 64
+        assert all(c in "0123456789abcdef" for c in result)
 
     def test_generate_key_unique(self) -> None:
         k1 = AuthService.generate_api_key()

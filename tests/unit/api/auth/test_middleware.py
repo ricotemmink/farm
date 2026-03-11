@@ -1,6 +1,6 @@
 """Tests for ApiAuthMiddleware."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from litestar import Litestar, get
@@ -11,9 +11,8 @@ from ai_company.api.auth.middleware import create_auth_middleware_class
 from ai_company.api.auth.models import ApiKey, User
 from ai_company.api.auth.service import AuthService
 from ai_company.api.guards import HumanRole
+from tests.unit.api.conftest import _TEST_JWT_SECRET as _SECRET
 from tests.unit.api.conftest import FakePersistenceBackend
-
-_SECRET = "test-secret-that-is-at-least-32-characters-long"
 
 
 def _make_auth_service() -> AuthService:
@@ -123,6 +122,52 @@ class TestAuthMiddlewareJWT:
             )
             assert resp.status_code == 401
 
+    async def test_jwt_after_password_change_returns_401(self) -> None:
+        """Token issued before password change is rejected via pwd_sig."""
+        svc = _make_auth_service()
+        user = _make_user(svc)
+        persistence = FakePersistenceBackend()
+        await persistence.connect()
+        await persistence.users.save(user)
+
+        token, _ = svc.create_token(user)
+
+        # Change password — new hash means different pwd_sig
+        updated_user = User(
+            id=user.id,
+            username=user.username,
+            password_hash=svc.hash_password("new-password-12chars"),
+            role=user.role,
+            must_change_password=False,
+            created_at=user.created_at,
+            updated_at=user.updated_at,
+        )
+        await persistence.users.save(updated_user)
+
+        app = _build_app(auth_service=svc, persistence=persistence)
+        with TestClient(app) as client:
+            resp = client.get(
+                "/protected",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 401
+
+    async def test_jwt_auth_with_unconfigured_secret_returns_401(
+        self,
+    ) -> None:
+        """JWT auth degrades to 401 when secret is unconfigured."""
+        empty_svc = AuthService(AuthConfig())
+        persistence = FakePersistenceBackend()
+        await persistence.connect()
+        app = _build_app(auth_service=empty_svc, persistence=persistence)
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/protected",
+                headers={"Authorization": "Bearer some.jwt.token"},
+            )
+            assert resp.status_code == 401
+
     async def test_jwt_for_deleted_user_returns_401(self) -> None:
         svc = _make_auth_service()
         user = _make_user(svc)
@@ -150,7 +195,7 @@ class TestAuthMiddlewareApiKey:
         await persistence.users.save(user)
 
         raw_key = AuthService.generate_api_key()
-        key_hash = AuthService.hash_api_key(raw_key)
+        key_hash = svc.hash_api_key(raw_key)
         now = datetime.now(UTC)
         api_key = ApiKey(
             id="key-001",
@@ -179,7 +224,7 @@ class TestAuthMiddlewareApiKey:
         await persistence.users.save(user)
 
         raw_key = AuthService.generate_api_key()
-        key_hash = AuthService.hash_api_key(raw_key)
+        key_hash = svc.hash_api_key(raw_key)
         now = datetime.now(UTC)
         api_key = ApiKey(
             id="key-002",
@@ -202,8 +247,6 @@ class TestAuthMiddlewareApiKey:
             assert resp.status_code == 401
 
     async def test_expired_api_key_returns_401(self) -> None:
-        from datetime import timedelta
-
         svc = _make_auth_service()
         user = _make_user(svc)
         persistence = FakePersistenceBackend()
@@ -211,7 +254,7 @@ class TestAuthMiddlewareApiKey:
         await persistence.users.save(user)
 
         raw_key = AuthService.generate_api_key()
-        key_hash = AuthService.hash_api_key(raw_key)
+        key_hash = svc.hash_api_key(raw_key)
         now = datetime.now(UTC)
         api_key = ApiKey(
             id="key-003",
@@ -245,7 +288,7 @@ class TestAuthMiddlewareApiKeyEdgeCases:
         await persistence.users.save(user)
 
         raw_key = AuthService.generate_api_key()
-        key_hash = AuthService.hash_api_key(raw_key)
+        key_hash = svc.hash_api_key(raw_key)
         now = datetime.now(UTC)
         api_key = ApiKey(
             id="key-orphan",
@@ -264,6 +307,36 @@ class TestAuthMiddlewareApiKeyEdgeCases:
             resp = client.get(
                 "/protected",
                 headers={"Authorization": f"Bearer {raw_key}"},
+            )
+            assert resp.status_code == 401
+
+    async def test_unknown_api_key_returns_401(self) -> None:
+        svc = _make_auth_service()
+        persistence = FakePersistenceBackend()
+        await persistence.connect()
+        app = _build_app(auth_service=svc, persistence=persistence)
+
+        # Send a token without dots (API key path) that is not registered
+        with TestClient(app) as client:
+            resp = client.get(
+                "/protected",
+                headers={"Authorization": "Bearer unknownkey123456"},
+            )
+            assert resp.status_code == 401
+
+    async def test_api_key_auth_with_unconfigured_secret_returns_401(
+        self,
+    ) -> None:
+        empty_svc = AuthService(AuthConfig())
+        persistence = FakePersistenceBackend()
+        await persistence.connect()
+        app = _build_app(auth_service=empty_svc, persistence=persistence)
+
+        # hash_api_key raises SecretNotConfiguredError; middleware handles it
+        with TestClient(app) as client:
+            resp = client.get(
+                "/protected",
+                headers={"Authorization": "Bearer sometokenwithnodots"},
             )
             assert resp.status_code == 401
 

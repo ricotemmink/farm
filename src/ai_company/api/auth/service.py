@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import hmac
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,11 @@ if TYPE_CHECKING:
     from ai_company.api.auth.config import AuthConfig
 
 logger = get_logger(__name__)
+
+
+class SecretNotConfiguredError(RuntimeError):
+    """Raised when the JWT secret is required but not configured."""
+
 
 _hasher = argon2.PasswordHasher(
     time_cost=3,
@@ -36,6 +42,29 @@ class AuthService:
 
     def __init__(self, config: AuthConfig) -> None:
         self._config = config
+
+    def _require_secret(self, operation: str) -> str:
+        """Return the JWT secret or raise if unconfigured.
+
+        Args:
+            operation: Name of the calling operation (for logging).
+
+        Returns:
+            The JWT secret string.
+
+        Raises:
+            SecretNotConfiguredError: If the JWT secret is empty.
+        """
+        secret = self._config.jwt_secret
+        if not secret:
+            msg = "JWT secret not configured"
+            logger.error(
+                API_AUTH_FAILED,
+                reason="jwt_secret_missing",
+                operation=operation,
+            )
+            raise SecretNotConfiguredError(msg)
+        return secret
 
     def hash_password(self, password: str) -> str:
         """Hash a password with Argon2id.
@@ -57,6 +86,12 @@ class AuthService:
 
         Returns:
             ``True`` if the password matches.
+
+        Raises:
+            argon2.exceptions.VerificationError: On non-mismatch
+                verification failures (e.g. unsupported parameters).
+            argon2.exceptions.InvalidHashError: If the stored hash
+                is corrupted or malformed (data integrity issue).
         """
         try:
             return _hasher.verify(password_hash, password)
@@ -68,14 +103,14 @@ class AuthService:
                 reason="hash_verification_error",
                 exc_info=True,
             )
-            return False
+            raise
         except argon2.exceptions.InvalidHashError:
             logger.error(
                 API_AUTH_FAILED,
                 reason="invalid_hash_data_corruption",
                 exc_info=True,
             )
-            return False
+            raise
 
     async def hash_password_async(self, password: str) -> str:
         """Hash a password with Argon2id in a thread executor.
@@ -117,6 +152,14 @@ class AuthService:
     def create_token(self, user: User) -> tuple[str, int]:
         """Create a JWT for the given user.
 
+        The token includes a ``pwd_sig`` claim — a 16-character
+        truncated SHA-256 of the stored password hash.  This is
+        plain SHA-256, not HMAC — the password hash is already a
+        high-entropy Argon2id output, and the claim is protected
+        by the JWT signature.  The auth middleware validates this
+        claim on every request so that tokens issued before a
+        password change are automatically rejected.
+
         Args:
             user: Authenticated user.
 
@@ -124,11 +167,9 @@ class AuthService:
             Tuple of (encoded JWT string, expiry seconds).
 
         Raises:
-            RuntimeError: If the JWT secret is empty.
+            SecretNotConfiguredError: If the JWT secret is empty.
         """
-        if not self._config.jwt_secret:
-            msg = "JWT secret not configured"
-            raise RuntimeError(msg)
+        secret = self._require_secret("create_token")
         now = datetime.now(UTC)
         expiry_seconds = self._config.jwt_expiry_minutes * 60
         pwd_sig = hashlib.sha256(
@@ -145,7 +186,7 @@ class AuthService:
         }
         token = jwt.encode(
             payload,
-            self._config.jwt_secret,
+            secret,
             algorithm=self._config.jwt_algorithm,
         )
         return token, expiry_seconds
@@ -160,30 +201,39 @@ class AuthService:
             Decoded claims dictionary.
 
         Raises:
-            RuntimeError: If the JWT secret is empty.
+            SecretNotConfiguredError: If the JWT secret is empty.
             jwt.InvalidTokenError: If the token is invalid or expired.
         """
-        if not self._config.jwt_secret:
-            msg = "JWT secret not configured"
-            raise RuntimeError(msg)
+        secret = self._require_secret("decode_token")
         return jwt.decode(
             token,
-            self._config.jwt_secret,
+            secret,
             algorithms=[self._config.jwt_algorithm],
             options={"require": ["exp", "iat", "sub"]},
         )
 
-    @staticmethod
-    def hash_api_key(raw_key: str) -> str:
-        """Compute SHA-256 hex digest of a raw API key.
+    def hash_api_key(self, raw_key: str) -> str:
+        """Compute HMAC-SHA256 hex digest of a raw API key.
+
+        Uses the server-side JWT secret as the HMAC key so that
+        an attacker with read access to stored hashes cannot
+        brute-force API keys offline.
 
         Args:
             raw_key: The plaintext API key.
 
         Returns:
             Lowercase hex digest.
+
+        Raises:
+            SecretNotConfiguredError: If the JWT secret is empty.
         """
-        return hashlib.sha256(raw_key.encode()).hexdigest()
+        secret = self._require_secret("hash_api_key")
+        return hmac.digest(
+            secret.encode(),
+            raw_key.encode(),
+            "sha256",
+        ).hex()
 
     @staticmethod
     def generate_api_key() -> str:
