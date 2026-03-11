@@ -3140,6 +3140,7 @@ synthorg/
 │       │       ├── config.py       # TrustConfig, strategy-specific sub-configs
 │       │       ├── enums.py        # TrustStrategyType, TrustChangeReason
 │       │       ├── errors.py       # TrustEvaluationError
+│       │       ├── levels.py       # Shared trust level ordering and transition constants
 │       │       ├── models.py       # TrustState, TrustEvaluationResult, TrustChangeRecord
 │       │       ├── protocol.py     # TrustStrategy protocol
 │       │       ├── service.py      # TrustService orchestrator (state, evaluation, decay, approval)
@@ -3181,7 +3182,7 @@ synthorg/
 │       │   ├── bus_bridge.py       # Message-bus → WebSocket bridge
 │       │   ├── channels.py         # WebSocket channel definitions
 │       │   ├── config.py           # API configuration models (ServerConfig, CorsConfig)
-│       │   ├── controllers/        # 15 class-based controllers + 1 WebSocket handler (16 route modules)
+│       │   ├── controllers/        # 14 class-based controllers + 1 WebSocket handler (15 route modules)
 │       │   ├── dto.py              # Request/response DTOs and envelopes
 │       │   ├── errors.py           # API error hierarchy (ApiError, NotFoundError, UnauthorizedError, etc.)
 │       │   ├── exception_handlers.py # Litestar exception handler registration
@@ -3214,11 +3215,31 @@ synthorg/
 │   ├── unit/
 │   ├── integration/
 │   └── e2e/
+├── mkdocs.yml                       # MkDocs configuration
 ├── docs/
-│   ├── decisions/
-│   │   ├── ADR-001-memory-layer.md
-│   │   └── ADR-002-design-decisions-batch-1.md
-│   └── getting_started.md
+│   ├── index.md                     # Documentation landing page
+│   ├── getting_started.md
+│   ├── overrides/                   # MkDocs theme overrides
+│   ├── architecture/
+│   │   ├── index.md                # Architecture overview
+│   │   └── decisions.md            # ADR index
+│   ├── api/                        # Auto-generated API reference (mkdocstrings)
+│   │   ├── index.md               # API reference landing
+│   │   ├── core.md, engine.md, providers.md, budget.md, ...
+│   │   └── tools.md
+│   └── decisions/
+│       ├── ADR-001-memory-layer.md
+│       ├── ADR-002-design-decisions-batch-1.md
+│       └── ADR-003-documentation-architecture.md
+├── site/                            # Astro landing page (synthorg.io root)
+│   ├── astro.config.mjs
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── public/
+│   │   └── favicon.svg
+│   └── src/
+│       ├── layouts/Base.astro
+│       └── pages/index.astro
 ├── docker/
 │   ├── backend/
 │   │   └── Dockerfile              # 3-stage: python:3.14-slim → chainguard/python-dev → chainguard/python (distroless)
@@ -3230,23 +3251,28 @@ synthorg/
 │   ├── compose.override.yml        # Local dev overrides (debug logging)
 │   └── .env.example                # Environment variable reference
 ├── web/
+│   ├── app.js                      # Dashboard JavaScript
 │   ├── index.html                  # Placeholder dashboard with health check
-│   └── nginx.conf                  # SPA routing + API/WebSocket proxy
+│   ├── nginx.conf                  # SPA routing + API/WebSocket proxy
+│   └── style.css                   # Dashboard styles
 ├── .github/
 │   ├── workflows/
 │   │   ├── ci.yml                  # Lint + type-check + test (parallel)
 │   │   ├── docker.yml              # Build → scan → push → sign (GHCR)
 │   │   ├── dependency-review.yml   # License allow-list on PRs
 │   │   ├── release.yml             # Release Please (automated versioning + GitHub Releases)
-│   │   └── secret-scan.yml         # Gitleaks on push/PR + weekly
+│   │   ├── secret-scan.yml         # Gitleaks on push/PR + weekly
+│   │   └── pages.yml               # Build Astro + MkDocs → deploy GitHub Pages
 │   ├── actions/
 │   │   └── setup-python-uv/        # Composite action: Python + uv install
 │   ├── dependabot.yml              # uv + github-actions + docker updates
+│   ├── CHANGELOG.md                 # Release changelog (managed by Release Please)
 │   ├── CONTRIBUTING.md
-│   └── SECURITY.md
+│   ├── SECURITY.md
+│   ├── .grype.yaml                  # Grype CVE ignore list (synced with .trivyignore.yaml)
+│   └── .trivyignore.yaml            # Trivy CVE ignore list (structured YAML format)
 ├── .dockerignore                    # Consolidated Docker build context exclusions
-├── .grype.yaml                      # Grype CVE ignore list (synced with .trivyignore.yaml)
-├── .trivyignore.yaml                # Trivy CVE ignore list (structured YAML format)
+├── .gitleaks.toml                   # Gitleaks config (test file allowlist)
 ├── DESIGN_SPEC.md                   # This document
 ├── README.md
 ├── pyproject.toml

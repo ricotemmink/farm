@@ -213,7 +213,10 @@ class TestEnvironmentFiltering:
             clear=True,
         ):
             env = sandbox._build_filtered_env()
-            assert "/totally/fake/dir" not in env.get("PATH", "")
+            path_val = env.get("PATH", "")
+            assert "/totally/fake/dir" not in path_val
+            # Positive assertion: fallback must have populated PATH
+            assert path_val, "PATH should contain fallback safe directories"
 
 
 # ── Workspace boundary ───────────────────────────────────────────
@@ -520,3 +523,174 @@ class TestExtraSafePathPrefixes:
             SubprocessSandboxConfig(
                 extra_safe_path_prefixes=("relative/path",),
             )
+
+    def test_rejects_null_bytes(self) -> None:
+        prefix = "C:\\evil\x00\\bin" if os.name == "nt" else "/opt/evil\x00/bin"
+        with pytest.raises(ValidationError, match="null bytes"):
+            SubprocessSandboxConfig(
+                extra_safe_path_prefixes=(prefix,),
+            )
+
+    def test_normalizes_traversal(self) -> None:
+        """Paths with '..' are normalized to canonical form."""
+        if os.name == "nt":
+            raw = r"C:\opt\custom\..\tools"
+            expected = r"C:\opt\tools"
+        else:
+            raw = "/opt/custom/../tools"
+            expected = "/opt/tools"
+        config = SubprocessSandboxConfig(
+            extra_safe_path_prefixes=(raw,),
+        )
+        assert config.extra_safe_path_prefixes == (expected,)
+
+    def test_fallback_uses_platform_defaults_only(
+        self,
+        sandbox_workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        """PATH fallback excludes user-provided extra prefixes."""
+        extra = (r"C:\UserExtra",) if os.name == "nt" else ("/opt/user-extra",)
+        # Use a real temporary directory as sentinel so Path.is_dir()
+        # succeeds without mocking the entire Path class.
+        sentinel = str(tmp_path / "sentinel-bin")
+        Path(sentinel).mkdir()
+        config = SubprocessSandboxConfig(
+            restricted_path=True,
+            extra_safe_path_prefixes=extra,
+        )
+        sandbox = SubprocessSandbox(
+            config=config,
+            workspace=sandbox_workspace,
+        )
+        # Fake PATH triggers fallback; mock platform defaults with a
+        # sentinel to verify the fallback path is actually taken.
+        with (
+            patch.dict(
+                os.environ,
+                {"PATH": "/totally/fake/dir"},
+                clear=True,
+            ),
+            patch.object(
+                SubprocessSandbox,
+                "_get_hardcoded_fallback_dirs",
+                return_value=(sentinel,),
+            ),
+        ):
+            env = sandbox._build_filtered_env()
+            path_val = env.get("PATH", "")
+            assert sentinel in path_val
+            # User-extra must be excluded from fallback
+            # (covers both Windows "C:\UserExtra" and Linux
+            # "/opt/user-extra" casing).
+            assert "user-extra" not in path_val.lower()
+            assert "userextra" not in path_val.lower()
+
+    def test_rejects_mixed_valid_and_invalid_prefixes(self) -> None:
+        """Validation fails on first invalid entry even if others are valid."""
+        valid = r"C:\ValidDir" if os.name == "nt" else "/opt/valid"
+        with pytest.raises(ValidationError, match="non-empty absolute"):
+            SubprocessSandboxConfig(
+                extra_safe_path_prefixes=(valid, "relative/bad"),
+            )
+
+    def test_rejects_filesystem_root(self) -> None:
+        """Root prefixes like '/' or 'C:\\' are rejected."""
+        root = "C:\\" if os.name == "nt" else "/"
+        with pytest.raises(
+            ValidationError,
+            match="more specific than a filesystem root",
+        ):
+            SubprocessSandboxConfig(
+                extra_safe_path_prefixes=(root,),
+            )
+
+
+# ── Runtime PATH filtering ───────────────────────────────────────
+
+
+class TestRuntimePathFiltering:
+    """Tests for runtime PATH entry filtering in _is_safe_path_entry."""
+
+    def test_null_byte_in_path_entry_rejected(self) -> None:
+        """PATH entries with null bytes are rejected by the filter."""
+        assert not SubprocessSandbox._is_safe_path_entry(
+            "/usr/bin\x00/../../../etc",
+            ("/usr/bin",),
+        )
+
+    def test_sandbox_error_on_empty_fallback_dirs(
+        self,
+        sandbox_workspace: Path,
+    ) -> None:
+        """SandboxError raised when all fallback directories are missing."""
+        config = SubprocessSandboxConfig(restricted_path=True)
+        sandbox = SubprocessSandbox(
+            config=config,
+            workspace=sandbox_workspace,
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {"PATH": "/totally/fake/dir"},
+                clear=True,
+            ),
+            patch.object(
+                SubprocessSandbox,
+                "_get_hardcoded_fallback_dirs",
+                return_value=("/nonexistent/a", "/nonexistent/b"),
+            ),
+            pytest.raises(SandboxError, match="No safe PATH directories"),
+        ):
+            sandbox._build_filtered_env()
+
+    def test_env_overrides_path_refiltered(
+        self,
+        sandbox_workspace: Path,
+    ) -> None:
+        """PATH from env_overrides is re-filtered through _filter_path."""
+        config = SubprocessSandboxConfig(restricted_path=True)
+        sandbox = SubprocessSandbox(
+            config=config,
+            workspace=sandbox_workspace,
+        )
+        safe = r"C:\WINDOWS\system32" if os.name == "nt" else "/usr/bin"
+        overrides_path = (
+            rf"{safe};C:\suspicious\dir"
+            if os.name == "nt"
+            else f"{safe}:/suspicious/dir"
+        )
+        with patch.dict(
+            os.environ,
+            {"PATH": safe},
+            clear=True,
+        ):
+            env = sandbox._build_filtered_env(
+                env_overrides={"PATH": overrides_path},
+            )
+            assert "suspicious" not in env.get("PATH", "").lower()
+            assert safe.lower() in env.get("PATH", "").lower()
+
+    @pytest.mark.skipif(
+        os.name != "nt",
+        reason="Windows-specific PATH case-insensitivity test",
+    )
+    def test_env_overrides_path_case_insensitive(
+        self,
+        sandbox_workspace: Path,
+    ) -> None:
+        """On Windows, 'Path' in env_overrides is re-filtered like 'PATH'."""
+        config = SubprocessSandboxConfig(restricted_path=True)
+        sandbox = SubprocessSandbox(
+            config=config,
+            workspace=sandbox_workspace,
+        )
+        with patch.dict(
+            os.environ,
+            {"PATH": r"C:\WINDOWS\system32"},
+            clear=True,
+        ):
+            env = sandbox._build_filtered_env(
+                env_overrides={"Path": r"C:\suspicious\dir"},
+            )
+            assert "suspicious" not in env.get("PATH", "").lower()

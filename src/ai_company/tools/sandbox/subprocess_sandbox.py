@@ -161,14 +161,22 @@ class SubprocessSandbox:
             reason="no PATH entries matched safe prefixes; using safe defaults",
             original_entry_count=len(entries),
         )
-        safe_dirs = [p for p in safe_prefixes if Path(p).is_dir()]
+        # Fallback uses fully hardcoded directories — no os.environ reads,
+        # no user-provided extra_safe_path_prefixes — so that the
+        # Path.is_dir() filesystem probe receives only compile-time
+        # constants (CodeQL py/path-injection).
+        fallback_dirs = self._get_hardcoded_fallback_dirs()
+        safe_dirs = [p for p in fallback_dirs if Path(p).is_dir()]
         if not safe_dirs:
             logger.error(
                 SANDBOX_PATH_FALLBACK,
-                reason=(
-                    "no safe PATH directories exist on system — PATH will be empty"
-                ),
+                reason="no safe PATH directories exist on system",
             )
+            msg = (
+                "No safe PATH directories found on system; "
+                "cannot create safe sandbox environment"
+            )
+            raise SandboxError(msg)
         return _PATH_SEP.join(safe_dirs)
 
     @staticmethod
@@ -178,10 +186,12 @@ class SubprocessSandbox:
     ) -> bool:
         """Check if a PATH entry falls within a safe prefix directory.
 
-        Normalizes both the entry and prefix, then checks for exact
-        match or directory boundary containment (prevents
-        ``/usr/bin-malicious`` from matching ``/usr/bin``).
+        Rejects null-byte entries, then uses directory-boundary
+        matching to prevent prefix spoofing (e.g. ``/usr/bin-malicious``
+        does not match ``/usr/bin``).
         """
+        if "\x00" in entry:
+            return False
         entry_norm = os.path.normcase(os.path.normpath(entry))
         for prefix in safe_prefixes:
             prefix_norm = os.path.normcase(os.path.normpath(prefix))
@@ -191,24 +201,52 @@ class SubprocessSandbox:
                 return True
         return False
 
+    @staticmethod
+    def _get_platform_default_dirs() -> tuple[str, ...]:
+        """Return built-in safe PATH directories for the current platform.
+
+        These are built-in system directories — not influenced by
+        ``SubprocessSandboxConfig`` user configuration.  On Windows,
+        ``SYSTEMROOT`` is read from the process environment at call
+        time (with a safe default fallback).
+        """
+        if os.name == "nt":
+            system_root = os.environ.get("SYSTEMROOT", r"C:\WINDOWS")
+            return (
+                system_root,
+                str(Path(system_root) / "system32"),
+                r"C:\Program Files\Git",
+                r"C:\Program Files (x86)\Git",
+            )
+        return ("/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin")
+
+    @staticmethod
+    def _get_hardcoded_fallback_dirs() -> tuple[str, ...]:
+        """Return fully hardcoded safe PATH directories for fallback.
+
+        Unlike ``_get_platform_default_dirs``, this reads **no**
+        environment variables — every value is a compile-time constant.
+        Used only in the fallback branch of ``_filter_path`` where
+        ``Path.is_dir()`` probes the filesystem, so that no
+        ``os.environ`` data reaches a filesystem call
+        (CodeQL ``py/path-injection``).
+        """
+        if os.name == "nt":
+            return (
+                r"C:\WINDOWS",
+                r"C:\WINDOWS\system32",
+                r"C:\Program Files\Git",
+                r"C:\Program Files (x86)\Git",
+            )
+        return ("/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin")
+
     def _get_safe_path_prefixes(self) -> tuple[str, ...]:
         """Return safe PATH prefixes for the current platform.
 
         Combines built-in platform defaults with any extra prefixes
         from ``SubprocessSandboxConfig.extra_safe_path_prefixes``.
         """
-        defaults: tuple[str, ...]
-        if os.name == "nt":
-            system_root = os.environ.get("SYSTEMROOT", r"C:\WINDOWS")
-            defaults = (
-                system_root,
-                str(Path(system_root) / "system32"),
-                r"C:\Program Files\Git",
-                r"C:\Program Files (x86)\Git",
-            )
-        else:
-            defaults = ("/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin")
-        return defaults + self._config.extra_safe_path_prefixes
+        return self._get_platform_default_dirs() + self._config.extra_safe_path_prefixes
 
     def _build_filtered_env(
         self,
@@ -235,18 +273,43 @@ class SubprocessSandbox:
         filtered_count = 0
 
         for name, value in os.environ.items():
-            if self._matches_allowlist(name) and not self._matches_denylist(
-                name,
-            ):
+            allowed = self._matches_allowlist(name)
+            denied = self._matches_denylist(name)
+            if allowed and not denied:
                 env[name] = value
             else:
                 filtered_count += 1
 
-        if self._config.restricted_path and "PATH" in env:
-            env["PATH"] = self._filter_path(env["PATH"])
+        # Case-insensitive key check on Windows where env var names
+        # are case-insensitive (e.g. "Path" vs "PATH").
+        if self._config.restricted_path and any(k.upper() == "PATH" for k in env):
+            path_keys = [k for k in env if k.upper() == "PATH"]
+            path_val = next(
+                (env[k] for k in reversed(path_keys)),
+                "",
+            )
+            for k in path_keys:
+                del env[k]
+            env["PATH"] = self._filter_path(path_val)
 
         if env_overrides:
             env.update(env_overrides)
+            # Re-filter PATH if overrides injected one — prevents
+            # bypassing the restricted-path guard via env_overrides.
+            # Case-insensitive key check on Windows where env var
+            # names are case-insensitive (e.g. "Path" vs "PATH").
+            if self._config.restricted_path and any(
+                k.upper() == "PATH" for k in env_overrides
+            ):
+                # Consolidate to a canonical PATH key.
+                path_keys = [k for k in env if k.upper() == "PATH"]
+                path_val = next(
+                    (env[k] for k in reversed(path_keys)),
+                    "",
+                )
+                for k in path_keys:
+                    del env[k]
+                env["PATH"] = self._filter_path(path_val)
 
         logger.debug(
             SANDBOX_ENV_FILTERED,
@@ -408,7 +471,7 @@ class SubprocessSandbox:
 
         Waits up to 5 seconds for the process to terminate.  If the
         process does not terminate, logs an error and returns empty
-        output.
+        stdout with a diagnostic stderr message.
         """
         try:
             return await asyncio.wait_for(
@@ -448,7 +511,8 @@ class SubprocessSandbox:
 
         Raises:
             SandboxStartError: If the subprocess could not be started.
-            SandboxError: If cwd is outside the workspace boundary.
+            SandboxError: If cwd is outside the workspace boundary or
+                if no safe PATH directories can be determined.
         """
         work_dir = cwd if cwd is not None else self._workspace
         self._validate_cwd(work_dir)

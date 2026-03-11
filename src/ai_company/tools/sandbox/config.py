@@ -1,5 +1,6 @@
 """Subprocess sandbox configuration model."""
 
+import os
 from pathlib import PurePath
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -73,11 +74,39 @@ class SubprocessSandboxConfig(BaseModel):
     @field_validator("extra_safe_path_prefixes")
     @classmethod
     def _validate_prefixes(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        sanitized: list[str] = []
         for prefix in v:
+            # Null bytes confuse OS-level path APIs that treat
+            # \x00 as a string terminator.
+            if "\x00" in prefix:
+                msg = (
+                    "extra_safe_path_prefixes entries must not "
+                    f"contain null bytes, got: {prefix!r}"
+                )
+                raise ValueError(msg)
             if not prefix or not PurePath(prefix).is_absolute():
                 msg = (
                     "extra_safe_path_prefixes entries must be "
                     f"non-empty absolute paths, got: {prefix!r}"
                 )
                 raise ValueError(msg)
-        return v
+            normalized = os.path.normpath(prefix)
+            normalized_path = PurePath(normalized)
+            # Defense-in-depth: normpath should preserve
+            # absoluteness, but verify for safety.
+            if not normalized_path.is_absolute():
+                msg = (
+                    "extra_safe_path_prefixes entries must resolve "
+                    f"to absolute paths, got: {prefix!r}"
+                )
+                raise ValueError(msg)
+            # Reject filesystem roots — they effectively disable
+            # the restricted_path guard for all absolute entries.
+            if normalized_path == PurePath(normalized_path.anchor):
+                msg = (
+                    "extra_safe_path_prefixes entries must be more "
+                    f"specific than a filesystem root, got: {prefix!r}"
+                )
+                raise ValueError(msg)
+            sanitized.append(normalized)
+        return tuple(sanitized)

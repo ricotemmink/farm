@@ -51,6 +51,8 @@ jobs:
       contents: read
       packages: write
       id-token: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -103,7 +105,7 @@ jobs:
           format: table
           exit-code: "1"
           severity: CRITICAL
-          trivyignores: .trivyignore.yaml
+          trivyignores: .github/.trivyignore.yaml
 
       - name: Trivy scan (high — warn only)
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
@@ -113,7 +115,7 @@ jobs:
           format: table
           exit-code: "0"
           severity: HIGH
-          trivyignores: .trivyignore.yaml
+          trivyignores: .github/.trivyignore.yaml
 
       - name: Grype scan
         uses: anchore/scan-action@7037fa011853d5a11690026fb85feee79f4c946c # v7.3.2
@@ -121,7 +123,7 @@ jobs:
           image: ${{ steps.scan-ref.outputs.ref }}
           fail-build: true
           severity-cutoff: critical
-          config: .grype.yaml
+          config: .github/.grype.yaml
 
       # Push only after scans pass — prevents publishing vulnerable images.
       # NOTE: This is a separate build invocation from the scan step. GHA cache
@@ -162,6 +164,8 @@ jobs:
       contents: read
       packages: write
       id-token: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -214,7 +218,7 @@ jobs:
           format: table
           exit-code: "1"
           severity: CRITICAL
-          trivyignores: .trivyignore.yaml
+          trivyignores: .github/.trivyignore.yaml
 
       - name: Trivy scan (high — warn only)
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
@@ -224,7 +228,7 @@ jobs:
           format: table
           exit-code: "0"
           severity: HIGH
-          trivyignores: .trivyignore.yaml
+          trivyignores: .github/.trivyignore.yaml
 
       - name: Grype scan
         uses: anchore/scan-action@7037fa011853d5a11690026fb85feee79f4c946c # v7.3.2
@@ -232,7 +236,7 @@ jobs:
           image: ${{ steps.scan-ref.outputs.ref }}
           fail-build: true
           severity-cutoff: critical
-          config: .grype.yaml
+          config: .github/.grype.yaml
 
       # Push only after scans pass — prevents publishing vulnerable images.
       # NOTE: Separate build invocation; GHA cache ensures deterministic layers,
@@ -263,3 +267,74 @@ jobs:
             exit 1
           fi
           cosign sign --yes ghcr.io/aureliolo/synthorg-web@${DIGEST}
+
+  # Append container image references to the GitHub Release (version tags only)
+  update-release:
+    name: Update Release Notes
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, build-backend, build-web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Append container images to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.app_version }}
+          BACKEND_DIGEST: ${{ needs.build-backend.outputs.digest }}
+          WEB_DIGEST: ${{ needs.build-web.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          # Validate required inputs
+          if [ -z "$VERSION" ] || [ -z "$BACKEND_DIGEST" ] || [ -z "$WEB_DIGEST" ]; then
+            echo "::error::Missing required values: VERSION='$VERSION' BACKEND_DIGEST='$BACKEND_DIGEST' WEB_DIGEST='$WEB_DIGEST'"
+            exit 1
+          fi
+
+          # Bounded retry — Release Please may still be creating the release
+          EXISTING=""
+          for i in $(seq 1 6); do
+            if EXISTING=$(gh release view "$TAG" --json body -q '.body // ""' 2>/dev/null); then
+              break
+            fi
+            echo "Release '$TAG' not available yet (attempt $i/6), retrying in 10s..."
+            sleep 10
+          done
+
+          IMAGES=$(cat <<'BLOCK'
+
+          ## Container Images
+
+          | Image | Pull |
+          |-------|------|
+          | Backend | `docker pull ghcr.io/aureliolo/synthorg-backend:VERSION_PH` |
+          | Web | `docker pull ghcr.io/aureliolo/synthorg-web:VERSION_PH` |
+
+          **Digests** (for pinning):
+          - Backend: `ghcr.io/aureliolo/synthorg-backend@BACKEND_DIGEST_PH`
+          - Web: `ghcr.io/aureliolo/synthorg-web@WEB_DIGEST_PH`
+
+          All images are signed with [cosign](https://github.com/sigstore/cosign). Verify with:
+          ```bash
+          cosign verify ghcr.io/aureliolo/synthorg-backend@BACKEND_DIGEST_PH \
+            --certificate-identity-regexp='github\.com/Aureliolo/synthorg' \
+            --certificate-oidc-issuer='https://token.actions.githubusercontent.com'
+
+          cosign verify ghcr.io/aureliolo/synthorg-web@WEB_DIGEST_PH \
+            --certificate-identity-regexp='github\.com/Aureliolo/synthorg' \
+            --certificate-oidc-issuer='https://token.actions.githubusercontent.com'
+          ```
+          BLOCK
+          )
+          # Dedent (remove leading 10-space YAML indentation) and substitute placeholders
+          IMAGES=$(echo "$IMAGES" | sed 's/^          //')
+          IMAGES=${IMAGES//VERSION_PH/$VERSION}
+          IMAGES=${IMAGES//BACKEND_DIGEST_PH/$BACKEND_DIGEST}
+          IMAGES=${IMAGES//WEB_DIGEST_PH/$WEB_DIGEST}
+
+          # Idempotent: strip existing Container Images section before appending
+          CLEANED=$(echo "$EXISTING" | sed '/^## Container Images$/,$d')
+          gh release edit "$TAG" --notes "${CLEANED}${IMAGES}"
