@@ -1,7 +1,8 @@
 """API configuration models.
 
-Frozen Pydantic models for CORS, rate limiting, server, and the
-top-level ``ApiConfig`` that aggregates them all.
+Frozen Pydantic models for CORS, rate limiting, server,
+authentication, and the top-level ``ApiConfig`` that aggregates
+them all.
 """
 
 from enum import StrEnum
@@ -9,6 +10,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ai_company.api.auth.config import AuthConfig
 from ai_company.core.types import NotBlankStr  # noqa: TC001
 
 
@@ -34,7 +36,7 @@ class CorsConfig(BaseModel):
         description="HTTP methods permitted in cross-origin requests",
     )
     allow_headers: tuple[str, ...] = Field(
-        default=("Content-Type", "Authorization", "X-Human-Role"),
+        default=("Content-Type", "Authorization"),
         description="Headers permitted in cross-origin requests",
     )
     allow_credentials: bool = Field(
@@ -150,6 +152,7 @@ class ApiConfig(BaseModel):
         cors: CORS configuration.
         rate_limit: Rate limiting configuration.
         server: Uvicorn server configuration.
+        auth: Authentication configuration.
         api_prefix: URL prefix for all API routes.
     """
 
@@ -166,6 +169,10 @@ class ApiConfig(BaseModel):
     server: ServerConfig = Field(
         default_factory=ServerConfig,
         description="Uvicorn server configuration",
+    )
+    auth: AuthConfig = Field(
+        default_factory=AuthConfig,
+        description="Authentication configuration",
     )
     api_prefix: NotBlankStr = Field(
         default="/api/v1",

@@ -19,6 +19,10 @@ from litestar.openapi.plugins import ScalarRenderPlugin
 
 from ai_company import __version__
 from ai_company.api.approval_store import ApprovalStore
+from ai_company.api.auth.controller import require_password_changed
+from ai_company.api.auth.middleware import create_auth_middleware_class
+from ai_company.api.auth.secret import resolve_jwt_secret
+from ai_company.api.auth.service import AuthService
 from ai_company.api.bus_bridge import MessageBusBridge
 from ai_company.api.channels import CHANNEL_APPROVALS, create_channels_plugin
 from ai_company.api.controllers import ALL_CONTROLLERS
@@ -98,6 +102,7 @@ def _build_lifecycle(
     persistence: PersistenceBackend | None,
     message_bus: MessageBus | None,
     bridge: MessageBusBridge | None,
+    app_state: AppState,
 ) -> tuple[
     Sequence[Callable[[], Awaitable[None]]],
     Sequence[Callable[[], Awaitable[None]]],
@@ -110,7 +115,7 @@ def _build_lifecycle(
 
     async def on_startup() -> None:
         logger.info(API_APP_STARTUP, version=__version__)
-        await _safe_startup(persistence, message_bus, bridge)
+        await _safe_startup(persistence, message_bus, bridge, app_state)
 
     async def on_shutdown() -> None:
         logger.info(API_APP_SHUTDOWN, version=__version__)
@@ -131,28 +136,69 @@ async def _cleanup_on_failure(
         try:
             await message_bus.stop()
         except Exception:
-            logger.error(
+            logger.exception(
                 API_APP_STARTUP,
                 error="Cleanup: failed to stop message bus",
-                exc_info=True,
             )
     if started_persistence and persistence is not None:
         try:
             await persistence.disconnect()
         except Exception:
-            logger.error(
+            logger.exception(
                 API_APP_STARTUP,
                 error="Cleanup: failed to disconnect persistence",
-                exc_info=True,
             )
+
+
+async def _init_persistence(
+    persistence: PersistenceBackend,
+    app_state: AppState,
+) -> None:
+    """Run migrations and resolve JWT secret on an already-connected backend.
+
+    Must only be called after ``persistence.connect()`` has succeeded.
+
+    Args:
+        persistence: Connected persistence backend.
+        app_state: Application state for auth service injection.
+    """
+    try:
+        await persistence.migrate()
+    except Exception:
+        logger.exception(
+            API_APP_STARTUP,
+            error="Failed to run persistence migrations",
+        )
+        raise
+
+    # Resolve JWT secret after persistence is up
+    if app_state.has_auth_service:
+        logger.info(
+            API_APP_STARTUP,
+            note="Auth service already configured, skipping JWT secret resolution",
+        )
+    else:
+        try:
+            secret = await resolve_jwt_secret(persistence)
+            auth_config = app_state.config.api.auth.with_secret(
+                secret,
+            )
+            app_state.set_auth_service(AuthService(auth_config))
+        except Exception:
+            logger.exception(
+                API_APP_STARTUP,
+                error="Failed to resolve JWT secret",
+            )
+            raise
 
 
 async def _safe_startup(
     persistence: PersistenceBackend | None,
     message_bus: MessageBus | None,
     bridge: MessageBusBridge | None,
+    app_state: AppState,
 ) -> None:
-    """Connect persistence, start message bus and bridge.
+    """Connect persistence, resolve JWT secret, start message bus and bridge.
 
     Executes in order; on failure, cleans up already-started
     components in reverse order before re-raising.
@@ -164,21 +210,23 @@ async def _safe_startup(
             try:
                 await persistence.connect()
             except Exception:
-                logger.error(
+                logger.exception(
                     API_APP_STARTUP,
                     error="Failed to connect persistence",
-                    exc_info=True,
                 )
                 raise
+            # Mark connected immediately so cleanup can disconnect
+            # if migrate() or JWT resolution fails below.
             started_persistence = True
+            await _init_persistence(persistence, app_state)
+
         if message_bus is not None:
             try:
                 await message_bus.start()
             except Exception:
-                logger.error(
+                logger.exception(
                     API_APP_STARTUP,
                     error="Failed to start message bus",
-                    exc_info=True,
                 )
                 raise
             started_bus = True
@@ -186,10 +234,9 @@ async def _safe_startup(
             try:
                 await bridge.start()
             except Exception:
-                logger.error(
+                logger.exception(
                     API_APP_STARTUP,
                     error="Failed to start message bus bridge",
-                    exc_info=True,
                 )
                 raise
     except Exception:
@@ -212,38 +259,36 @@ async def _safe_shutdown(
         try:
             await bridge.stop()
         except Exception:
-            logger.error(
+            logger.exception(
                 API_APP_SHUTDOWN,
                 error="Failed to stop message bus bridge",
-                exc_info=True,
             )
     if message_bus is not None:
         try:
             await message_bus.stop()
         except Exception:
-            logger.error(
+            logger.exception(
                 API_APP_SHUTDOWN,
                 error="Failed to stop message bus",
-                exc_info=True,
             )
     if persistence is not None:
         try:
             await persistence.disconnect()
         except Exception:
-            logger.error(
+            logger.exception(
                 API_APP_SHUTDOWN,
                 error="Failed to disconnect persistence",
-                exc_info=True,
             )
 
 
-def create_app(
+def create_app(  # noqa: PLR0913
     *,
     config: RootConfig | None = None,
     persistence: PersistenceBackend | None = None,
     message_bus: MessageBus | None = None,
     cost_tracker: CostTracker | None = None,
     approval_store: ApprovalStore | None = None,
+    auth_service: AuthService | None = None,
 ) -> Litestar:
     """Create and configure the Litestar application.
 
@@ -256,6 +301,7 @@ def create_app(
         message_bus: Internal message bus.
         cost_tracker: Cost tracking service.
         approval_store: Approval queue store.
+        auth_service: Pre-built auth service (for testing).
 
     Returns:
         Configured Litestar application.
@@ -283,6 +329,7 @@ def create_app(
         message_bus=message_bus,
         cost_tracker=cost_tracker,
         approval_store=effective_approval_store,
+        auth_service=auth_service,
         startup_time=time.monotonic(),
     )
 
@@ -293,12 +340,14 @@ def create_app(
     api_router = Router(
         path=api_config.api_prefix,
         route_handlers=[*ALL_CONTROLLERS, ws_handler],
+        guards=[require_password_changed],
     )
 
     startup, shutdown = _build_lifecycle(
         persistence,
         message_bus,
         bridge,
+        app_state,
     )
 
     return Litestar(
@@ -369,4 +418,24 @@ def _build_middleware(api_config: ApiConfig) -> list[Middleware]:
         rate_limit=(rl.time_unit, rl.max_requests),  # type: ignore[arg-type]
         exclude=list(rl.exclude_paths),
     )
-    return [CSPMiddleware, RequestLoggingMiddleware, rate_limit.middleware]
+    auth = api_config.auth
+    if auth.exclude_paths is None:
+        prefix = api_config.api_prefix
+        auth = auth.model_copy(
+            update={
+                "exclude_paths": (
+                    f"^{prefix}/health$",
+                    "^/docs",
+                    "^/api$",
+                    f"^{prefix}/auth/setup$",
+                    f"^{prefix}/auth/login$",
+                ),
+            },
+        )
+    auth_middleware = create_auth_middleware_class(auth)
+    return [
+        auth_middleware,
+        CSPMiddleware,
+        RequestLoggingMiddleware,
+        rate_limit.middleware,
+    ]

@@ -13,11 +13,13 @@ from ai_company.hr.persistence_protocol import (
     TaskMetricRepository,  # noqa: TC001
 )
 from ai_company.persistence.repositories import (
+    ApiKeyRepository,  # noqa: TC001
     AuditRepository,  # noqa: TC001
     CostRecordRepository,  # noqa: TC001
     MessageRepository,  # noqa: TC001
     ParkedContextRepository,  # noqa: TC001
     TaskRepository,  # noqa: TC001
+    UserRepository,  # noqa: TC001
 )
 
 
@@ -40,6 +42,8 @@ class PersistenceBackend(Protocol):
         collaboration_metrics: Repository for CollaborationMetricRecord persistence.
         parked_contexts: Repository for ParkedContext persistence.
         audit_entries: Repository for AuditEntry persistence.
+        users: Repository for User persistence.
+        api_keys: Repository for ApiKey persistence.
     """
 
     async def connect(self) -> None:
@@ -122,4 +126,42 @@ class PersistenceBackend(Protocol):
     @property
     def audit_entries(self) -> AuditRepository:
         """Repository for AuditEntry persistence."""
+        ...
+
+    @property
+    def users(self) -> UserRepository:
+        """Repository for User persistence."""
+        ...
+
+    @property
+    def api_keys(self) -> ApiKeyRepository:
+        """Repository for ApiKey persistence."""
+        ...
+
+    async def get_setting(self, key: NotBlankStr) -> str | None:
+        """Retrieve a setting value by key.
+
+        Args:
+            key: Setting key.
+
+        Returns:
+            The setting value, or ``None`` if not found.
+
+        Raises:
+            PersistenceError: If the operation fails.
+        """
+        ...
+
+    async def set_setting(self, key: NotBlankStr, value: str) -> None:
+        """Store a setting value.
+
+        Upserts — creates or updates the key.
+
+        Args:
+            key: Setting key.
+            value: Setting value.
+
+        Raises:
+            PersistenceError: If the operation fails.
+        """
         ...

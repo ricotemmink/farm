@@ -9,11 +9,11 @@ from litestar.testing import TestClient  # noqa: TC002
 from ai_company.api.approval_store import ApprovalStore  # noqa: TC001
 from ai_company.core.approval import ApprovalItem
 from ai_company.core.enums import ApprovalRiskLevel, ApprovalStatus
-from tests.unit.api.conftest import make_approval
+from tests.unit.api.conftest import make_approval, make_auth_headers
 
 _BASE = "/api/v1/approvals"
-_WRITE_HEADERS = {"X-Human-Role": "ceo"}
-_READ_HEADERS = {"X-Human-Role": "observer"}
+_WRITE_HEADERS = make_auth_headers("ceo")
+_READ_HEADERS = make_auth_headers("observer")
 
 
 def _create_payload(
@@ -134,8 +134,8 @@ class TestListApprovals:
         assert body["pagination"]["offset"] == 2
 
     def test_list_blocks_no_role(self, test_client: TestClient[Any]) -> None:
-        resp = test_client.get(_BASE, headers={"X-Human-Role": "invalid"})
-        assert resp.status_code == 403
+        resp = test_client.get(_BASE, headers={"Authorization": "Bearer invalid-token"})
+        assert resp.status_code == 401
 
 
 @pytest.mark.unit
@@ -164,16 +164,16 @@ class TestGetApproval:
         # Observer should have read access (even if 404)
         resp = test_client.get(
             f"{_BASE}/nonexistent",
-            headers={"X-Human-Role": "observer"},
+            headers=make_auth_headers("observer"),
         )
         assert resp.status_code == 404  # 404 = authorized but not found
 
     def test_get_blocks_no_role(self, test_client: TestClient[Any]) -> None:
         resp = test_client.get(
             f"{_BASE}/whatever",
-            headers={"X-Human-Role": "invalid"},
+            headers={"Authorization": "Bearer invalid-token"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
 
 @pytest.mark.unit
@@ -234,12 +234,13 @@ class TestCreateApproval:
         )
         assert resp.status_code == 403
 
-    def test_create_blocks_no_role(self, test_client: TestClient[Any]) -> None:
+    def test_create_blocks_no_auth(self, test_client: TestClient[Any]) -> None:
         resp = test_client.post(
             _BASE,
             json=_create_payload(),
+            headers={"Authorization": "Bearer invalid-token"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
 
 @pytest.mark.unit
@@ -258,7 +259,7 @@ class TestApproveApproval:
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["status"] == "approved"
-        assert body["data"]["decided_by"] == "ceo"
+        assert body["data"]["decided_by"] == "test-ceo"
         assert body["data"]["decision_reason"] == "Looks good"
 
     async def test_approve_records_decided_by_from_header(
@@ -270,10 +271,10 @@ class TestApproveApproval:
         resp = test_client.post(
             f"{_BASE}/approval-001/approve",
             json={},
-            headers={"X-Human-Role": "manager"},
+            headers=make_auth_headers("manager"),
         )
         assert resp.status_code == 200
-        assert resp.json()["data"]["decided_by"] == "manager"
+        assert resp.json()["data"]["decided_by"] == "test-manager"
 
     def test_approve_not_found(self, test_client: TestClient[Any]) -> None:
         resp = test_client.post(
@@ -359,7 +360,7 @@ class TestRejectApproval:
         assert resp.status_code == 200
         body = resp.json()
         assert body["data"]["status"] == "rejected"
-        assert body["data"]["decided_by"] == "ceo"
+        assert body["data"]["decided_by"] == "test-ceo"
         assert body["data"]["decision_reason"] == "Too risky"
 
     async def test_reject_requires_reason(
