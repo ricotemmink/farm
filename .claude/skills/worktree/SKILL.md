@@ -12,7 +12,7 @@ allowed-tools:
 
 # Worktree Manager
 
-Manage parallel git worktrees for multi-issue development across phases. Handles creation, settings propagation, prompt generation, cleanup after merge, milestone tree view, and status overview.
+Manage parallel git worktrees for multi-issue development across phases. Handles creation, settings propagation, prompt generation, cleanup after merge, dependency tree view, and status overview.
 
 **Arguments:** "$ARGUMENTS"
 
@@ -40,9 +40,10 @@ feat/parallel-execution #22 "Parallel Agent Execution"
 Branch names auto-generated from description: `feat/delegation-loop-prevention`.
 Default branch type prefix is `feat/` unless the user specifies otherwise or the issue labels suggest a different type (e.g., `type:bug` → `fix/`, `type:refactor` → `refactor/`).
 
-**Mode 3 — Milestone-aware:**
-```
-/worktree setup --milestone M4 --issues #26,#30,#133,#168
+**Mode 3 — Issue list only:**
+
+```text
+/worktree setup --issues #26,#30,#133,#168
 ```
 Fetches issue titles from GitHub, groups by the user's worktree definitions (or asks for grouping via AskUserQuestion if not provided).
 
@@ -53,9 +54,9 @@ If no definitions are provided at all, ask the user via AskUserQuestion for:
 ### Directory naming
 
 Directory suffix is auto-derived from the branch name:
-- `feat/delegation-loop-prevention` → `../ai-company-wt-delegation-loop-prevention`
+- `feat/delegation-loop-prevention` → `../synthorg-wt-delegation-loop-prevention`
 - Strip everything up to and including the first `/` in the branch name (covers `feat/`, `fix/`, `refactor/`, `chore/`, `docs/`, `test/`, `perf/`, `ci/`), then prepend `wt-`
-- Repo name extracted from the current working directory basename
+- Repo name extracted from the repository's canonical root metadata (e.g. `basename $(git rev-parse --show-toplevel)`), not the current working directory basename. If running inside a linked worktree, derive the base repo name from shared Git metadata before composing `../<repo-name>-wt-<slug>`
 
 ### Steps
 
@@ -108,7 +109,7 @@ Directory suffix is auto-derived from the branch name:
 
 3. **For each worktree definition**, run in sequence:
 
-   a. Determine the directory path: `../<repo-name>-wt-<slug>` (e.g. `../ai-company-wt-delegation-loop-prevention`)
+   a. Determine the directory path: `../<repo-name>-wt-<slug>` (e.g. `../synthorg-wt-delegation-loop-prevention`)
 
    b. Create the worktree. For **new** branches:
 
@@ -201,7 +202,7 @@ Directory suffix is auto-derived from the branch name:
    If there are multiple issues in one worktree that have a natural ordering (from dependency parsing or logical sequence), add an `## Implementation order` section.
 
 6. **Present the output** to the user:
-   - For each worktree: show the **absolute path** to the worktree directory and a separate `claude` invocation command, followed by the prompt in a code block. Derive the absolute path dynamically by resolving the worktree directory (e.g., using `realpath <dir-path>` or `pwd` from within the worktree) and converting to the platform's native format. On Windows, use backslash paths (e.g., `C:\Users\Aurelio\ai-company-wt-delegation-loop-prevention`).
+   - For each worktree: show the **absolute path** to the worktree directory and a separate `claude` invocation command, followed by the prompt in a code block. Derive the absolute path dynamically by resolving the worktree directory (e.g., using `realpath <dir-path>` or `pwd` from within the worktree) and converting to the platform's native format. On Windows, use backslash paths (e.g., `C:\Users\Aurelio\synthorg-wt-delegation-loop-prevention`).
    - **Note:** The `cd <path> && claude` instruction is for the **user's own terminal** (they will paste it into a new shell). This is NOT a Bash tool invocation — do not confuse with CLAUDE.md's "never use cd in Bash commands" rule, which applies to Bash tool calls within the skill.
    - End with a count: "N worktrees ready. Go."
 
@@ -267,13 +268,9 @@ Remove worktrees and clean up branches after PRs are merged.
    git branch -a
    ```
 
-8. **Show milestone progress** (if determinable). Detect the milestone from the branches/issues that were cleaned up:
+8. **Report summary:**
 
-   ```bash
-   gh issue list --repo <owner/repo> --milestone "<milestone>" --state all --json state --jq '[sort_by(.state) | group_by(.state) | .[] | {state: .[0].state, count: length}]'
-   ```
-
-   Report: "Clean. Main up to date, N worktrees removed, N branches deleted. Milestone: X/Y issues closed, Z remaining."
+   Report: "Clean. Main up to date, N worktrees removed, N branches deleted."
 
 ---
 
@@ -321,35 +318,30 @@ Show current worktree state and how they compare to main.
 
 ## Command: `tree`
 
-Auto-generate a phase/dependency tree view from milestone issues.
+Auto-generate a phase/dependency tree view from a set of issues.
 
 ### Input format
 
-```
-/worktree tree --milestone M4
+```text
+/worktree tree --issues #26,#30,#133,#168
 ```
 
-If no milestone specified, try to detect from current worktree branches or ask via AskUserQuestion.
+If no issues specified, try to detect from current worktree branches or ask via AskUserQuestion.
 
 ### Steps
 
-1. **Fetch all issues for the milestone:**
+1. **Fetch the specified issues:**
 
    ```bash
-   gh issue list --repo <owner/repo> --milestone "<milestone-title>" --state all --limit 500 --json number,title,state,labels,body
-   ```
-
-   Find the milestone title by querying:
-   ```bash
-   gh api repos/<owner/repo>/milestones --jq '.[] | select(.title | test("<milestone-pattern>")) | {number, title}'
+   gh issue view <number> --repo <owner/repo> --json number,title,state,labels,body
    ```
 
 2. **Parse dependency graph.** For each issue, extract `## Dependencies` section and resolve `#<N>` references. Build an adjacency list.
 
 3. **Compute tiers** using topological sort:
-   - Tier 0: issues with no open M-internal dependencies (all deps are closed or external)
-   - Tier 1: depends only on Tier 0 issues
-   - Tier N: depends on Tier N-1 issues
+   - Tier 0: issues with no open internal dependencies (all deps are closed or external)
+   - Tier 1: all open internal dependencies are in Tier 0
+   - Tier N: all open internal dependencies are in earlier tiers; assign the tier as `1 + max(dependency tier)`
    - Flag circular dependencies as errors. When detected, report the cycle (e.g. "#12 → #17 → #12"), render the remaining non-circular issues in their tiers, and suggest: "Break the cycle by removing one dependency edge, or implement the circular group in a single worktree."
 
 4. **Identify current active worktrees** (if any):
@@ -365,7 +357,7 @@ If no milestone specified, try to detect from current worktree branches or ask v
 
    Format:
    ```
-   MILESTONE: M4 — Communication & Multi-Agent Orchestration (15/19 done)
+   ISSUES: 4 total (3/4 done)
 
    TIER 0 — No dependencies (all prereqs closed)
      ✅ #8   Message bus                    [critical]  communication/
@@ -444,7 +436,7 @@ Update all worktrees to latest main. Pulls main first, then rebases clean worktr
 - **Never force-remove** a worktree without asking the user first.
 - **Never delete branches** without checking PR merge status first.
 - **Always check `.claude/` local files exist** before copying — warn if missing.
-- **Repo name detection**: extract from the current directory basename (e.g. `ai-company`).
+- **Repo name detection**: extract from the repository's canonical root (`basename $(git rev-parse --show-toplevel)`), not the current directory basename. Strip any existing `wt-` prefix to avoid nested names when running from inside a linked worktree.
 - **Owner/repo detection**: extract from `git remote get-url origin`.
 - **Platform-aware paths**: derive worktree absolute paths dynamically at runtime. On Windows, convert to backslash paths for user-facing output. The `cd <path> && claude` instructions are for the user's own terminal, not Bash tool invocations.
 - Worktree directories are always siblings of the main repo directory (`../`).
@@ -454,16 +446,17 @@ Update all worktrees to latest main. Pulls main first, then rebases clean worktr
 - **Input validation (CRITICAL):** Before interpolating any user-provided value into shell commands, validate:
   - Issue numbers: must match `^[0-9]+$`
   - Branch names: must match `^[a-zA-Z0-9/_.-]+$`
-  - Milestone identifiers: must match `^M[0-9]+$` or a reasonable alphanumeric pattern
+  - Label/filter values: must be a reasonable alphanumeric pattern (no shell metacharacters)
   - Owner/repo (from `git remote`): must match `^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$`
   - Directory paths: must not contain shell metacharacters (`;`, `|`, `&`, `$`, `` ` ``, `(`, `)`)
   - Reject and warn if any value fails validation — do not execute the command.
 - If `$ARGUMENTS` is empty or doesn't match a command, show a brief usage guide:
-  ```
+
+  ```text
   /worktree setup <definitions>   — Create worktrees with prompts
-  /worktree setup --milestone M4 --issues #26,#30  — Milestone-aware setup
+  /worktree setup --issues #26,#30  — Issue-aware setup
   /worktree cleanup                — Remove worktrees after merge
   /worktree status                 — Show worktree state
-  /worktree tree --milestone M4    — Dependency tree view
+  /worktree tree --issues #26,#30  — Dependency tree view
   /worktree rebase                 — Update worktrees to latest main
   ```

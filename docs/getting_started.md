@@ -1,6 +1,6 @@
 # Getting Started
 
-Step-by-step guide to set up a development environment for AI Company.
+Step-by-step guide to set up a development environment for SynthOrg.
 
 ## Prerequisites
 
@@ -25,8 +25,8 @@ Required for cloning the repository and commit hooks. Install from [git-scm.com]
 ## Clone and Install
 
 ```bash
-git clone https://github.com/Aureliolo/ai-company.git
-cd ai-company
+git clone https://github.com/Aureliolo/synthorg.git
+cd synthorg
 uv sync
 ```
 
@@ -37,7 +37,7 @@ uv sync
 Run the smoke tests to confirm everything is working:
 
 ```bash
-uv run pytest tests/ -m unit
+uv run pytest tests/ -m unit -n auto
 ```
 
 You should see all tests passing.
@@ -98,7 +98,7 @@ uv run ruff format src/ tests/
 ## Project Layout
 
 ```text
-ai-company/
+synthorg/
   src/ai_company/       # Main package (src layout)
     api/                # Litestar REST + WebSocket routes
     budget/             # Cost tracking and spending controls

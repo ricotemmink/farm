@@ -1,8 +1,8 @@
-# CLAUDE.md — AI Company
+# CLAUDE.md — SynthOrg
 
 ## Project
 
-- **What**: Framework for orchestrating autonomous AI agents within a virtual company structure
+- **What**: Framework for building synthetic organizations — autonomous AI agents orchestrated as a virtual company
 - **Python**: 3.14+ (PEP 649 native lazy annotations)
 - **License**: BUSL-1.1 (converts to Apache 2.0 on 2030-02-27)
 - **Layout**: `src/ai_company/` (src layout), `tests/` (unit/integration/e2e)
@@ -32,9 +32,9 @@ uv run ruff check src/ tests/              # lint
 uv run ruff check src/ tests/ --fix        # lint + auto-fix
 uv run ruff format src/ tests/             # format
 uv run mypy src/ tests/                    # type-check (strict)
-uv run pytest tests/ -m unit               # unit tests only
-uv run pytest tests/ -m integration        # integration tests only
-uv run pytest tests/ -m e2e                # e2e tests only
+uv run pytest tests/ -m unit -n auto        # unit tests only
+uv run pytest tests/ -m integration -n auto # integration tests only
+uv run pytest tests/ -m e2e -n auto         # e2e tests only
 uv run pytest tests/ -n auto --cov=ai_company --cov-fail-under=80  # full suite + coverage
 uv run pre-commit run --all-files          # all pre-commit hooks
 ```
@@ -84,7 +84,7 @@ src/ai_company/
 
 ## Shell Usage
 
-- **NEVER use `cd` in Bash commands** — the working directory is already set to the project root. Use absolute paths or run commands directly. Do NOT prefix commands with `cd C:/Users/Aurelio/ai-company &&`.
+- **NEVER use `cd` in Bash commands** — the working directory is already set to the project root. Use absolute paths or run commands directly. Do NOT prefix commands with `cd C:/Users/Aurelio/synthorg &&`.
 
 ## Code Conventions
 
@@ -129,7 +129,7 @@ src/ai_company/
 - **Coverage**: 80% minimum (enforced in CI)
 - **Async**: `asyncio_mode = "auto"` — no manual `@pytest.mark.asyncio` needed
 - **Timeout**: 30 seconds per test
-- **Parallelism**: `pytest-xdist` via `-n auto`
+- **Parallelism**: `pytest-xdist` via `-n auto` — **ALWAYS** include `-n auto` when running pytest, never run tests sequentially
 - **Parametrize**: Prefer `@pytest.mark.parametrize` for testing similar cases
 - **Vendor-agnostic everywhere**: NEVER use real vendor names (Anthropic, OpenAI, Claude, GPT, etc.) in project-owned code, docstrings, comments, tests, or config examples. Use generic names: `example-provider`, `example-large-001`, `example-medium-001`, `example-small-001`, `large`/`medium`/`small` as aliases. Vendor names may only appear in: (1) DESIGN_SPEC.md provider list (listing supported providers), (2) `.claude/` skill/agent files, (3) third-party import paths/module names (e.g. `litellm.types.llms.openai`). Tests must use `test-provider`, `test-small-001`, etc.
 

@@ -15,7 +15,7 @@ layer as "TBD — candidates: Mem0, Zep, Letta, Cognee, custom." (Note: Zep pivo
 **Graphiti** as their open-source temporal knowledge graph offering; the standalone Zep
 product is now a cloud-only service. This evaluation covers Graphiti as Zep's
 successor.) This decision blocks
-the entire M5 milestone:
+the memory subsystem implementation:
 
 - **#32** Memory interface design
 - **#36** Persistence layer
@@ -27,7 +27,7 @@ the entire M5 milestone:
 
 1. **Target architecture**: memory/storage runs in **separate container(s)** from the
    main Python app. **MVP exception**: an in-process deployment (e.g., Mem0 inside the
-   `ai-company` container) is acceptable as long as it preserves the same protocol
+   `synthorg-backend` container) is acceptable as long as it preserves the same protocol
    boundary and can be moved out-of-process without refactors.
 2. Does NOT have to be Python — any technology, containerized
 3. Main app uses a **thin async Python client** behind a **pluggable protocol**, which
@@ -221,7 +221,7 @@ build a proper custom backend later.
 ### Why Mem0 as Initial
 
 1. **Production-ready now**: v1.0+, 49k stars, YC-backed. `pip install mem0ai` and go.
-2. **In-process deployment**: Qdrant embedded + SQLite — runs inside the ai-company
+2. **In-process deployment**: Qdrant embedded + SQLite — runs inside the synthorg-backend
    Docker container. No external services needed. Persists to mounted volumes.
 3. **Python 3.14 compatible**: `>=3.9,<4.0`.
 4. **Configurable everything**: embedding provider, vector store, graph store, LLM
@@ -270,14 +270,14 @@ swap via config.
 
 ## Architecture
 
-### Initial: Mem0 In-Process (M5)
+### Initial: Mem0 In-Process
 
-Everything runs inside the ai-company Docker container. Persistent data written to
+Everything runs inside the synthorg-backend Docker container. Persistent data written to
 configurable paths on mounted Docker volumes.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
-│              ai-company Docker container                        │
+│         synthorg-backend Docker container                     │
 │                                                                  │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │                Memory Protocol Layer                       │  │
@@ -310,7 +310,7 @@ When Mem0's limitations become blocking, swap to custom backend via config:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
-│              ai-company Docker container                         │
+│         synthorg-backend Docker container                      │
 │                                                                   │
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │                Memory Protocol Layer                        │  │
@@ -489,9 +489,9 @@ Configuration determines which provider to use. Set via YAML config.
 
 | Phase | What | External Containers | Notes |
 |-------|------|-------------------|-------|
-| **M5-Phase 1** | Mem0 in-process (Qdrant embedded + SQLite) | None | All memory inside ai-company container. Persists to mounted volume |
-| **M5-Phase 2** | Enable Mem0 graph (Neo4j) | 1 (Neo4j) | Optional, for semantic/social memory and org knowledge graph |
-| **M5-Phase 3** | Custom backend OR swap to Cognee/Graphiti | 2 (Neo4j + Qdrant) | When Mem0 limitations become blocking, or when alternatives add 3.14 support |
+| **Phase 1** | Mem0 in-process (Qdrant embedded + SQLite) | None | All memory inside synthorg-backend container. Persists to mounted volume |
+| **Phase 2** | Enable Mem0 graph (Neo4j) | 1 (Neo4j) | Optional, for semantic/social memory and org knowledge graph |
+| **Phase 3** | Custom backend OR swap to Cognee/Graphiti | 2 (Neo4j + Qdrant) | When Mem0 limitations become blocking, or when alternatives add 3.14 support |
 
 ---
 

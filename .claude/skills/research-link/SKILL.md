@@ -16,7 +16,7 @@ allowed-tools:
 
 # Research Link
 
-Research any external content — URL, tool, concept, pasted article, code snippet — and evaluate what it means for the ai-company project. Produces a decision-oriented assessment with concrete verdicts and next-step options.
+Research any external content — URL, tool, concept, pasted article, code snippet — and evaluate what it means for the SynthOrg project. Produces a decision-oriented assessment with concrete verdicts and next-step options.
 
 **Arguments:** "$ARGUMENTS"
 
@@ -24,7 +24,7 @@ Research any external content — URL, tool, concept, pasted article, code snipp
 
 ## Phase 0: Load Project Context
 
-**Before doing anything else**, read `DESIGN_SPEC.md` in the project root. This is the authoritative source for the project's architecture, module design, technology choices, milestones, and risk register. You need this context loaded to produce accurate project mappings and verdicts in later phases. Read it in parallel with the Phase 1 content acquisition.
+**Before doing anything else**, read `DESIGN_SPEC.md` in the project root. This is the authoritative source for the project's architecture, module design, technology choices, and risk register. You need this context loaded to produce accurate project mappings and verdicts in later phases. Read it in parallel with the Phase 1 content acquisition.
 
 ## Phase 1: Identify Input Type and Acquire Content
 
@@ -86,7 +86,7 @@ For each tool/library/framework mentioned:
 
 ## Phase 3: Map to Project
 
-Cross-reference findings against the ai-company project. Search these in parallel:
+Cross-reference findings against the SynthOrg project. Search these in parallel:
 
 1. **DESIGN_SPEC.md** — Grep for related sections (memory, providers, communication, agents, etc.)
 2. **Source code** — Grep `src/ai_company/` for overlapping implementations or modules
@@ -109,7 +109,7 @@ For each relevant concept, tool, or pattern found, assign exactly one verdict:
 | **ADAPT** | The concept applies but needs our own implementation | What to adapt, which module it goes in, rough approach |
 | **REPLACE** | Better than what we have or planned | What it replaces, migration effort, why it's better |
 | **RETHINK** | Fundamentally challenges an architectural assumption | Which assumption, what the alternative is, impact scope |
-| **LATER** | Relevant but not for current milestone | When it becomes relevant, what triggers revisiting |
+| **LATER** | Relevant but not for current scope | When it becomes relevant, what triggers revisiting |
 | **SKIP** | Not applicable to this project | Brief explanation why |
 
 ### Verdict Rules
@@ -117,7 +117,7 @@ For each relevant concept, tool, or pattern found, assign exactly one verdict:
 - Every verdict must reference a specific part of the project (module, design section, convention)
 - **USE** and **REPLACE** require a license check against the repo's dependency review allow-list (see CI workflow and `CLAUDE.md` dependency notes; must be permissive and CI-compatible)
 - **RETHINK** must explain the scope of impact — is it one module or the whole architecture?
-- **LATER** must specify the trigger condition (e.g., "when we start M5 Memory & Budget")
+- **LATER** must specify the trigger condition (e.g., "when we add the memory and budget subsystems")
 - Be honest — most research produces ADAPT or LATER, not USE or RETHINK
 
 ## Phase 5: Present Results
