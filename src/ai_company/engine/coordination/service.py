@@ -54,9 +54,11 @@ class MultiAgentCoordinator:
     parallel execution, workspace isolation, task engine) into
     an end-to-end coordination pipeline.
 
-    The coordinator is a **peer** to ``AgentEngine``, not embedded
-    in it. It operates at a higher level, composing existing services
-    via dependency injection.
+    The coordinator is available both as a peer service (via
+    ``AppState``) and as an optional dependency of ``AgentEngine``
+    (which exposes a ``coordinate()`` convenience method). It
+    operates at a higher level, composing existing services via
+    dependency injection.
 
     Args:
         decomposition_service: Service to decompose tasks into subtasks.
@@ -173,6 +175,8 @@ class MultiAgentCoordinator:
             )
 
         except CoordinationPhaseError:
+            raise
+        except MemoryError, RecursionError:
             raise
         except Exception as exc:
             logger.exception(
@@ -404,6 +408,8 @@ class MultiAgentCoordinator:
             )
         except CoordinationPhaseError:
             raise
+        except MemoryError, RecursionError:
+            raise
         except Exception as exc:
             elapsed = time.monotonic() - start
             logger.warning(
@@ -467,6 +473,8 @@ class MultiAgentCoordinator:
                 context.task.id,
                 tuple(statuses),
             )
+        except MemoryError, RecursionError:
+            raise
         except Exception as exc:
             elapsed = time.monotonic() - start
             logger.warning(
@@ -506,7 +514,24 @@ class MultiAgentCoordinator:
         phases: list[CoordinationPhaseResult],
     ) -> None:
         """Update parent task status via TaskEngine if available."""
-        if self._task_engine is None or rollup is None:
+        if self._task_engine is None:
+            return
+        if rollup is None:
+            phase_name = "update_parent"
+            note = "Skipped — rollup is None (rollup phase failed)"
+            logger.warning(
+                COORDINATION_PHASE_FAILED,
+                phase=phase_name,
+                note=note,
+            )
+            phases.append(
+                CoordinationPhaseResult(
+                    phase=phase_name,
+                    success=False,
+                    duration_seconds=0.0,
+                    error=note,
+                )
+            )
             return
 
         start = time.monotonic()
@@ -548,6 +573,8 @@ class MultiAgentCoordinator:
                     error=result.error,
                 )
             )
+        except MemoryError, RecursionError:
+            raise
         except Exception as exc:
             elapsed = time.monotonic() - start
             logger.warning(

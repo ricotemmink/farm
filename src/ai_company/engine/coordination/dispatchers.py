@@ -160,6 +160,13 @@ async def _setup_workspaces(
     try:
         requests = _build_workspace_requests(routing_result, config)
         workspaces = await workspace_service.setup_group(requests=requests)
+    except MemoryError, RecursionError:
+        # Bare re-raise: logging is intentionally omitted because
+        # emitting logs may itself trigger MemoryError/RecursionError.
+        # These are built-in exceptions (not ai_company.memory.errors.MemoryError).
+        # Same pattern applies to all MemoryError/RecursionError guards
+        # in this module.
+        raise
     except Exception as exc:
         elapsed = time.monotonic() - start
         phase = CoordinationPhaseResult(
@@ -172,6 +179,7 @@ async def _setup_workspaces(
             COORDINATION_PHASE_FAILED,
             phase=phase_name,
             error=str(exc),
+            exc_info=True,
         )
         return (), phase
     else:
@@ -204,6 +212,8 @@ async def _merge_workspaces(
         merge_result = await workspace_service.merge_group(
             workspaces=workspaces,
         )
+    except MemoryError, RecursionError:
+        raise
     except Exception as exc:
         elapsed = time.monotonic() - start
         phase = CoordinationPhaseResult(
@@ -216,6 +226,7 @@ async def _merge_workspaces(
             COORDINATION_PHASE_FAILED,
             phase=phase_name,
             error=str(exc),
+            exc_info=True,
         )
         return None, phase
     else:
@@ -244,11 +255,14 @@ async def _teardown_workspaces(
     )
     try:
         await workspace_service.teardown_group(workspaces=workspaces)
+    except MemoryError, RecursionError:
+        raise
     except Exception as exc:
         logger.warning(
             COORDINATION_CLEANUP_FAILED,
             workspace_count=len(workspaces),
             error=str(exc),
+            exc_info=True,
         )
     else:
         logger.info(
@@ -324,6 +338,8 @@ async def _execute_waves(
             if not success and fail_fast:
                 break
 
+        except MemoryError, RecursionError:
+            raise
         except Exception as exc:
             elapsed = time.monotonic() - start
             logger.warning(
@@ -331,6 +347,7 @@ async def _execute_waves(
                 phase=phase_name,
                 wave_index=wave_idx,
                 error=str(exc),
+                exc_info=True,
             )
             wave = CoordinationWave(
                 wave_index=wave_idx,
@@ -650,12 +667,15 @@ class ContextDependentDispatcher:
             wave_workspaces = await workspace_service.setup_group(
                 requests=wave_requests,
             )
+        except MemoryError, RecursionError:
+            raise
         except Exception as exc:
             ws_elapsed = time.monotonic() - ws_start
             logger.warning(
                 COORDINATION_PHASE_FAILED,
                 phase=f"workspace_setup_wave_{wave_idx}",
                 error=str(exc),
+                exc_info=True,
             )
             all_phases.append(
                 CoordinationPhaseResult(
@@ -751,6 +771,8 @@ class ContextDependentDispatcher:
                     duration_seconds=elapsed,
                 )
 
+        except MemoryError, RecursionError:
+            raise
         except Exception as exc:
             elapsed = time.monotonic() - start
             wave_failed = True
@@ -759,6 +781,7 @@ class ContextDependentDispatcher:
                 phase=f"execute_wave_{wave_idx}",
                 wave_index=wave_idx,
                 error=str(exc),
+                exc_info=True,
             )
             all_waves.append(
                 CoordinationWave(
