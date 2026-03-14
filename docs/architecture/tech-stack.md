@@ -56,13 +56,13 @@ The SynthOrg engine is structured as a set of loosely coupled subsystems. Each b
 | **Database** | SQLite (aiosqlite), PostgreSQL / MariaDB planned | Pluggable `PersistenceBackend` protocol. SQLite ships first via aiosqlite async driver. PostgreSQL and MariaDB as future backends -- swap via config, no app code changes. |
 | **Web UI** | Vue 3 + Vite | Modern, fast, good ecosystem. Simpler than React for dashboards. |
 | **Real-time** | WebSocket (Litestar channels plugin) | Built-in pub/sub broadcasting, per-channel history, backpressure management. Real-time agent activity, task updates, chat feed. |
-| **Containerization** | Docker + Docker Compose | Chainguard Python distroless runtime (non-root, CIS Docker Benchmark v1.6.0 hardened, minimal attack surface, continuously scanned in CI). `nginxinc/nginx-unprivileged` web tier. GHCR registry, cosign image signing, Trivy + Grype vulnerability scanning, SBOM + SLSA provenance. Also used for isolated code execution sandboxing. |
+| **Containerization** | Docker + Docker Compose | Chainguard Python distroless runtime (non-root, CIS Docker Benchmark v1.6.0 hardened, minimal attack surface, continuously scanned in CI). `nginxinc/nginx-unprivileged` web tier. GHCR registry, cosign image signing, Trivy + Grype vulnerability scanning, SBOM + SLSA L3 provenance. Also used for isolated code execution sandboxing. |
 | **Docker API** | aiodocker | Async-native Docker API client for the `DockerSandbox` backend. |
 | **Tool Integration** | MCP SDK (`mcp`) | Industry standard for LLM-to-tool integration. See [Industry Standards](../reference/standards.md). |
 | **Agent Communication** | A2A Protocol compatible | Future-proof inter-agent communication. See [Industry Standards](../reference/standards.md). |
 | **Authentication** | PyJWT + argon2-cffi | JWT (HMAC HS256/384/512) for session tokens, Argon2id for password hashing, HMAC-SHA256 for API key storage (keyed with server secret). |
 | **Config Format** | YAML + Pydantic validation | Human-readable config with strict validation. |
-| **CLI** | Go (Cobra + charmbracelet/huh) | Cross-platform binary for Docker lifecycle management: `init`, `start`, `stop`, `status`, `logs`, `update`, `doctor`, `uninstall`, `version`. Distributed via GoReleaser + install scripts (`curl \| bash`, `irm \| iex`). |
+| **CLI** | Go (Cobra + charmbracelet/huh) | Cross-platform binary for Docker lifecycle management: `init`, `start`, `stop`, `status`, `logs`, `update`, `doctor`, `uninstall`, `version`. Distributed via GoReleaser + install scripts (`curl \| bash`, `irm \| iex`). SLSA Level 3 provenance attestations on all release archives. |
 
 ---
 
@@ -79,7 +79,7 @@ The SynthOrg engine is structured as a set of loosely coupled subsystems. Each b
 | Web UI | Vue 3 | React, Svelte, HTMX | Simpler than React for dashboards. |
 | Persistence | Pluggable protocol + repository protocols | ORM (SQLAlchemy), raw SQL, hybrid | Same frozen Pydantic models in and out (no DTOs), async throughout, backend-swappable via config. Repository protocols decouple app code from storage engine. |
 | Sandboxing | Layered: subprocess + Docker | Docker-only, subprocess-only, WASM | Risk-proportionate: fast subprocess for file/git, Docker isolation for code execution. Pluggable `SandboxBackend` protocol enables K8s migration later. |
-| Container Packaging | Chainguard distroless + GHCR | Alpine, Debian-slim, scratch, Docker Hub | Minimal attack surface, non-root by default, continuously scanned in CI. GHCR for tighter GitHub integration. cosign keyless signing for supply-chain integrity. Trivy + Grype dual scanning. |
+| Container Packaging | Chainguard distroless + GHCR | Alpine, Debian-slim, scratch, Docker Hub | Minimal attack surface, non-root by default, continuously scanned in CI. GHCR for tighter GitHub integration. cosign keyless signing for supply-chain integrity. Trivy + Grype dual scanning. SLSA L3 provenance attestations on container images and CLI binaries via slsa-github-generator. |
 
 <a id="why-litestar-over-fastapi"></a>
 !!! info "Design Decision: Why Litestar over FastAPI?"
