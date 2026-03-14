@@ -70,5 +70,11 @@ site/.astro/
 # CI tooling (wrangler)
 .github/node_modules/
 
+# Go CLI build artifacts
+cli/synthorg
+cli/synthorg.exe
+cli/dist/
+cli/cover.out
+
 # uv
 .python-version

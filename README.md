@@ -76,7 +76,28 @@ Built-in tools (file system, git, sandbox, code runner) plus MCP bridge for exte
 
 ## Quick Start
 
-### Development
+### Install CLI
+
+```bash
+# Linux / macOS
+curl -sSfL https://raw.githubusercontent.com/Aureliolo/synthorg/main/cli/scripts/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/Aureliolo/synthorg/main/cli/scripts/install.ps1 | iex
+```
+
+### Setup & Run
+
+```bash
+synthorg init       # interactive setup wizard
+synthorg start      # pull images + start containers
+synthorg status     # check health
+synthorg doctor     # diagnostics if something is wrong
+```
+
+### Development (from source)
 
 ```bash
 git clone https://github.com/Aureliolo/synthorg.git
@@ -85,7 +106,7 @@ uv sync                  # install dev + test deps
 uv sync --group docs     # install docs toolchain (zensical)
 ```
 
-### Docker Compose
+### Docker Compose (manual)
 
 ```bash
 cp docker/.env.example docker/.env
@@ -130,7 +151,7 @@ graph TB
 
 ## Status
 
-Core framework complete — agent engine, multi-agent coordination, API, security, HR, memory (including Mem0 backend adapter), budget systems, and approval workflow gates are implemented. Web dashboard (Vue 3 + PrimeVue + Tailwind CSS) is built. Remaining: CLI and approval resume scheduler (approvals can park agents; re-enqueue after decision requires a future scheduler). See the [roadmap](docs/roadmap/index.md) for details.
+Core framework complete — agent engine, multi-agent coordination, API, security, HR, memory (including Mem0 backend adapter), budget systems, and approval workflow gates are implemented. Web dashboard (Vue 3 + PrimeVue + Tailwind CSS) is built. CLI (Go binary) provides install, setup wizard, container lifecycle, self-updates, and diagnostics. Remaining: approval resume scheduler (approvals can park agents; re-enqueue after decision requires a future scheduler). See the [roadmap](docs/roadmap/index.md) for details.
 
 ## License
 
