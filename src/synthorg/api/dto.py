@@ -16,6 +16,7 @@ from pydantic import (
     model_validator,
 )
 
+from synthorg.api.errors import ErrorCategory  # noqa: TC001
 from synthorg.core.enums import (
     ApprovalRiskLevel,
     Complexity,
@@ -33,6 +34,44 @@ _MAX_METADATA_KEYS: int = 20
 _MAX_METADATA_STR_LEN: int = 256
 
 
+# ── Structured error detail (RFC 9457 Phase 1) ────────────────
+
+
+class ErrorDetail(BaseModel):
+    """Structured error metadata (RFC 9457 Phase 1).
+
+    Self-contained so agents can parse it without referencing
+    the parent envelope.
+
+    Attributes:
+        message: Human-readable error message.
+        error_code: Machine-readable error code (by convention, 4-digit
+            category-grouped; see ``ErrorCode``).
+        error_category: High-level error category.
+        retryable: Whether the client should retry the request.
+        retry_after: Seconds to wait before retrying (``None``
+            when not applicable).
+        instance: Request correlation ID for log tracing.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    message: NotBlankStr
+    error_code: int
+    error_category: ErrorCategory
+    retryable: bool = False
+    retry_after: int | None = Field(default=None, ge=0)
+    instance: NotBlankStr
+
+    @model_validator(mode="after")
+    def _validate_retry_after_consistency(self) -> Self:
+        """``retry_after`` must be ``None`` when ``retryable`` is ``False``."""
+        if not self.retryable and self.retry_after is not None:
+            msg = "retry_after must be None when retryable is False"
+            raise ValueError(msg)
+        return self
+
+
 # ── Response envelopes ──────────────────────────────────────────
 
 
@@ -42,6 +81,7 @@ class ApiResponse[T](BaseModel):
     Attributes:
         data: Response payload (``None`` on error).
         error: Error message (``None`` on success).
+        error_detail: Structured error metadata (``None`` on success).
         success: Whether the request succeeded (computed from ``error``).
     """
 
@@ -49,6 +89,15 @@ class ApiResponse[T](BaseModel):
 
     data: T | None = None
     error: str | None = None
+    error_detail: ErrorDetail | None = None
+
+    @model_validator(mode="after")
+    def _validate_error_detail_consistency(self) -> Self:
+        """``error_detail`` must not appear on a successful response."""
+        if self.error_detail is not None and self.error is None:
+            msg = "error_detail requires error to be set"
+            raise ValueError(msg)
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -79,6 +128,7 @@ class PaginatedResponse[T](BaseModel):
     Attributes:
         data: Page of items.
         error: Error message (``None`` on success).
+        error_detail: Structured error metadata (``None`` on success).
         pagination: Pagination metadata.
         success: Whether the request succeeded (computed from ``error``).
     """
@@ -87,7 +137,19 @@ class PaginatedResponse[T](BaseModel):
 
     data: tuple[T, ...] = ()
     error: str | None = None
+    error_detail: ErrorDetail | None = None
     pagination: PaginationMeta
+
+    @model_validator(mode="after")
+    def _validate_error_detail_consistency(self) -> Self:
+        """Ensure ``error`` and ``error_detail`` are set together."""
+        if self.error_detail is not None and self.error is None:
+            msg = "error_detail requires error to be set"
+            raise ValueError(msg)
+        if self.error is not None and self.error_detail is None:
+            msg = "error must be accompanied by error_detail"
+            raise ValueError(msg)
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property
