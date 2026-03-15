@@ -22,6 +22,9 @@ func TestDefaultState(t *testing.T) {
 	if s.LogLevel != "info" {
 		t.Errorf("LogLevel = %q, want info", s.LogLevel)
 	}
+	if !s.Sandbox {
+		t.Error("Sandbox should default to true")
+	}
 	if s.DataDir == "" {
 		t.Error("DataDir should not be empty")
 	}
@@ -127,6 +130,10 @@ func TestLoadMissing(t *testing.T) {
 	// Should return defaults.
 	if s.BackendPort != 8000 {
 		t.Errorf("expected default BackendPort 8000, got %d", s.BackendPort)
+	}
+	// Conservative fallback: sandbox disabled when no config exists.
+	if s.Sandbox {
+		t.Error("Sandbox should be false when config file is missing")
 	}
 }
 
