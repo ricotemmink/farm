@@ -94,21 +94,31 @@ COPY --from=setup --chown=65532:65532 /app/src /app/src
 COPY --from=setup --chown=65532:65532 /data /data
 
 # Runtime environment
+# UVICORN_HOST / UVICORN_PORT control the server bind address (read natively
+# by uvicorn via its Click auto_envvar_prefix). SYNTHORG_HOST / SYNTHORG_PORT
+# are application-level config — they do NOT control uvicorn directly.
+# When running standalone (`docker run`), override UVICORN_* to change the
+# listening address. compose.yml bridges SYNTHORG_* → UVICORN_* automatically.
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     SYNTHORG_HOST="0.0.0.0" \
-    SYNTHORG_PORT="8000"
+    SYNTHORG_PORT="8000" \
+    UVICORN_HOST="0.0.0.0" \
+    UVICORN_PORT="8000"
 
 USER 65532
 
 EXPOSE 8000
 
 # Healthcheck — exec form (no shell needed, works with distroless)
+# Reads UVICORN_PORT so the check stays valid if the port is overridden.
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=15s \
-    CMD ["/usr/bin/python", "-c", "import json,urllib.request,sys; r=urllib.request.urlopen('http://localhost:8000/api/v1/health'); d=json.loads(r.read()); sys.exit(0 if d.get('data',{}).get('status')=='ok' else 1)"]
+    CMD ["/usr/bin/python", "-c", "import json,urllib.request,sys,os; port=os.environ.get('UVICORN_PORT','8000'); r=urllib.request.urlopen(f'http://localhost:{port}/api/v1/health'); d=json.loads(r.read()); sys.exit(0 if d.get('data',{}).get('status')=='ok' else 1)"]
 
 # Reset Chainguard base entrypoint (/usr/bin/python) so CMD runs uvicorn
 # directly instead of being passed as Python arguments.
+# Exec form (no shell) — works with distroless. Uvicorn reads UVICORN_HOST
+# and UVICORN_PORT env vars natively; compose bridges SYNTHORG_* to these.
 ENTRYPOINT []
-CMD ["/bin/sh", "-c", "exec /app/.venv/bin/uvicorn synthorg.api.app:create_app --factory --host ${SYNTHORG_HOST} --port ${SYNTHORG_PORT}"]
+CMD ["/app/.venv/bin/uvicorn", "synthorg.api.app:create_app", "--factory"]
