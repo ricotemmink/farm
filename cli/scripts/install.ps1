@@ -77,11 +77,18 @@ try {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     Move-Item -Path (Join-Path $TmpDir $BinaryName) -Destination (Join-Path $InstallDir $BinaryName) -Force
 
-    # Add to PATH if not already there.
+    # Add to PATH if not already there (exact entry match, not substring).
+    $NormalizedInstallDir = $InstallDir.TrimEnd('\')
     $UserPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-    if ($UserPath -notlike "*$InstallDir*") {
-        [Environment]::SetEnvironmentVariable("PATH", "$UserPath;$InstallDir", "User")
-        Write-Host "Added $InstallDir to user PATH (restart your terminal to use 'synthorg' directly)."
+    $UserPathEntries = ($UserPath -split ';') | ForEach-Object { $_.TrimEnd('\') } | Where-Object { $_ }
+    if ($UserPathEntries -notcontains $NormalizedInstallDir) {
+        $NewUserPath = if ($UserPath) { "$UserPath;$InstallDir" } else { $InstallDir }
+        [Environment]::SetEnvironmentVariable("PATH", $NewUserPath, "User")
+        Write-Host "Added $InstallDir to user PATH."
+    }
+    $ProcessPathEntries = ($env:PATH -split ';') | ForEach-Object { $_.TrimEnd('\') } | Where-Object { $_ }
+    if ($ProcessPathEntries -notcontains $NormalizedInstallDir) {
+        $env:PATH = "$env:PATH;$InstallDir"
     }
 
     & (Join-Path $InstallDir $BinaryName) version
