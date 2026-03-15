@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from synthorg.core.agent import PersonalityConfig
 from synthorg.observability import get_logger
 from synthorg.observability.events.template import (
+    TEMPLATE_PERSONALITY_PRESET_INVALID,
     TEMPLATE_PERSONALITY_PRESET_UNKNOWN,
 )
 
@@ -428,14 +429,22 @@ def get_personality_preset(name: str) -> dict[str, Any]:
 
 
 # Validate all presets at import time to catch key typos immediately.
-for _preset_name, _preset_dict in PERSONALITY_PRESETS.items():
-    try:
-        PersonalityConfig(**_preset_dict)
-    except (ValidationError, TypeError) as _exc:
-        msg = f"Invalid personality preset {_preset_name!r}: {_exc}"
-        raise ValueError(msg) from _exc
-if PERSONALITY_PRESETS:
-    del _preset_name, _preset_dict
+def _validate_presets() -> None:
+    for name, preset in PERSONALITY_PRESETS.items():
+        try:
+            PersonalityConfig(**preset)
+        except (ValidationError, TypeError) as exc:
+            logger.warning(
+                TEMPLATE_PERSONALITY_PRESET_INVALID,
+                preset_name=name,
+                error=str(exc),
+            )
+            msg = f"Invalid personality preset {name!r}: {exc}"
+            raise ValueError(msg) from exc
+
+
+_validate_presets()
+del _validate_presets
 
 
 def generate_auto_name(role: str, *, seed: int | None = None) -> str:
