@@ -29,6 +29,7 @@ from .loop_helpers import (
     check_budget,
     check_response_errors,
     check_shutdown,
+    check_stagnation,
     clear_last_turn_tool_calls,
     execute_tool_calls,
     get_tool_definitions,
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
     from synthorg.engine.approval_gate import ApprovalGate
     from synthorg.engine.checkpoint.callback import CheckpointCallback
     from synthorg.engine.context import AgentContext
+    from synthorg.engine.stagnation.protocol import StagnationDetector
     from synthorg.providers.models import ToolDefinition
     from synthorg.providers.protocol import CompletionProvider
     from synthorg.tools.invoker import ToolInvoker
@@ -69,6 +71,10 @@ class ReactLoop:
         approval_gate: Optional gate that checks for pending escalations
             after tool execution and parks the agent when approval is
             required.  ``None`` disables approval checks.
+        stagnation_detector: Optional detector that checks for
+            repetitive tool-call patterns and intervenes with
+            corrective prompts or early termination.  ``None``
+            disables stagnation detection.
     """
 
     def __init__(
@@ -76,9 +82,21 @@ class ReactLoop:
         checkpoint_callback: CheckpointCallback | None = None,
         *,
         approval_gate: ApprovalGate | None = None,
+        stagnation_detector: StagnationDetector | None = None,
     ) -> None:
         self._checkpoint_callback = checkpoint_callback
         self._approval_gate = approval_gate
+        self._stagnation_detector = stagnation_detector
+
+    @property
+    def approval_gate(self) -> ApprovalGate | None:
+        """Return the approval gate, or ``None``."""
+        return self._approval_gate
+
+    @property
+    def stagnation_detector(self) -> StagnationDetector | None:
+        """Return the stagnation detector, or ``None``."""
+        return self._stagnation_detector
 
     def get_loop_type(self) -> str:
         """Return the loop type identifier."""
@@ -116,6 +134,7 @@ class ReactLoop:
             context, completion_config, tool_invoker
         )
         ctx = context
+        corrections_injected = 0
 
         while ctx.has_turns_remaining:
             shutdown_result = check_shutdown(ctx, shutdown_checker, turns)
@@ -158,6 +177,19 @@ class ReactLoop:
             if isinstance(result, ExecutionResult):
                 return result
             ctx = result
+
+            # Stagnation detection after successful turn processing
+            stag_outcome = await check_stagnation(
+                ctx,
+                self._stagnation_detector,
+                turns,
+                corrections_injected,
+                execution_id=ctx.execution_id,
+            )
+            if isinstance(stag_outcome, ExecutionResult):
+                return stag_outcome
+            if isinstance(stag_outcome, tuple):
+                ctx, corrections_injected = stag_outcome
 
         logger.info(
             EXECUTION_LOOP_TERMINATED,

@@ -5,6 +5,8 @@ loop implementations (ReAct, Plan-and-Execute, etc.) thin and focused
 on their control-flow logic.
 """
 
+import hashlib
+import json
 from typing import TYPE_CHECKING
 
 from synthorg.observability import get_logger
@@ -18,11 +20,16 @@ from synthorg.observability.events.execution import (
     EXECUTION_LOOP_TOOL_CALLS,
     EXECUTION_LOOP_TURN_START,
 )
+from synthorg.observability.events.stagnation import (
+    STAGNATION_CORRECTION_INJECTED,
+    STAGNATION_TERMINATED,
+)
 from synthorg.providers.enums import FinishReason, MessageRole
 from synthorg.providers.models import (
     ChatMessage,
     CompletionConfig,
     CompletionResponse,
+    ToolCall,
     ToolDefinition,
     add_token_usage,
 )
@@ -34,12 +41,14 @@ from .loop_protocol import (
     TerminationReason,
     TurnRecord,
 )
+from .stagnation.models import StagnationResult, StagnationVerdict
 
 if TYPE_CHECKING:
     from synthorg.budget.call_category import LLMCallCategory
     from synthorg.engine.approval_gate import ApprovalGate
     from synthorg.engine.approval_gate_models import EscalationInfo
     from synthorg.engine.context import AgentContext
+    from synthorg.engine.stagnation.protocol import StagnationDetector
     from synthorg.providers.protocol import CompletionProvider
     from synthorg.tools.invoker import ToolInvoker
 
@@ -423,7 +432,9 @@ def clear_last_turn_tool_calls(turns: list[TurnRecord]) -> None:
     """
     if turns:
         last = turns[-1]
-        turns[-1] = last.model_copy(update={"tool_calls_made": ()})
+        turns[-1] = last.model_copy(
+            update={"tool_calls_made": (), "tool_call_fingerprints": ()},
+        )
 
 
 def get_tool_definitions(
@@ -458,9 +469,40 @@ def make_turn_record(
         output_tokens=response.usage.output_tokens,
         cost_usd=response.usage.cost_usd,
         tool_calls_made=tuple(tc.name for tc in response.tool_calls),
+        tool_call_fingerprints=compute_fingerprints(response.tool_calls),
         finish_reason=response.finish_reason,
         call_category=call_category,
     )
+
+
+def compute_fingerprints(
+    tool_calls: tuple[ToolCall, ...],
+) -> tuple[str, ...]:
+    """Compute sorted deterministic fingerprints from tool calls.
+
+    Each fingerprint is ``name:args_hash`` where ``args_hash`` is a
+    16-char hex prefix of the SHA-256 hash of the canonicalized
+    arguments JSON.
+
+    Args:
+        tool_calls: Tool calls to fingerprint.
+
+    Returns:
+        Sorted tuple of fingerprint strings.
+    """
+    fingerprints = []
+    for tc in tool_calls:
+        canonical = json.dumps(
+            tc.arguments,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        args_hash = hashlib.sha256(
+            canonical.encode(),
+        ).hexdigest()[:16]
+        fingerprints.append(f"{tc.name}:{args_hash}")
+    return tuple(sorted(fingerprints))
 
 
 def build_result(
@@ -479,3 +521,127 @@ def build_result(
         error_message=error_message,
         metadata=metadata or {},
     )
+
+
+async def check_stagnation(  # noqa: PLR0913
+    ctx: AgentContext,
+    stagnation_detector: StagnationDetector | None,
+    turns: list[TurnRecord],
+    corrections_injected: int,
+    *,
+    execution_id: str,
+    step_number: int | None = None,
+) -> tuple[AgentContext, int] | ExecutionResult | None:
+    """Run stagnation detection and handle the verdict.
+
+    Stagnation detection is advisory — detector failures are logged
+    and skipped so they never interrupt an otherwise-healthy loop.
+
+    Args:
+        ctx: Current agent context.
+        stagnation_detector: Optional detector; ``None`` skips the
+            check.
+        turns: Accumulated turn records from the current scope.
+        corrections_injected: Number of corrective prompts already
+            injected in this execution scope.
+        execution_id: Execution identifier for structured logging.
+        step_number: Optional step number for plan-and-execute loops
+            (included in log entries and termination metadata).
+
+    Returns:
+        ``None`` to continue the loop (no stagnation).
+        ``(ctx, corrections_injected)`` when a corrective prompt was
+        injected (caller should use the updated values).
+        ``ExecutionResult`` with STAGNATION reason to terminate.
+
+    Raises:
+        MemoryError: Re-raised unconditionally.
+        RecursionError: Re-raised unconditionally.
+    """
+    if stagnation_detector is None:
+        return None
+
+    try:
+        stag = await stagnation_detector.check(
+            tuple(turns),
+            corrections_injected=corrections_injected,
+        )
+    except MemoryError, RecursionError:
+        raise
+    except Exception as exc:
+        logger.exception(
+            EXECUTION_LOOP_ERROR,
+            execution_id=execution_id,
+            turn=ctx.turn_count,
+            error=f"Stagnation check failed: {type(exc).__name__}",
+        )
+        return None
+
+    return _handle_stagnation_verdict(
+        ctx,
+        stag,
+        turns,
+        corrections_injected,
+        execution_id=execution_id,
+        step_number=step_number,
+    )
+
+
+def _handle_stagnation_verdict(  # noqa: PLR0913
+    ctx: AgentContext,
+    stag: StagnationResult,
+    turns: list[TurnRecord],
+    corrections_injected: int,
+    *,
+    execution_id: str,
+    step_number: int | None = None,
+) -> tuple[AgentContext, int] | ExecutionResult | None:
+    """Dispatch on the stagnation verdict.
+
+    Args:
+        ctx: Current agent context.
+        stag: Result from the stagnation detector.
+        turns: Accumulated turn records from the current scope.
+        corrections_injected: Corrections already injected.
+        execution_id: Execution identifier for structured logging.
+        step_number: Optional step number for plan-and-execute loops.
+
+    Returns:
+        Same semantics as :func:`check_stagnation`.
+    """
+    if stag.verdict == StagnationVerdict.TERMINATE:
+        metadata: dict[str, object] = {"stagnation": stag.model_dump()}
+        if step_number is not None:
+            metadata["step_number"] = step_number
+        logger.warning(
+            STAGNATION_TERMINATED,
+            execution_id=execution_id,
+            step_number=step_number,
+            repetition_ratio=stag.repetition_ratio,
+            cycle_length=stag.cycle_length,
+            corrections_injected=corrections_injected,
+        )
+        return build_result(
+            ctx,
+            TerminationReason.STAGNATION,
+            turns,
+            metadata=metadata,
+        )
+
+    if stag.verdict == StagnationVerdict.INJECT_PROMPT:
+        logger.info(
+            STAGNATION_CORRECTION_INJECTED,
+            execution_id=execution_id,
+            step_number=step_number,
+            repetition_ratio=stag.repetition_ratio,
+            correction_number=corrections_injected + 1,
+        )
+        ctx = ctx.with_message(
+            ChatMessage(
+                role=MessageRole.USER,
+                content=stag.corrective_message,
+            ),
+        )
+        return ctx, corrections_injected + 1
+
+    return None

@@ -98,6 +98,7 @@ if TYPE_CHECKING:
         ExecutionLoop,
         ShutdownChecker,
     )
+    from synthorg.engine.stagnation.protocol import StagnationDetector
     from synthorg.engine.task_engine import TaskEngine
     from synthorg.persistence.repositories import (
         CheckpointRepository,
@@ -166,18 +167,23 @@ class AgentEngine:
         heartbeat_repo: HeartbeatRepository | None = None,
         checkpoint_config: CheckpointConfig | None = None,
         coordinator: MultiAgentCoordinator | None = None,
+        stagnation_detector: StagnationDetector | None = None,
     ) -> None:
         self._provider = provider
         self._approval_store = approval_store
         self._parked_context_repo = parked_context_repo
+        self._stagnation_detector = stagnation_detector
         self._approval_gate = self._make_approval_gate()
-        if execution_loop is not None and self._approval_gate is not None:
+        if execution_loop is not None and (
+            self._approval_gate is not None or self._stagnation_detector is not None
+        ):
             logger.warning(
                 APPROVAL_GATE_LOOP_WIRING_WARNING,
                 note=(
                     "execution_loop provided externally — approval_gate "
-                    "will NOT be wired automatically. Configure the loop "
-                    "with approval_gate= explicitly."
+                    "and stagnation_detector will NOT be wired "
+                    "automatically. Configure the loop with "
+                    "approval_gate= and stagnation_detector= explicitly."
                 ),
             )
         self._loop: ExecutionLoop = execution_loop or self._make_default_loop()
@@ -944,8 +950,11 @@ class AgentEngine:
         )
 
     def _make_default_loop(self) -> ReactLoop:
-        """Build the default ReactLoop with approval gate if available."""
-        return ReactLoop(approval_gate=self._approval_gate)
+        """Build the default ReactLoop with approval gate and stagnation detector."""
+        return ReactLoop(
+            approval_gate=self._approval_gate,
+            stagnation_detector=self._stagnation_detector,
+        )
 
     def _make_security_interceptor(
         self,

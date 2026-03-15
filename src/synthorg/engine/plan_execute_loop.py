@@ -41,6 +41,7 @@ from .loop_helpers import (
     check_budget,
     check_response_errors,
     check_shutdown,
+    check_stagnation,
     clear_last_turn_tool_calls,
     execute_tool_calls,
     get_tool_definitions,
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
     from synthorg.engine.approval_gate import ApprovalGate
     from synthorg.engine.checkpoint.callback import CheckpointCallback
     from synthorg.engine.context import AgentContext
+    from synthorg.engine.stagnation.protocol import StagnationDetector
     from synthorg.providers.models import ToolDefinition
     from synthorg.providers.protocol import CompletionProvider
     from synthorg.tools.invoker import ToolInvoker
@@ -89,6 +91,10 @@ class PlanExecuteLoop:
         approval_gate: Optional gate that checks for pending escalations
             after tool execution and parks the agent when approval is
             required.  ``None`` disables approval checks.
+        stagnation_detector: Optional detector that checks for
+            repetitive tool-call patterns within each step and
+            intervenes with corrective prompts or early termination.
+            ``None`` disables stagnation detection.
     """
 
     def __init__(
@@ -97,15 +103,27 @@ class PlanExecuteLoop:
         checkpoint_callback: CheckpointCallback | None = None,
         *,
         approval_gate: ApprovalGate | None = None,
+        stagnation_detector: StagnationDetector | None = None,
     ) -> None:
         self._config = config or PlanExecuteConfig()
         self._checkpoint_callback = checkpoint_callback
         self._approval_gate = approval_gate
+        self._stagnation_detector = stagnation_detector
 
     @property
     def config(self) -> PlanExecuteConfig:
         """Return the loop configuration."""
         return self._config
+
+    @property
+    def approval_gate(self) -> ApprovalGate | None:
+        """Return the approval gate, or ``None``."""
+        return self._approval_gate
+
+    @property
+    def stagnation_detector(self) -> StagnationDetector | None:
+        """Return the stagnation detector, or ``None``."""
+        return self._stagnation_detector
 
     def get_loop_type(self) -> str:
         """Return the loop type identifier."""
@@ -636,6 +654,8 @@ class PlanExecuteLoop:
             content=instruction,
         )
         ctx = ctx.with_message(step_msg)
+        step_start_idx = len(turns)
+        step_corrections = 0
 
         while ctx.has_turns_remaining:
             result = await self._run_step_turn(
@@ -654,6 +674,24 @@ class PlanExecuteLoop:
             if isinstance(result, tuple):
                 return result
             ctx = result
+
+            # Per-step stagnation detection (step-scoped turns only)
+            stag_outcome = await check_stagnation(
+                ctx,
+                self._stagnation_detector,
+                turns[step_start_idx:],
+                step_corrections,
+                execution_id=ctx.execution_id,
+                step_number=step.step_number,
+            )
+            if isinstance(stag_outcome, ExecutionResult):
+                # Rebuild with full turns — check_stagnation only
+                # received the step-scoped slice.
+                return stag_outcome.model_copy(
+                    update={"turns": tuple(turns)},
+                )
+            if isinstance(stag_outcome, tuple):
+                ctx, step_corrections = stag_outcome
 
         return ctx, False
 

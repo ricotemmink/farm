@@ -9,7 +9,7 @@ from synthorg.budget.call_category import LLMCallCategory
 from synthorg.core.agent import AgentIdentity
 from synthorg.core.enums import ToolCategory
 from synthorg.engine.context import AgentContext
-from synthorg.engine.loop_protocol import TerminationReason
+from synthorg.engine.loop_protocol import TerminationReason, TurnRecord
 from synthorg.engine.plan_execute_loop import PlanExecuteLoop
 from synthorg.engine.plan_models import PlanExecuteConfig
 from synthorg.providers.enums import FinishReason, MessageRole
@@ -842,3 +842,222 @@ class TestReactVsPlanExecuteComparison:
         # PlanExecuteLoop has plan metadata, ReactLoop does not
         assert "plans" in pe_result.metadata
         assert "plans" not in react_result.metadata
+
+
+# ---------------------------------------------------------------------------
+# Stagnation detector integration
+# ---------------------------------------------------------------------------
+
+
+class _FakeStagnationDetector:
+    """Fake stagnation detector for PlanExecuteLoop tests."""
+
+    def __init__(
+        self,
+        results: list[object],
+    ) -> None:
+        from synthorg.engine.stagnation.models import NO_STAGNATION_RESULT
+
+        self._results = list(results)
+        self._default = NO_STAGNATION_RESULT
+        self.check_count = 0
+        self.last_turns_count = 0
+        self.corrections_seen: list[int] = []
+        self.last_turns: tuple[TurnRecord, ...] = ()
+
+    def get_detector_type(self) -> str:
+        return "fake"
+
+    async def check(
+        self,
+        turns: tuple[TurnRecord, ...],
+        *,
+        corrections_injected: int = 0,
+    ) -> object:
+        self.check_count += 1
+        self.last_turns_count = len(turns)
+        self.last_turns = turns
+        self.corrections_seen.append(corrections_injected)
+        if self._results:
+            return self._results.pop(0)
+        return self._default
+
+
+@pytest.mark.unit
+class TestPlanExecuteLoopStagnation:
+    """Stagnation detector integration with PlanExecuteLoop."""
+
+    async def test_stagnation_within_step_triggers_terminate(
+        self,
+        sample_agent_context: AgentContext,
+        mock_provider_factory: type[MockCompletionProvider],
+    ) -> None:
+        from synthorg.engine.stagnation.models import (
+            StagnationResult,
+            StagnationVerdict,
+        )
+
+        terminate = StagnationResult(
+            verdict=StagnationVerdict.TERMINATE,
+            repetition_ratio=0.9,
+        )
+        detector = _FakeStagnationDetector([terminate])
+
+        ctx = _ctx_with_user_msg(sample_agent_context)
+        provider = mock_provider_factory(
+            [
+                _single_step_plan(),
+                _tool_use_response("echo", "tc-1"),
+            ]
+        )
+        invoker = _make_invoker("echo")
+        loop = PlanExecuteLoop(
+            stagnation_detector=detector,  # type: ignore[arg-type]
+        )
+
+        result = await loop.execute(
+            context=ctx,
+            provider=provider,
+            tool_invoker=invoker,
+        )
+
+        assert result.termination_reason == TerminationReason.STAGNATION
+        assert "stagnation" in result.metadata
+        # STAGNATION result must include ALL turns (planning + tool-use),
+        # not just step-scoped turns.
+        assert len(result.turns) == 2
+        assert result.turns[0].tool_calls_made == ()  # planning turn
+        assert result.turns[1].tool_calls_made == ("echo",)  # tool turn
+
+    async def test_stagnation_correction_in_step(
+        self,
+        sample_agent_context: AgentContext,
+        mock_provider_factory: type[MockCompletionProvider],
+    ) -> None:
+        from synthorg.engine.stagnation.models import (
+            StagnationResult,
+            StagnationVerdict,
+        )
+
+        inject = StagnationResult(
+            verdict=StagnationVerdict.INJECT_PROMPT,
+            corrective_message="Try another approach.",
+            repetition_ratio=0.7,
+        )
+        detector = _FakeStagnationDetector([inject])
+
+        ctx = _ctx_with_user_msg(sample_agent_context)
+        provider = mock_provider_factory(
+            [
+                _single_step_plan(),
+                _tool_use_response("echo", "tc-1"),
+                _stop_response("Step done."),
+            ]
+        )
+        invoker = _make_invoker("echo")
+        loop = PlanExecuteLoop(
+            stagnation_detector=detector,  # type: ignore[arg-type]
+        )
+
+        result = await loop.execute(
+            context=ctx,
+            provider=provider,
+            tool_invoker=invoker,
+        )
+
+        assert result.termination_reason == TerminationReason.COMPLETED
+        # Corrective message injected
+        user_msgs = [
+            m for m in result.context.conversation if m.role == MessageRole.USER
+        ]
+        assert any("Try another approach." in (m.content or "") for m in user_msgs)
+
+    async def test_step_scoped_turns(
+        self,
+        sample_agent_context: AgentContext,
+        mock_provider_factory: type[MockCompletionProvider],
+    ) -> None:
+        """Stagnation detection sees only step-scoped turns."""
+        from synthorg.engine.stagnation.models import (
+            StagnationResult,
+            StagnationVerdict,
+        )
+
+        terminate = StagnationResult(
+            verdict=StagnationVerdict.TERMINATE,
+            repetition_ratio=0.9,
+        )
+        detector = _FakeStagnationDetector([terminate])
+
+        ctx = _ctx_with_user_msg(sample_agent_context)
+        provider = mock_provider_factory(
+            [
+                _multi_step_plan(),
+                _stop_response("Step 1 done."),
+                _tool_use_response("echo", "tc-1"),
+            ]
+        )
+        invoker = _make_invoker("echo")
+        loop = PlanExecuteLoop(
+            stagnation_detector=detector,  # type: ignore[arg-type]
+        )
+
+        result = await loop.execute(
+            context=ctx,
+            provider=provider,
+            tool_invoker=invoker,
+        )
+
+        # The stagnation detector should be called with
+        # only step 2 turns, not step 1 turns
+        assert result.termination_reason == TerminationReason.STAGNATION
+        # Only step 2's turn was passed (1 turn)
+        assert detector.last_turns_count == 1
+        # Verify the turn is actually from step 2 (tool call)
+        assert len(detector.last_turns) == 1
+        assert detector.last_turns[0].tool_calls_made == ("echo",)
+
+    async def test_step_corrections_counter_increments(
+        self,
+        sample_agent_context: AgentContext,
+        mock_provider_factory: type[MockCompletionProvider],
+    ) -> None:
+        """Per-step corrections counter leads to TERMINATE after max."""
+        from synthorg.engine.stagnation.models import (
+            StagnationResult,
+            StagnationVerdict,
+        )
+
+        inject = StagnationResult(
+            verdict=StagnationVerdict.INJECT_PROMPT,
+            corrective_message="Correction.",
+            repetition_ratio=0.7,
+        )
+        terminate = StagnationResult(
+            verdict=StagnationVerdict.TERMINATE,
+            repetition_ratio=0.9,
+        )
+        detector = _FakeStagnationDetector([inject, terminate])
+
+        ctx = _ctx_with_user_msg(sample_agent_context)
+        provider = mock_provider_factory(
+            [
+                _single_step_plan(),
+                _tool_use_response("echo", "tc-1"),
+                _tool_use_response("echo", "tc-2"),
+            ]
+        )
+        invoker = _make_invoker("echo")
+        loop = PlanExecuteLoop(
+            stagnation_detector=detector,  # type: ignore[arg-type]
+        )
+
+        result = await loop.execute(
+            context=ctx,
+            provider=provider,
+            tool_invoker=invoker,
+        )
+
+        assert result.termination_reason == TerminationReason.STAGNATION
+        assert detector.check_count == 2
+        assert detector.corrections_seen == [0, 1]
