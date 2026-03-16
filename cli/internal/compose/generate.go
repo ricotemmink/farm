@@ -10,6 +10,7 @@ import (
 	"text/template"
 
 	"github.com/Aureliolo/synthorg/cli/internal/config"
+	"github.com/Aureliolo/synthorg/cli/internal/verify"
 	"github.com/Aureliolo/synthorg/cli/internal/version"
 )
 
@@ -18,6 +19,8 @@ var composeTmpl string
 
 // imageTagPattern validates image tags to prevent YAML injection.
 var imageTagPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+// Digest validation uses verify.IsValidDigest to avoid duplicating the pattern.
 
 // allowedLogLevels restricts log level values to a known safe set.
 var allowedLogLevels = map[string]bool{
@@ -39,6 +42,7 @@ type Params struct {
 	DockerSock         string
 	PersistenceBackend string
 	MemoryBackend      string
+	DigestPins         map[string]string // image name suffix → digest (e.g. "backend" → "sha256:abc...")
 }
 
 // ParamsFromState creates Params from a persisted State.
@@ -65,7 +69,8 @@ func Generate(p Params) ([]byte, error) {
 	}
 
 	funcMap := template.FuncMap{
-		"yamlStr": yamlStr,
+		"yamlStr":   yamlStr,
+		"digestPin": digestPin(p.DigestPins),
 	}
 
 	tmpl, err := template.New("compose").Funcs(funcMap).Parse(composeTmpl)
@@ -110,7 +115,23 @@ func validateParams(p Params) error {
 	if !config.IsValidMemoryBackend(p.MemoryBackend) {
 		return fmt.Errorf("invalid memory backend %q: must be one of %s", p.MemoryBackend, config.MemoryBackendNames())
 	}
+	for name, d := range p.DigestPins {
+		if !verify.IsValidDigest(d) {
+			return fmt.Errorf("invalid digest pin for %q: %q is not a valid sha256 digest", name, d)
+		}
+	}
 	return nil
+}
+
+// digestPin returns a template function that resolves an image name to either
+// a digest-pinned reference (repo@digest) or a tag-based reference (repo:tag).
+func digestPin(pins map[string]string) func(name, repo, tag string) string {
+	return func(name, repo, tag string) string {
+		if d, ok := pins[name]; ok && d != "" {
+			return repo + "@" + d
+		}
+		return repo + ":" + tag
+	}
 }
 
 // yamlStr safely quotes a string value for YAML, escaping special characters.

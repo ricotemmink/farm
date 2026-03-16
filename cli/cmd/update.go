@@ -8,11 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Aureliolo/synthorg/cli/internal/compose"
 	"github.com/Aureliolo/synthorg/cli/internal/config"
 	"github.com/Aureliolo/synthorg/cli/internal/docker"
 	"github.com/Aureliolo/synthorg/cli/internal/health"
 	"github.com/Aureliolo/synthorg/cli/internal/selfupdate"
+	"github.com/Aureliolo/synthorg/cli/internal/ui"
+	"github.com/Aureliolo/synthorg/cli/internal/verify"
 	"github.com/Aureliolo/synthorg/cli/internal/version"
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
@@ -190,7 +191,7 @@ func confirmUpdate(title string) (bool, error) {
 // If any step fails, the previous compose.yml is restored (or removed if it
 // did not exist before) so that the on-disk state remains consistent.
 func pullAndPersist(ctx context.Context, cmd *cobra.Command, info docker.Info, state config.State, tag, safeDir, effectiveVersion string) error {
-	out := cmd.OutOrStdout()
+	out := ui.NewUI(cmd.OutOrStdout())
 
 	// Back up existing compose.yml for rollback on failure.
 	composePath := filepath.Join(safeDir, "compose.yml")
@@ -205,12 +206,18 @@ func pullAndPersist(ctx context.Context, cmd *cobra.Command, info docker.Info, s
 		}
 	}
 
-	if err := regenerateCompose(state, tag, safeDir, effectiveVersion); err != nil {
+	errOut := ui.NewUI(cmd.ErrOrStderr())
+
+	// Verify + write compose atomically: compose.yml is only updated after
+	// verification succeeds (or when --skip-verify explicitly skips it).
+	// This prevents a crash from leaving an unverified tag on disk.
+	digestPins, err := verifyAndPinForUpdate(ctx, state, tag, safeDir, effectiveVersion, out, errOut)
+	if err != nil {
 		rollback()
 		return err
 	}
 
-	_, _ = fmt.Fprintf(out, "Pulling container images (%s)...\n", tag)
+	out.Step(fmt.Sprintf("Pulling container images (%s)...", tag))
 	if err := composeRun(ctx, cmd, info, safeDir, "pull"); err != nil {
 		rollback()
 		return fmt.Errorf("pulling images: %w", err)
@@ -220,6 +227,7 @@ func pullAndPersist(ctx context.Context, cmd *cobra.Command, info docker.Info, s
 	// doesn't leave state claiming images are at the new version.
 	updatedState := state
 	updatedState.ImageTag = tag
+	updatedState.VerifiedDigests = digestPins
 	if err := config.Save(updatedState); err != nil {
 		rollback()
 		return fmt.Errorf("saving config: %w", err)
@@ -227,23 +235,45 @@ func pullAndPersist(ctx context.Context, cmd *cobra.Command, info docker.Info, s
 	return nil
 }
 
-// regenerateCompose writes a new compose.yml for the given image tag.
-// effectiveVersion overrides the stale in-memory version.Version after
-// selfupdate.Replace so the compose header reflects the new CLI version.
-func regenerateCompose(state config.State, tag, safeDir, effectiveVersion string) error {
+// verifyAndPinForUpdate runs image verification and regenerates the compose
+// file with digest pins. Returns the digest pin map (nil if --skip-verify).
+func verifyAndPinForUpdate(ctx context.Context, state config.State, tag, safeDir, effectiveVersion string, out *ui.UI, errOut *ui.UI) (map[string]string, error) {
 	updatedState := state
 	updatedState.ImageTag = tag
-	params := compose.ParamsFromState(updatedState)
-	params.CLIVersion = effectiveVersion
-	composeYAML, err := compose.Generate(params)
+
+	if skipVerify {
+		errOut.Warn("Image verification skipped (--skip-verify). Containers are NOT verified.")
+		// Write compose with the new tag but no digest pins.
+		if err := writeDigestPinnedCompose(updatedState, nil, safeDir, effectiveVersion); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	out.Step("Verifying container image signatures...")
+	// Bound OCI registry calls to prevent indefinite hangs.
+	verifyCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	results, err := verify.VerifyImages(verifyCtx, verify.VerifyOptions{
+		Images: verify.BuildImageRefs(tag, state.Sandbox),
+		Output: out.Writer(),
+	})
 	if err != nil {
-		return fmt.Errorf("generating compose file: %w", err)
+		if isTransportError(err) {
+			errOut.Hint("Use --skip-verify for air-gapped environments")
+		}
+		return nil, fmt.Errorf("image verification failed: %w", err)
 	}
-	composePath := filepath.Join(safeDir, "compose.yml")
-	if err := os.WriteFile(composePath, composeYAML, 0o600); err != nil {
-		return fmt.Errorf("writing compose file: %w", err)
+	pins, err := digestPinMap(results)
+	if err != nil {
+		return nil, fmt.Errorf("digest pin map: %w", err)
 	}
-	return nil
+
+	// Write compose with verified digest pins.
+	if err := writeDigestPinnedCompose(updatedState, pins, safeDir, effectiveVersion); err != nil {
+		return nil, err
+	}
+	return pins, nil
 }
 
 // restartIfRunning checks if containers are running and offers a restart.

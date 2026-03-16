@@ -2,8 +2,10 @@ package selfupdate
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	protobundle "github.com/sigstore/protobuf-specs/gen/pb-go/bundle/v1"
@@ -12,6 +14,8 @@ import (
 	"github.com/sigstore/sigstore-go/pkg/tuf"
 	"github.com/sigstore/sigstore-go/pkg/verify"
 	"github.com/theupdateframework/go-tuf/v2/metadata/fetcher"
+
+	ociverify "github.com/Aureliolo/synthorg/cli/internal/verify"
 )
 
 const (
@@ -30,6 +34,7 @@ const (
 // 2. The signing certificate chains to Sigstore's trusted root
 // 3. The signer identity matches the expected GitHub Actions workflow
 // 4. The artifact digest matches the actual checksums data
+// 5. If the bundle contains a DSSE envelope, the predicate type is SLSA provenance
 func verifySigstoreBundle(checksumData, bundleData []byte) error {
 	b, err := loadBundleFromJSON(bundleData)
 	if err != nil {
@@ -76,6 +81,48 @@ func verifySigstoreBundle(checksumData, bundleData []byte) error {
 	))
 	if err != nil {
 		return fmt.Errorf("bundle verification failed: %w", err)
+	}
+
+	// Verify SLSA provenance predicate type if bundle contains a DSSE envelope.
+	if err := assertSLSAProvenance(b); err != nil {
+		return fmt.Errorf("SLSA provenance check: %w", err)
+	}
+
+	return nil
+}
+
+// Constants for SLSA validation are imported from the verify package to avoid
+// duplication. The slsaStatement struct is defined locally (trivial one-field
+// struct for JSON unmarshalling — not worth exporting from verify).
+
+// slsaStatement is a minimal in-toto statement for predicate type extraction.
+type slsaStatement struct {
+	PredicateType string `json:"predicateType"`
+}
+
+// assertSLSAProvenance checks that the bundle contains a DSSE envelope with
+// a SLSA provenance predicate. If the bundle does not contain a DSSE envelope
+// (i.e. it's a plain message signature), this is a no-op — SLSA provenance
+// is additive assurance, not a hard requirement for older bundles.
+func assertSLSAProvenance(b *bundle.Bundle) error {
+	env := b.GetDsseEnvelope()
+	if env == nil {
+		// Bundle uses message signature, not DSSE — no provenance to check.
+		return nil
+	}
+
+	if env.PayloadType != ociverify.DSSEPayloadType {
+		return fmt.Errorf("unexpected DSSE payload type %q, want %q", env.PayloadType, ociverify.DSSEPayloadType)
+	}
+
+	// The protobuf DSSE envelope stores Payload as raw bytes.
+	var stmt slsaStatement
+	if err := json.Unmarshal(env.Payload, &stmt); err != nil {
+		return fmt.Errorf("parsing in-toto statement: %w", err)
+	}
+
+	if !strings.HasPrefix(stmt.PredicateType, ociverify.SLSAProvenancePredicatePrefix) {
+		return fmt.Errorf("unexpected predicate type %q, want prefix %q", stmt.PredicateType, ociverify.SLSAProvenancePredicatePrefix)
 	}
 
 	return nil

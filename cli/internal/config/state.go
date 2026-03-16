@@ -14,16 +14,17 @@ const stateFileName = "config.json"
 
 // State is the persisted CLI configuration written by `synthorg init`.
 type State struct {
-	DataDir            string `json:"data_dir"`
-	ImageTag           string `json:"image_tag"`
-	BackendPort        int    `json:"backend_port"`
-	WebPort            int    `json:"web_port"`
-	Sandbox            bool   `json:"sandbox"`
-	DockerSock         string `json:"docker_sock,omitempty"`
-	LogLevel           string `json:"log_level"`
-	JWTSecret          string `json:"jwt_secret,omitempty"`
-	PersistenceBackend string `json:"persistence_backend"`
-	MemoryBackend      string `json:"memory_backend"`
+	DataDir            string            `json:"data_dir"`
+	ImageTag           string            `json:"image_tag"`
+	BackendPort        int               `json:"backend_port"`
+	WebPort            int               `json:"web_port"`
+	Sandbox            bool              `json:"sandbox"`
+	DockerSock         string            `json:"docker_sock,omitempty"`
+	LogLevel           string            `json:"log_level"`
+	JWTSecret          string            `json:"jwt_secret,omitempty"`
+	PersistenceBackend string            `json:"persistence_backend"`
+	MemoryBackend      string            `json:"memory_backend"`
+	VerifiedDigests    map[string]string `json:"verified_digests,omitempty"`
 }
 
 // DefaultState returns a State with sensible defaults for the interactive init
@@ -132,7 +133,26 @@ func (s State) validate() error {
 	if !IsValidMemoryBackend(s.MemoryBackend) {
 		return fmt.Errorf("invalid memory_backend %q: must be one of %s", s.MemoryBackend, sortedKeys(validMemoryBackends))
 	}
+	for name, digest := range s.VerifiedDigests {
+		if !isValidDigestFormat(digest) {
+			return fmt.Errorf("invalid verified_digests[%q]: %q is not a valid sha256 digest", name, digest)
+		}
+	}
 	return nil
+}
+
+// isValidDigestFormat checks if d matches sha256:<64-hex-chars>.
+// Avoids importing the verify package to prevent circular dependencies.
+func isValidDigestFormat(d string) bool {
+	if len(d) != 71 || d[:7] != "sha256:" {
+		return false
+	}
+	for _, c := range d[7:] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Save writes State to disk as indented JSON.
