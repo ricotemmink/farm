@@ -49,6 +49,35 @@ class TestCreateApp:
 
 
 @pytest.mark.unit
+class TestCreateAppEnvAutoWire:
+    """Verify create_app auto-wires SQLite persistence from SYNTHORG_DB_PATH."""
+
+    @pytest.mark.parametrize(
+        ("env_value", "expect_persistence"),
+        [
+            (":memory:", True),
+            (None, False),
+        ],
+        ids=["with_env_var", "without_env_var"],
+    )
+    def test_persistence_from_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        root_config: Any,
+        env_value: str | None,
+        expect_persistence: bool,
+    ) -> None:
+        """Persistence is auto-wired when env var is set, None otherwise."""
+        if env_value is not None:
+            monkeypatch.setenv("SYNTHORG_DB_PATH", env_value)
+        else:
+            monkeypatch.delenv("SYNTHORG_DB_PATH", raising=False)
+        app = create_app(config=root_config)
+        state = app.state["app_state"]
+        assert state.has_persistence == expect_persistence
+
+
+@pytest.mark.unit
 class TestAppLifecycle:
     async def test_startup_partial_failure_cleanup(
         self,

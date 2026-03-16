@@ -5,6 +5,7 @@ controllers, middleware, exception handlers, plugins, and
 lifecycle hooks (startup/shutdown).
 """
 
+import os
 import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -53,6 +54,8 @@ from synthorg.observability.events.api import (
     API_APP_STARTUP,
     API_APPROVAL_PUBLISH_FAILED,
 )
+from synthorg.persistence.config import PersistenceConfig, SQLiteConfig
+from synthorg.persistence.factory import create_backend
 from synthorg.persistence.protocol import PersistenceBackend  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -444,6 +447,11 @@ def create_app(  # noqa: PLR0913
     All parameters are optional for testing — provide fakes via
     keyword arguments.
 
+    When ``persistence`` is not provided, the factory checks
+    ``SYNTHORG_DB_PATH`` in the environment and auto-creates a
+    SQLite backend if set (used by the Docker compose template).
+    Explicit ``persistence`` always takes precedence.
+
     Args:
         config: Root company configuration.
         persistence: Persistence backend.
@@ -463,6 +471,29 @@ def create_app(  # noqa: PLR0913
     """
     effective_config = config or RootConfig(company_name="default")
     api_config = effective_config.api
+
+    # Auto-wire persistence from SYNTHORG_DB_PATH env var (set by CLI
+    # compose template).  The startup lifecycle handles connect() +
+    # migrate() + auth service creation.
+    if persistence is None:
+        db_path = (os.environ.get("SYNTHORG_DB_PATH") or "").strip()
+        if db_path:
+            try:
+                persistence = create_backend(
+                    PersistenceConfig(sqlite=SQLiteConfig(path=db_path)),
+                )
+            except Exception:
+                logger.exception(
+                    API_APP_STARTUP,
+                    error="Failed to create persistence backend from SYNTHORG_DB_PATH",
+                    db_path=db_path,
+                )
+                raise
+            logger.info(
+                API_APP_STARTUP,
+                note="Auto-wired SQLite persistence from SYNTHORG_DB_PATH",
+                db_path=db_path,
+            )
 
     if (
         persistence is None
