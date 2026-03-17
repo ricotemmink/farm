@@ -1,5 +1,6 @@
 """Analytics controller — derived read-only metrics."""
 
+import asyncio
 from collections import Counter
 
 from litestar import Controller, get
@@ -11,6 +12,7 @@ from synthorg.api.guards import require_read_access
 from synthorg.api.state import AppState  # noqa: TC001
 from synthorg.core.enums import TaskStatus
 from synthorg.observability import get_logger
+from synthorg.observability.events.api import API_REQUEST_ERROR
 
 logger = get_logger(__name__)
 
@@ -56,17 +58,29 @@ class AnalyticsController(Controller):
         """
         app_state: AppState = state.app_state
 
-        all_tasks = await app_state.persistence.tasks.list_tasks()
+        try:
+            async with asyncio.TaskGroup() as tg:
+                t_tasks = tg.create_task(app_state.persistence.tasks.list_tasks())
+                t_cost = tg.create_task(app_state.cost_tracker.get_total_cost())
+                t_agents = tg.create_task(app_state.config_resolver.get_agents())
+        except ExceptionGroup as eg:
+            logger.warning(
+                API_REQUEST_ERROR,
+                endpoint="analytics.overview",
+                error_count=len(eg.exceptions),
+                exc_info=True,
+            )
+            raise eg.exceptions[0] from eg
+
+        all_tasks = t_tasks.result()
         counts = Counter(t.status.value for t in all_tasks)
         by_status = {s.value: counts.get(s.value, 0) for s in TaskStatus}
-
-        total_cost = await app_state.cost_tracker.get_total_cost()
 
         return ApiResponse(
             data=OverviewMetrics(
                 total_tasks=len(all_tasks),
                 tasks_by_status=by_status,
-                total_agents=len(app_state.config.agents),
-                total_cost_usd=total_cost,
+                total_agents=len(t_agents.result()),
+                total_cost_usd=t_cost.result(),
             ),
         )
