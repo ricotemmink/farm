@@ -30,12 +30,34 @@ if ($Version -notmatch '^v\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?$') {
 Write-Host "Installing SynthOrg CLI $Version..."
 
 # --- Detect architecture ---
+# Primary: .NET RuntimeInformation (PowerShell 5.1+ with .NET 4.7.1+).
+# Fallback: PROCESSOR_ARCHITECTURE env var (always available on Windows).
+# The RuntimeInformation API can return $null on older .NET runtimes or
+# certain system configurations (see #521).
 
-$OsArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-$WinArch = switch ($OsArch) {
-    ([System.Runtime.InteropServices.Architecture]::X64)   { "amd64" }
-    ([System.Runtime.InteropServices.Architecture]::Arm64) { "arm64" }
-    default { Write-Error "Unsupported architecture: $OsArch"; exit 1 }
+$OsArch = $null
+try {
+    $OsArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+} catch {
+    # Type not available - fall through to env var detection.
+    Write-Verbose "RuntimeInformation unavailable; using PROCESSOR_ARCHITECTURE fallback."
+}
+
+if ($null -ne $OsArch) {
+    $WinArch = switch ($OsArch) {
+        ([System.Runtime.InteropServices.Architecture]::X64)   { "amd64" }
+        ([System.Runtime.InteropServices.Architecture]::Arm64) { "arm64" }
+        default { Write-Error "Unsupported architecture: $OsArch"; exit 1 }
+    }
+} else {
+    # PROCESSOR_ARCHITEW6432 is set when running 32-bit PowerShell on 64-bit
+    # Windows (WOW64). It contains the real OS architecture.
+    $ArchEnv = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    $WinArch = switch ($ArchEnv) {
+        "AMD64" { "amd64" }
+        "ARM64" { "arm64" }
+        default { Write-Error "Unsupported architecture: $ArchEnv"; exit 1 }
+    }
 }
 
 # --- Download ---
