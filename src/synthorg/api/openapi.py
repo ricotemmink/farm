@@ -84,7 +84,7 @@ _ERROR_RESPONSES: Final[tuple[_ErrorResponseSpec, ...]] = (
     _ErrorResponseSpec(
         status=400,
         key="BadRequest",
-        description=("Validation error \u2014 request body or parameters are invalid."),
+        description="Validation error -- request body or parameters are invalid.",
         error_code=ErrorCode.REQUEST_VALIDATION_ERROR,
         error_category=ErrorCategory.VALIDATION,
         detail="Validation error",
@@ -93,7 +93,7 @@ _ERROR_RESPONSES: Final[tuple[_ErrorResponseSpec, ...]] = (
     _ErrorResponseSpec(
         status=401,
         key="Unauthorized",
-        description=("Authentication required \u2014 missing or invalid credentials."),
+        description="Authentication required -- missing or invalid credentials.",
         error_code=ErrorCode.UNAUTHORIZED,
         error_category=ErrorCategory.AUTH,
         detail="Authentication required",
@@ -120,7 +120,7 @@ _ERROR_RESPONSES: Final[tuple[_ErrorResponseSpec, ...]] = (
     _ErrorResponseSpec(
         status=409,
         key="Conflict",
-        description=("Resource conflict \u2014 duplicate or invalid state transition."),
+        description="Resource conflict -- duplicate or invalid state transition.",
         error_code=ErrorCode.RESOURCE_CONFLICT,
         error_category=ErrorCategory.CONFLICT,
         detail="Resource conflict",
@@ -129,7 +129,7 @@ _ERROR_RESPONSES: Final[tuple[_ErrorResponseSpec, ...]] = (
     _ErrorResponseSpec(
         status=429,
         key="TooManyRequests",
-        description="Rate limit exceeded \u2014 back off and retry.",
+        description="Rate limit exceeded -- back off and retry.",
         error_code=ErrorCode.RATE_LIMITED,
         error_category=ErrorCategory.RATE_LIMIT,
         detail="Rate limit exceeded",
@@ -162,7 +162,7 @@ All error responses support content negotiation between two formats:
 
 - **`application/json`** (default): Standard `ApiResponse` envelope with \
 `error`, `error_detail`, and `success` fields
-- **`application/problem+json`**: Bare RFC 9457 Problem Detail body \u2014 \
+- **`application/problem+json`**: Bare RFC 9457 Problem Detail body -- \
 send `Accept: application/problem+json`
 
 Every error includes machine-readable metadata: `error_code` \
@@ -199,7 +199,7 @@ def _build_problem_detail_schema() -> dict[str, Any]:
     """
     raw = ProblemDetail.model_json_schema(mode="serialization")
 
-    # Strip $defs — referenced types already exist in components.schemas.
+    # Strip $defs -- referenced types already exist in components.schemas.
     raw.pop("$defs", None)
 
     # Rewrite $ref from '#/$defs/X' to '#/components/schemas/X'.
@@ -349,7 +349,8 @@ def _should_inject(
         # Inject on write methods or replace Litestar's incorrect default.
         "BadRequest": is_write or "400" in operation.get("responses", {}),
         "NotFound": has_params,
-        # DELETE excluded — idempotent; conflicts are a create/update concern.
+        # DELETE excluded -- this API's deletes are unconditional removals
+        # with no state preconditions, so 409 Conflict does not apply.
         "Conflict": is_write and method != "delete",
         "TooManyRequests": not is_public,
     }
@@ -377,7 +378,7 @@ def _inject_operation_responses(
 ) -> None:
     """Inject error response refs into each operation in *paths*.
 
-    Mutates *paths* in place — the caller is responsible for
+    Mutates *paths* in place -- the caller is responsible for
     passing a deep-copied schema.
     """
     for path, path_item in paths.items():
