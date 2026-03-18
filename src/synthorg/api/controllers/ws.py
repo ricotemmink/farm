@@ -14,7 +14,7 @@ import json
 from typing import Any
 
 from litestar import WebSocket  # noqa: TC002
-from litestar.channels import ChannelsPlugin  # noqa: TC002
+from litestar.channels import ChannelsPlugin
 from litestar.exceptions import WebSocketDisconnect
 from litestar.handlers import websocket
 
@@ -23,6 +23,7 @@ from synthorg.api.channels import ALL_CHANNELS
 from synthorg.api.guards import _READ_ROLES, HumanRole
 from synthorg.observability import get_logger
 from synthorg.observability.events.api import (
+    API_WS_AUTH_STAGE,
     API_WS_CONNECTED,
     API_WS_DISCONNECTED,
     API_WS_INVALID_MESSAGE,
@@ -55,6 +56,12 @@ async def _validate_ticket(
     missing, invalid, or expired.
     """
     ticket = socket.query_params.get("ticket")
+    logger.debug(
+        API_WS_AUTH_STAGE,
+        stage="ticket_check",
+        has_ticket=bool(ticket),
+        client=str(socket.client),
+    )
     if not ticket:
         logger.warning(API_WS_TICKET_INVALID, reason="missing_ticket")
         await socket.close(code=_WS_CLOSE_AUTH_FAILED, reason="Missing ticket")
@@ -65,12 +72,22 @@ async def _validate_ticket(
         ticket,
     )
     if user is None:
+        logger.warning(
+            API_WS_TICKET_INVALID,
+            reason="invalid_or_expired",
+            client=str(socket.client),
+        )
         await socket.close(
             code=_WS_CLOSE_AUTH_FAILED,
             reason="Invalid or expired ticket",
         )
         return None
 
+    logger.debug(
+        API_WS_AUTH_STAGE,
+        stage="ticket_valid",
+        user_id=user.user_id,
+    )
     return user
 
 
@@ -83,6 +100,12 @@ async def _check_ws_role(
     Returns ``True`` if the role is valid.  On failure, closes the
     socket with a forbidden code and returns ``False``.
     """
+    logger.debug(
+        API_WS_AUTH_STAGE,
+        stage="role_check",
+        user_id=user.user_id,
+        role=str(user.role),
+    )
     # Defense-in-depth: user.role is already validated as HumanRole by
     # Pydantic, and _READ_ROLES == frozenset(HumanRole).  These checks
     # guard against future changes to the role model or read-role set.
@@ -167,10 +190,12 @@ async def _on_event(
         await socket.close(code=1011, reason="Internal error")
 
 
-@websocket("/ws")
+# Defense-in-depth: opt signals Litestar's auth middleware to skip
+# this handler.  The middleware is already HTTP-only (ScopeType.HTTP)
+# and the WS path is regex-excluded, so this is a tertiary safeguard.
+@websocket("/ws", opt={"exclude_from_auth": True})
 async def ws_handler(
     socket: WebSocket[Any, Any, Any],
-    channels_plugin: ChannelsPlugin,
 ) -> None:
     """Handle WebSocket connections with channel subscriptions.
 
@@ -190,6 +215,41 @@ async def ws_handler(
     if not await _check_ws_role(socket, user):
         return
 
+    # Resolve ChannelsPlugin by iterating app.plugins -- the same
+    # pattern used by get_channels_plugin() in channels.py.
+    # Litestar's DI does not reliably inject plugin instances into
+    # WebSocket handlers (the parameter is misidentified as a query
+    # param, causing a Litestar-internal 4500 close before the
+    # handler runs).  See #549.
+    channels_plugin: ChannelsPlugin | None = None
+    for plugin in socket.app.plugins:
+        if isinstance(plugin, ChannelsPlugin):
+            channels_plugin = plugin
+            break
+    if channels_plugin is None:
+        logger.warning(
+            API_WS_SEND_FAILED,
+            reason="channels_plugin_not_registered",
+        )
+        await socket.close(code=1011, reason="Internal error")
+        return
+
+    try:
+        subscriber = await channels_plugin.subscribe(list(ALL_CHANNELS))
+    except Exception:
+        logger.warning(
+            API_WS_SEND_FAILED,
+            reason="subscribe_failed",
+            client=str(socket.client),
+            user_id=user.user_id,
+            exc_info=True,
+        )
+        await socket.close(code=1011, reason="Internal error")
+        return
+
+    # Accept only after auth, role check, plugin resolution, and
+    # subscription all succeed -- avoid accepting then immediately
+    # closing on infrastructure failures.
     socket.scope["user"] = user
     await socket.accept()
     logger.info(
@@ -200,8 +260,6 @@ async def ws_handler(
 
     subscribed: set[str] = set()
     filters: dict[str, dict[str, str]] = {}
-
-    subscriber = await channels_plugin.subscribe(list(ALL_CHANNELS))
 
     async def _event_callback(event_data: bytes) -> None:
         await _on_event(event_data, subscribed, filters, socket)

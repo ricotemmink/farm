@@ -49,7 +49,7 @@ class TestWsHandleMessage:
         filters: dict[str, dict[str, str]] = {}
         result = _handle_message("not json", subscribed, filters)
         data = json.loads(result)
-        assert "error" in data
+        assert data["error"] == "Invalid JSON"
 
     def test_unknown_action(self) -> None:
         subscribed: set[str] = set()
@@ -60,7 +60,7 @@ class TestWsHandleMessage:
             filters,
         )
         data = json.loads(result)
-        assert "error" in data
+        assert data["error"] == "Unknown action"
 
     def test_subscribe_ignores_invalid_channels(self) -> None:
         subscribed: set[str] = set()
@@ -281,28 +281,172 @@ class TestWsTicketAuth:
         assert 4000 <= _WS_CLOSE_AUTH_FAILED <= 4999
         assert 4000 <= _WS_CLOSE_FORBIDDEN <= 4999
 
-    def test_ws_rejects_missing_ticket(
+    @pytest.mark.parametrize(
+        ("url", "scenario"),
+        [
+            ("/api/v1/ws", "missing_ticket"),
+            ("/api/v1/ws?ticket=bogus-ticket", "invalid_ticket"),
+        ],
+    )
+    def test_ws_rejects_bad_ticket(
         self,
         test_client: TestClient[Any],
+        url: str,
+        scenario: str,
     ) -> None:
-        """WS connection without ?ticket= is rejected (close before accept)."""
+        """WS connection with missing or invalid ticket is rejected.
+
+        Verifying the close code (not just WebSocketDisconnect) ensures
+        the rejection comes from the handler's ticket validation -- not
+        from a middleware or DI failure (which would produce a different
+        close code, such as Litestar's internal 4500).
+        """
         from litestar.exceptions import WebSocketDisconnect
 
         with (
-            pytest.raises(WebSocketDisconnect),
-            test_client.websocket_connect("/api/v1/ws"),
+            pytest.raises(WebSocketDisconnect) as exc_info,
+            test_client.websocket_connect(url),
         ):
             pass
+        assert exc_info.value.code == _WS_CLOSE_AUTH_FAILED, (
+            f"Expected close code {_WS_CLOSE_AUTH_FAILED} for "
+            f"{scenario}, got {exc_info.value.code}"
+        )
 
-    def test_ws_rejects_invalid_ticket(
+    def test_ws_accepts_valid_ticket(
         self,
         test_client: TestClient[Any],
     ) -> None:
-        """WS connection with a bogus ticket is rejected."""
-        from litestar.exceptions import WebSocketDisconnect
+        """WS connection with a valid ticket is accepted."""
+        from synthorg.api.auth.models import AuthenticatedUser, AuthMethod
 
-        with (
-            pytest.raises(WebSocketDisconnect),
-            test_client.websocket_connect("/api/v1/ws?ticket=bogus-ticket"),
-        ):
-            pass
+        app_state = test_client.app.state["app_state"]
+        user = AuthenticatedUser(
+            user_id="test-ws-user",
+            username="test-ceo",
+            role=HumanRole.CEO,
+            auth_method=AuthMethod.WS_TICKET,
+            must_change_password=False,
+        )
+        ticket = app_state.ticket_store.create(user)
+
+        with test_client.websocket_connect(
+            f"/api/v1/ws?ticket={ticket}",
+        ) as ws:
+            ws.send_text(
+                json.dumps({"action": "subscribe", "channels": ["tasks"]}),
+            )
+            resp = json.loads(ws.receive_text())
+            assert resp["action"] == "subscribed"
+            assert "tasks" in resp["channels"]
+
+    def test_ws_auth_middleware_scopes_http_only(self) -> None:
+        """Auth middleware must use HTTP-only scopes.
+
+        WebSocket connections use ticket-based auth in the handler,
+        not JWT/API key auth from the middleware.
+        """
+        from litestar import Litestar
+        from litestar.enums import ScopeType
+
+        from synthorg.api.app import _build_middleware
+        from synthorg.api.config import ApiConfig
+
+        api_config = ApiConfig()
+        middleware = _build_middleware(api_config)
+        auth_cls = middleware[0]
+
+        dummy_app = Litestar(route_handlers=[])
+        instance = auth_cls(dummy_app)  # type: ignore[operator,call-arg]
+        assert instance.scopes == {ScopeType.HTTP}  # type: ignore[union-attr]
+
+    def test_ws_rate_limit_excludes_ws_path(self) -> None:
+        """Rate limit middleware must exclude the WS path.
+
+        HTTP-style rate limiting makes no sense for persistent
+        WebSocket connections and can cause spurious 403 rejections.
+        """
+        from litestar.middleware import DefineMiddleware
+        from litestar.middleware.rate_limit import (
+            RateLimitConfig as LitestarRateLimitConfig,
+        )
+
+        from synthorg.api.app import _build_middleware
+        from synthorg.api.config import ApiConfig
+
+        api_config = ApiConfig()
+        middleware = _build_middleware(api_config)
+
+        # Find the rate limit middleware by type -- don't rely on index.
+        rl_config = None
+        for mw in middleware:
+            if (
+                isinstance(mw, DefineMiddleware)
+                and "config" in mw.kwargs
+                and isinstance(mw.kwargs["config"], LitestarRateLimitConfig)
+            ):
+                rl_config = mw.kwargs["config"]
+                break
+        assert rl_config is not None, (
+            "Rate limit middleware not found in middleware stack"
+        )
+
+        ws_path = f"^{api_config.api_prefix}/ws$"
+        assert ws_path in (rl_config.exclude or []), (
+            f"WS path '{ws_path}' not excluded from rate limit: {rl_config.exclude}"
+        )
+
+    def test_ws_handler_signature_no_channels_plugin_param(self) -> None:
+        """ws_handler must NOT declare ChannelsPlugin as a parameter.
+
+        Litestar's DI misidentifies plugin params as query params
+        for WebSocket handlers, causing a Litestar-internal 4500
+        close before the handler runs (#549).  The handler must
+        resolve the plugin from ``socket.app.plugins`` instead.
+        """
+        import inspect
+
+        from synthorg.api.controllers.ws import ws_handler
+
+        sig = inspect.signature(ws_handler.fn)
+        param_names = list(sig.parameters.keys())
+        assert "channels_plugin" not in param_names, (
+            "channels_plugin must not be a handler parameter -- "
+            "resolve from socket.app.plugins instead (see #549)"
+        )
+
+    def test_ws_handler_opt_exclude_from_auth(self) -> None:
+        """ws_handler must set opt={"exclude_from_auth": True}.
+
+        Defense-in-depth marker signaling Litestar's auth middleware
+        to skip this handler.  Works alongside ScopeType.HTTP scoping
+        and regex path exclusion.
+        """
+        from synthorg.api.controllers.ws import ws_handler
+
+        assert ws_handler.opt.get("exclude_from_auth") is True, (
+            "ws_handler must have opt={'exclude_from_auth': True} "
+            "as a defense-in-depth auth exclusion marker"
+        )
+
+    def test_ws_guard_passes_without_user_in_scope(self) -> None:
+        """require_password_changed guard must pass for WS connections.
+
+        The auth middleware is HTTP-only, so WebSocket upgrade requests
+        arrive at the guard with no user in scope.  The guard must
+        return without raising PermissionDeniedException.  The actual
+        WS auth happens via ticket validation inside the handler.
+        """
+        from unittest.mock import MagicMock
+
+        from synthorg.api.auth.controller import require_password_changed
+
+        connection = MagicMock()
+        connection.url.path = "/api/v1/ws"
+        connection.scope = {"type": "websocket"}
+
+        # Guard must not raise PermissionDeniedException when user is
+        # absent -- this is the expected state for WS connections.
+        require_password_changed(connection, MagicMock())
+        # Reaching here without PermissionDeniedException confirms
+        # the guard passes through for WS scope with no user.
