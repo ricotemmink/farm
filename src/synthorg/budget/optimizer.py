@@ -5,7 +5,7 @@ downgrade recommendations, routing optimization suggestions, and
 operation approval decisions.  Composes
 :class:`~synthorg.budget.tracker.CostTracker` and
 :class:`~synthorg.budget.config.BudgetConfig` for read-only analytical
-queries — the advisory complement to
+queries -- the advisory complement to
 :class:`~synthorg.budget.enforcer.BudgetEnforcer`.
 
 Service layer backing the CFO role (see Operations design page).
@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING
 from synthorg.budget._optimizer_helpers import (
     _build_downgrade_recommendation,
     _build_efficiency_from_records,
-    _classify_severity,
     _compute_alert_level,
     _compute_window_costs,
     _detect_spike_anomaly,
@@ -360,7 +359,7 @@ class CostOptimizer:
 
         Unlike ``recommend_downgrades`` which only targets INEFFICIENT
         agents, this method analyzes all agents and suggests cheaper
-        alternatives regardless of efficiency rating — any agent that
+        alternatives regardless of efficiency rating -- any agent that
         could use a cheaper model is a candidate.
 
         Args:
@@ -632,7 +631,7 @@ class CostOptimizer:
                             f"(${current_resolved.total_cost_per_1k:.4f}/1k) "
                             f"to {candidate.model_id!r} "
                             f"(${candidate.total_cost_per_1k:.4f}/1k) "
-                            f"— same context window, lower cost"
+                            f"-- same context window, lower cost"
                         ),
                     ),
                 )
@@ -744,8 +743,3 @@ class CostOptimizer:
             monthly_cost / cfg.total_monthly * 100,
             BUDGET_ROUNDING_PRECISION,
         )
-
-
-# Re-export _classify_severity for backwards compatibility with tests
-# that import it directly from optimizer.
-__all__ = ["CostOptimizer", "_classify_severity"]

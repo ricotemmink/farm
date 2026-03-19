@@ -4,7 +4,7 @@ Implements a two-pass loading strategy:
 
 - **Pass 1**: YAML-parse the template to extract metadata and the
   ``variables`` section (which uses plain YAML, no Jinja2).
-- **Pass 2**: Performed later by the renderer — Jinja2-renders the raw
+- **Pass 2**: Performed later by the renderer -- Jinja2-renders the raw
   YAML text, then YAML-parses the result.
 
 Both are returned bundled as a :class:`LoadedTemplate` dataclass.
@@ -446,7 +446,7 @@ def _normalize_template_data(data: dict[str, Any]) -> dict[str, Any]:
         "workflow": data.get("workflow", "agile_kanban"),
         "communication": data.get("communication", "hybrid"),
         "budget_monthly": _to_float(company.get("budget_monthly", 50.0)),
-        "autonomy": _to_float(company.get("autonomy", 0.5)),
+        "autonomy": company.get("autonomy", {"level": "semi"}),
         "workflow_handoffs": data.get("workflow_handoffs", ()),
         "escalation_paths": data.get("escalation_paths", ()),
     }

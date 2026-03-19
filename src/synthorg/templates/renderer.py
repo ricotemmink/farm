@@ -65,7 +65,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Module-level Jinja2 environment — stateless and safe to reuse.
+# Module-level Jinja2 environment -- stateless and safe to reuse.
 _JINJA_ENV = SandboxedEnvironment(keep_trailing_newline=True)
 _JINJA_ENV.filters["auto"] = lambda value: value or ""
 
@@ -513,22 +513,30 @@ def _validate_list(
 def _extract_numeric_config(
     company: dict[str, Any],
     template: CompanyTemplate,
-) -> tuple[float | dict[str, Any], float]:
+) -> tuple[dict[str, Any], float]:
     """Extract autonomy and budget_monthly.
 
-    Autonomy may be a float (backward compat) or a dict. When it's
-    a float, we pass it through — the ``CompanyConfig.model_validator``
-    converts it to ``AutonomyConfig``.
+    Autonomy is always a dict (AutonomyConfig-compatible). A copy
+    is returned to prevent mutation of the original rendered data.
     """
     source_name = template.metadata.name
     raw_autonomy = company.get("autonomy", template.autonomy)
+    if not isinstance(raw_autonomy, dict):
+        msg = (
+            f"Invalid autonomy config in template {source_name!r}: "
+            f"expected dict, got {type(raw_autonomy).__name__}"
+        )
+        logger.warning(
+            TEMPLATE_RENDER_TYPE_ERROR,
+            source=source_name,
+            field="autonomy",
+            expected="dict",
+            got=type(raw_autonomy).__name__,
+        )
+        raise TemplateRenderError(msg)
     try:
-        if isinstance(raw_autonomy, dict):
-            # Already an AutonomyConfig-like dict — deep-copy to prevent
-            # mutation of the original rendered data.
-            autonomy: float | dict[str, Any] = dict(raw_autonomy)
-        else:
-            autonomy = to_float(raw_autonomy, field_name="autonomy")
+        # Shallow copy -- autonomy dicts have only scalar values.
+        autonomy: dict[str, Any] = dict(raw_autonomy)
         budget_monthly = to_float(
             company.get("budget_monthly", template.budget_monthly),
             field_name="budget_monthly",
@@ -620,7 +628,7 @@ def _expand_single_agent(
         if not has_extends:
             msg = (
                 f"Agent {name!r} uses '_remove' but the template "
-                "has no 'extends' — directive has no effect"
+                "has no 'extends' -- directive has no effect"
             )
             logger.warning(
                 TEMPLATE_RENDER_VARIABLE_ERROR,
@@ -630,7 +638,7 @@ def _expand_single_agent(
             raise TemplateRenderError(msg)
         agent_dict["_remove"] = True
 
-    # Preserve merge_id only when inheritance is active — standalone
+    # Preserve merge_id only when inheritance is active -- standalone
     # templates have no merge step to strip it later.
     merge_id = str(agent.get("merge_id", "")).strip()
     if has_extends and merge_id:

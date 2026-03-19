@@ -18,7 +18,7 @@ class TemplateVariable(BaseModel):
 
     Variables declared here are extracted from the template YAML during
     the first parsing pass (before Jinja2 rendering).  The ``variables``
-    section must use plain YAML — no Jinja2 expressions.
+    section must use plain YAML -- no Jinja2 expressions.
 
     Attributes:
         name: Variable name (used in ``{{ name }}`` placeholders).
@@ -104,7 +104,7 @@ class TemplateAgentConfig(BaseModel):
             template has multiple agents with the same ``(role,
             department)`` pair, ``merge_id`` disambiguates them so
             child templates can target a specific agent.
-        remove: Merge directive — when ``True``, removes matching
+        remove: Merge directive -- when ``True``, removes matching
             parent agent during inheritance.
     """
 
@@ -155,7 +155,7 @@ class TemplateAgentConfig(BaseModel):
 class TemplateDepartmentConfig(BaseModel):
     """Department definition within a template.
 
-    Provides structural information — department names, budget
+    Provides structural information -- department names, budget
     allocations, the head role, reporting lines, and operational policies.
 
     Attributes:
@@ -206,6 +206,8 @@ class TemplateMetadata(BaseModel):
 
     name: NotBlankStr = Field(description="Template display name")
     description: str = Field(default="", description="Template description")
+    # Frozen at "1.0.0" -- no template versioning consumers exist yet.
+    # Start maintaining when templates are distributed or cached externally.
     version: NotBlankStr = Field(default="1.0.0", description="Semantic version")
     company_type: CompanyType = Field(
         description="Company type this template creates",
@@ -243,8 +245,7 @@ class CompanyTemplate(BaseModel):
         workflow: Workflow name.
         communication: Communication pattern name.
         budget_monthly: Default monthly budget in USD.
-        autonomy: Autonomy level (0.0 = full human oversight,
-            1.0 = fully autonomous).
+        autonomy: Autonomy configuration dict (e.g. ``{"level": "semi"}``).
         workflow_handoffs: Cross-department workflow handoff definitions.
         escalation_paths: Cross-department escalation path definitions.
         extends: Parent template name for inheritance (``None`` for
@@ -278,11 +279,9 @@ class CompanyTemplate(BaseModel):
         ge=0.0,
         description="Default monthly budget in USD",
     )
-    autonomy: float = Field(
-        default=0.5,
-        ge=0.0,
-        le=1.0,
-        description="Autonomy level",
+    autonomy: dict[str, Any] = Field(
+        default_factory=lambda: {"level": "semi"},
+        description="Autonomy configuration",
     )
     workflow_handoffs: tuple[dict[str, Any], ...] = Field(
         default=(),

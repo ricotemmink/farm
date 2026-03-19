@@ -2,8 +2,8 @@
 
 Provides configurable metadata for cost tiers: price ranges, display
 properties, and model-to-tier classification.  The built-in ``CostTier``
-enum (``synthorg.core.enums``) remains for backward compatibility;
-this module adds a configurable layer on top.
+enum (``synthorg.core.enums``) defines the tier values; this module adds
+a configurable layer on top.
 """
 
 from typing import Self
@@ -219,7 +219,7 @@ def classify_model_tier(
     Matches the first tier whose price range contains the given cost.
     Range check: ``min <= cost < max`` (or ``min <= cost`` if max is
     ``None``).  If tiers have overlapping ranges, the first match in
-    iteration order wins — callers should ensure tiers are sorted by
+    iteration order wins -- callers should ensure tiers are sorted by
     ``sort_order``.
 
     Args:
