@@ -9,9 +9,10 @@ from litestar.datastructures import State  # noqa: TC002
 from litestar.status_codes import HTTP_201_CREATED
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from synthorg.api.auth.config import AuthConfig
 from synthorg.api.dto import ApiResponse
 from synthorg.api.errors import ApiValidationError, ConflictError, NotFoundError
-from synthorg.api.guards import require_read_access, require_write_access
+from synthorg.api.guards import HumanRole, require_read_access, require_write_access
 from synthorg.api.state import AppState  # noqa: TC001
 from synthorg.core.enums import SeniorityLevel
 from synthorg.core.types import NotBlankStr  # noqa: TC001
@@ -24,20 +25,29 @@ from synthorg.observability.events.setup import (
     SETUP_COMPANY_CREATED,
     SETUP_COMPLETED,
     SETUP_MODEL_NOT_FOUND,
+    SETUP_NO_AGENTS,
+    SETUP_NO_COMPANY,
     SETUP_NO_PROVIDERS,
     SETUP_PROVIDER_NOT_FOUND,
     SETUP_STATUS_CHECKED,
+    SETUP_STATUS_SETTINGS_DEFAULT_USED,
     SETUP_STATUS_SETTINGS_UNAVAILABLE,
     SETUP_TEMPLATE_INVALID,
     SETUP_TEMPLATE_NOT_FOUND,
     SETUP_TEMPLATES_LISTED,
 )
+from synthorg.persistence.errors import QueryError
 from synthorg.settings.errors import SettingNotFoundError
 
 if TYPE_CHECKING:
     from synthorg.settings.service import SettingsService
 
 logger = get_logger(__name__)
+
+# Derive from AuthConfig default to prevent silent divergence.
+_DEFAULT_MIN_PASSWORD_LENGTH: int = AuthConfig.model_fields[
+    "min_password_length"
+].default
 
 # Serializes read-modify-write on the agents settings blob.
 _AGENT_LOCK = asyncio.Lock()
@@ -50,9 +60,10 @@ class SetupStatusResponse(BaseModel):
     """First-run setup status.
 
     Attributes:
-        needs_admin: True if no admin user exists yet.
+        needs_admin: True if no user with the CEO role exists yet.
         needs_setup: True if setup has not been completed.
         has_providers: True if at least one provider is configured.
+        min_password_length: Backend-configured minimum password length.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -60,6 +71,7 @@ class SetupStatusResponse(BaseModel):
     needs_admin: bool
     needs_setup: bool
     has_providers: bool
+    min_password_length: int = Field(ge=8)
 
 
 class TemplateInfoResponse(BaseModel):
@@ -215,8 +227,15 @@ class SetupController(Controller):
         app_state: AppState = state.app_state
         persistence = app_state.persistence
 
-        user_count = await persistence.users.count()
-        needs_admin = user_count == 0
+        try:
+            admin_count = await persistence.users.count_by_role(HumanRole.CEO)
+        except QueryError:
+            logger.warning(
+                SETUP_STATUS_SETTINGS_UNAVAILABLE,
+                exc_info=True,
+            )
+            admin_count = 0
+        needs_admin = admin_count == 0
 
         settings_svc = app_state.settings_service
         try:
@@ -235,6 +254,34 @@ class SetupController(Controller):
             app_state.has_provider_registry and len(app_state.provider_registry) > 0
         )
 
+        min_password_length = _DEFAULT_MIN_PASSWORD_LENGTH
+        raw_pw_value: str | None = None
+        try:
+            pw_entry = await settings_svc.get_entry("api", "min_password_length")
+            raw_pw_value = pw_entry.value
+            parsed = int(raw_pw_value)
+            min_password_length = max(parsed, _DEFAULT_MIN_PASSWORD_LENGTH)
+        except MemoryError, RecursionError:
+            raise
+        except SettingNotFoundError:
+            logger.debug(
+                SETUP_STATUS_SETTINGS_DEFAULT_USED,
+                setting="min_password_length",
+            )
+        except ValueError:
+            logger.warning(
+                SETUP_STATUS_SETTINGS_UNAVAILABLE,
+                setting="min_password_length",
+                reason="non_integer_value",
+                raw=raw_pw_value,
+            )
+        except Exception:
+            logger.warning(
+                SETUP_STATUS_SETTINGS_UNAVAILABLE,
+                setting="min_password_length",
+                exc_info=True,
+            )
+
         logger.debug(
             SETUP_STATUS_CHECKED,
             needs_admin=needs_admin,
@@ -247,6 +294,7 @@ class SetupController(Controller):
                 needs_admin=needs_admin,
                 needs_setup=needs_setup,
                 has_providers=has_providers,
+                min_password_length=min_password_length,
             ),
         )
 
@@ -421,8 +469,8 @@ class SetupController(Controller):
     ) -> ApiResponse[SetupCompleteResponse]:
         """Mark first-run setup as complete.
 
-        Validates that at least one provider is configured before
-        allowing completion.
+        Validates that a company, at least one agent, and at least one
+        provider are configured before allowing completion.
 
         Args:
             state: Application state.
@@ -431,16 +479,40 @@ class SetupController(Controller):
             Success envelope.
 
         Raises:
-            ApiValidationError: If no providers are configured.
+            ConflictError: If setup has already been completed.
+            ApiValidationError: If company, agents, or providers are missing.
         """
         app_state: AppState = state.app_state
+        settings_svc = app_state.settings_service
+        await _check_setup_not_complete(settings_svc)
 
+        # Verify company has been created.
+        has_company = False
+        try:
+            entry = await settings_svc.get_entry("company", "company_name")
+            has_company = bool(entry.value and entry.value.strip())
+        except MemoryError, RecursionError:
+            raise
+        except SettingNotFoundError:
+            pass
+        if not has_company:
+            msg = "A company must be created before completing setup"
+            logger.warning(SETUP_NO_COMPANY)
+            raise ApiValidationError(msg)
+
+        # Verify at least one agent has been created.
+        existing_agents = await _get_existing_agents(settings_svc)
+        if not existing_agents:
+            msg = "At least one agent must be created before completing setup"
+            logger.warning(SETUP_NO_AGENTS)
+            raise ApiValidationError(msg)
+
+        # Verify at least one provider is configured.
         if not app_state.has_provider_registry or len(app_state.provider_registry) == 0:
             msg = "At least one provider must be configured before completing setup"
             logger.warning(SETUP_NO_PROVIDERS)
             raise ApiValidationError(msg)
 
-        settings_svc = app_state.settings_service
         await settings_svc.set("api", "setup_complete", "true")
 
         logger.info(SETUP_COMPLETED)
