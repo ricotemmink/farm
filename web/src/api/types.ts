@@ -818,3 +818,48 @@ export interface PaginationParams {
   offset?: number
   limit?: number
 }
+
+// ── Setup ───────────────────────────────────────────────────
+
+export interface SetupStatusResponse {
+  needs_admin: boolean
+  needs_setup: boolean
+  has_providers: boolean
+}
+
+export interface TemplateInfoResponse {
+  name: string
+  display_name: string
+  description: string
+  source: 'builtin' | 'user'
+}
+
+export interface SetupCompanyRequest {
+  company_name: string
+  template_name: string | null
+}
+
+export interface SetupAgentRequest {
+  name: string
+  role: string
+  level: SeniorityLevel
+  personality_preset: string
+  model_provider: string
+  model_id: string
+  department: string
+  budget_limit_monthly: number | null
+}
+
+export interface SetupCompanyResponse {
+  company_name: string
+  template_applied: string | null
+  department_count: number
+}
+
+export interface SetupAgentResponse {
+  name: string
+  role: string
+  department: string
+  model_provider: string
+  model_id: string
+}

@@ -1,9 +1,9 @@
 """API namespace setting definitions.
 
-Registers 10 settings covering server, CORS, rate limiting, and
-authentication.  Four are runtime-editable; six are bootstrap-only
-(``restart_required=True``) because Litestar bakes middleware and
-CORS into the application at construction time.
+Registers 11 settings covering server, CORS, rate limiting,
+authentication, and setup.  Five are runtime-editable; six are
+bootstrap-only (``restart_required=True``) because Litestar bakes
+middleware and CORS into the application at construction time.
 """
 
 from synthorg.settings.enums import SettingLevel, SettingNamespace, SettingType
@@ -155,5 +155,18 @@ _r.register(
         level=SettingLevel.ADVANCED,
         restart_required=True,
         yaml_path="api.auth.exclude_paths",
+    )
+)
+
+# ── Setup ──────────────────────────────────────────────────────
+
+_r.register(
+    SettingDefinition(
+        namespace=SettingNamespace.API,
+        key="setup_complete",
+        type=SettingType.BOOLEAN,
+        default="false",
+        description="Whether first-run setup has been completed",
+        group="Setup",
     )
 )
