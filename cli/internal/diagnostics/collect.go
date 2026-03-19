@@ -18,6 +18,7 @@ import (
 	"github.com/Aureliolo/synthorg/cli/internal/config"
 	"github.com/Aureliolo/synthorg/cli/internal/docker"
 	"github.com/Aureliolo/synthorg/cli/internal/version"
+	"go.yaml.in/yaml/v3"
 )
 
 // ContainerDetail summarises a single container's state from compose ps JSON.
@@ -151,8 +152,9 @@ func collectConfig(r *Report, state config.State) {
 }
 
 func collectInfra(ctx context.Context, r *Report, info docker.Info, state config.State, safeDir string, pathErr error) {
+	var composePath string
 	if pathErr == nil {
-		checkComposeFile(ctx, r, info, safeDir)
+		composePath = checkComposeFile(ctx, r, info, safeDir)
 	}
 	if r.ContainerPS != "" {
 		r.ContainerSummary = parseContainerDetails(r.ContainerPS)
@@ -161,7 +163,7 @@ func collectInfra(ctx context.Context, r *Report, info docker.Info, state config
 		r.PortConflicts = checkPorts(ctx, state.BackendPort, state.WebPort)
 	}
 	if info.DockerPath != "" {
-		r.ImageStatus = checkImages(ctx, state.ImageTag, state.Sandbox)
+		r.ImageStatus = checkImages(ctx, state.ImageTag, state.Sandbox, composePath)
 	}
 }
 
@@ -247,13 +249,15 @@ func truncate(s string, max int) string {
 }
 
 // composeFileNames are the default Compose file names in search order.
+// Matches Docker Compose's documented preference: .yaml before .yml.
 var composeFileNames = []string{
-	"compose.yml", "compose.yaml",
-	"docker-compose.yml", "docker-compose.yaml",
+	"compose.yaml", "compose.yml",
+	"docker-compose.yaml", "docker-compose.yml",
 }
 
 // checkComposeFile verifies that a compose file exists and is valid.
-func checkComposeFile(ctx context.Context, r *Report, info docker.Info, dataDir string) {
+// Returns the resolved compose file path (empty if not found).
+func checkComposeFile(ctx context.Context, r *Report, info docker.Info, dataDir string) string {
 	for _, name := range composeFileNames {
 		composePath := filepath.Join(dataDir, name)
 		if _, err := os.Stat(composePath); err != nil {
@@ -268,8 +272,9 @@ func checkComposeFile(ctx context.Context, r *Report, info docker.Info, dataDir 
 			valid := docker.ComposeExec(ctx, info, dataDir, "config", "--quiet") == nil
 			r.ComposeFileValid = &valid
 		}
-		return
+		return composePath
 	}
+	return ""
 }
 
 // checkPorts tests whether configured ports are already bound.
@@ -296,14 +301,25 @@ func checkPorts(ctx context.Context, backendPort, webPort int) []string {
 const imagePrefix = "ghcr.io/aureliolo/synthorg-"
 
 // checkImages reports whether required Docker images exist locally.
-func checkImages(ctx context.Context, imageTag string, sandbox bool) []string {
+// It reads the actual compose file to get the image references (which
+// may be digest-pinned), falling back to tag-based lookup if the
+// compose file cannot be parsed.
+func checkImages(ctx context.Context, imageTag string, sandbox bool, composePath string) []string {
 	names := []string{"backend", "web"}
 	if sandbox {
 		names = append(names, "sandbox")
 	}
+
+	// Build a map of service name -> image ref from the compose file.
+	composeRefs := parseComposeImageRefs(composePath)
+
 	var status []string
 	for _, name := range names {
-		image := imagePrefix + name + ":" + imageTag
+		// Prefer the actual ref from compose (digest-pinned).
+		image, fromCompose := composeRefs[name]
+		if !fromCompose {
+			image = imagePrefix + name + ":" + imageTag
+		}
 		_, err := docker.RunCmd(ctx, "docker", "image", "inspect", image, "--format", "{{.ID}}")
 		if err != nil {
 			status = append(status, fmt.Sprintf("%s: not found locally", image))
@@ -312,6 +328,51 @@ func checkImages(ctx context.Context, imageTag string, sandbox bool) []string {
 		}
 	}
 	return status
+}
+
+// composeFile is the minimal subset of a Docker Compose file needed to
+// extract image references. Only the services.*.image field is used.
+type composeFile struct {
+	Services map[string]struct {
+		Image string `yaml:"image"`
+	} `yaml:"services"`
+}
+
+// parseComposeImageRefs extracts image references from a compose file
+// using YAML parsing. Returns a map of service name (backend, web,
+// sandbox) to full image ref for SynthOrg images only.
+func parseComposeImageRefs(composePath string) map[string]string {
+	refs := make(map[string]string)
+	if composePath == "" {
+		return refs
+	}
+
+	// Validate and canonicalize the path before reading.
+	cleaned := filepath.Clean(composePath)
+	if strings.Contains(cleaned, "..") {
+		return refs
+	}
+	if _, err := os.Stat(cleaned); err != nil {
+		return refs
+	}
+
+	data, err := os.ReadFile(cleaned)
+	if err != nil {
+		return refs
+	}
+
+	var cf composeFile
+	if err := yaml.Unmarshal(data, &cf); err != nil {
+		return refs
+	}
+
+	for svcName, svc := range cf.Services {
+		if !strings.HasPrefix(svc.Image, imagePrefix) {
+			continue
+		}
+		refs[svcName] = svc.Image
+	}
+	return refs
 }
 
 // parseContainerDetails parses docker compose ps --format json output.
