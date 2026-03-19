@@ -6,6 +6,7 @@ tool invocation, and budget tracking into a single ``run()`` entry point.
 
 import asyncio
 import contextlib
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -100,6 +101,7 @@ if TYPE_CHECKING:
         CoordinationResult,
     )
     from synthorg.engine.coordination.service import MultiAgentCoordinator
+    from synthorg.engine.hybrid_models import HybridLoopConfig
     from synthorg.engine.loop_protocol import (
         BudgetChecker,
         ExecutionLoop,
@@ -159,6 +161,9 @@ class AgentEngine:
             Selects the execution loop per-task based on complexity
             and budget state.  Mutually exclusive with
             ``execution_loop``.
+        hybrid_loop_config: Optional configuration for the hybrid
+            plan+ReAct loop.  Passed to ``build_execution_loop``
+            when auto-selection picks ``"hybrid"``.
     """
 
     def __init__(  # noqa: PLR0913
@@ -182,6 +187,7 @@ class AgentEngine:
         coordinator: MultiAgentCoordinator | None = None,
         stagnation_detector: StagnationDetector | None = None,
         auto_loop_config: AutoLoopConfig | None = None,
+        hybrid_loop_config: HybridLoopConfig | None = None,
     ) -> None:
         if execution_loop is not None and auto_loop_config is not None:
             msg = "execution_loop and auto_loop_config are mutually exclusive"
@@ -195,6 +201,7 @@ class AgentEngine:
         self._parked_context_repo = parked_context_repo
         self._stagnation_detector = stagnation_detector
         self._auto_loop_config = auto_loop_config
+        self._hybrid_loop_config = hybrid_loop_config
         self._approval_gate = self._make_approval_gate()
         if execution_loop is not None and (
             self._approval_gate is not None or self._stagnation_detector is not None
@@ -1063,6 +1070,7 @@ class AgentEngine:
             loop_type,
             approval_gate=self._approval_gate,
             stagnation_detector=self._stagnation_detector,
+            hybrid_loop_config=self._hybrid_loop_config,
         )
 
     def _make_security_interceptor(
@@ -1214,7 +1222,21 @@ class AgentEngine:
         If constructing the error result itself fails, the original
         exception is re-raised so it is never silently lost.
         """
-        error_msg = f"{type(exc).__name__}: {exc}"
+        raw_msg = str(exc)
+        # Sanitize: redact paths/URLs, strip non-printable chars,
+        # and limit length to prevent internal details leaking.
+        sanitized = re.sub(
+            r"[A-Za-z]:\\[^\s,;)\"']+"
+            r"|/(?:home|usr|var|tmp|etc|opt|root|srv|app|data)[^\s,;)\"']+"
+            r"|\.\.?/[^\s,;)\"']+",
+            "[REDACTED_PATH]",
+            raw_msg,
+        )
+        sanitized = re.sub(r"https?://[^\s,;)\"']+", "[REDACTED_URL]", sanitized)
+        sanitized = "".join(c for c in sanitized[:200] if c.isprintable())
+        if not any(c.isalnum() for c in sanitized):
+            sanitized = "details redacted"
+        error_msg = f"{type(exc).__name__}: {sanitized}"
         logger.exception(
             EXECUTION_ENGINE_ERROR,
             agent_id=agent_id,

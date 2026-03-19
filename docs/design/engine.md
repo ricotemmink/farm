@@ -402,10 +402,13 @@ All loop implementations satisfy the `ExecutionLoop` runtime-checkable protocol:
     ```yaml
     execution_loop: "hybrid"
     hybrid:
+      planner_model: null
+      executor_model: null
       max_plan_steps: 7
       max_turns_per_step: 5
+      max_replans: 3
       checkpoint_after_each_step: true
-      allow_replan: true
+      allow_replan_on_completion: true
     ```
 
     | | |
@@ -428,8 +431,9 @@ All loop implementations satisfy the `ExecutionLoop` runtime-checkable protocol:
     2. **Budget-aware downgrade** -- when monthly budget utilization is at
        or above `budget_tight_threshold` (default 80%), hybrid selections
        are downgraded to plan_execute to conserve budget.
-    3. **Hybrid fallback** -- when the hybrid loop is not yet implemented,
-       falls back to `hybrid_fallback` (default: plan_execute).
+    3. **Hybrid fallback** -- when `hybrid_fallback` is set (default:
+       `None`), redirects hybrid selections to the specified loop type.
+       With `None` (default), the hybrid loop runs directly.
 
 ### AgentEngine Orchestrator
 
@@ -480,9 +484,9 @@ async run(
    `select_loop_type()` with the task's `estimated_complexity` and current
    budget utilization (via `BudgetEnforcer.get_budget_utilization_pct()`).
    Budget-aware downgrade: hybrid is downgraded to plan_execute when
-   utilization >= threshold.  Hybrid fallback applies when the hybrid loop
-   is not yet implemented.  When no auto config is set, uses the statically
-   configured loop.
+   utilization >= threshold.  Optional hybrid fallback applies when
+   `hybrid_fallback` is configured.  When no auto config is set, uses
+   the statically configured loop.
 9. **Delegate to loop** -- calls `ExecutionLoop.execute()` with context,
    provider, tool invoker, budget checker, and completion config. If
    `timeout_seconds` is set, wraps the call in `asyncio.wait`; on expiry
@@ -599,6 +603,9 @@ sorted per-turn for order-independent comparison.
 - **PlanExecuteLoop**: stagnation checked per step (different steps
   legitimately repeat similar patterns like read→edit→test); corrections
   counter is step-scoped, window resets across step boundaries
+- **HybridLoop**: same per-step semantics as PlanExecuteLoop; stagnation
+  checked within the mini-ReAct sub-loop, corrections counter and
+  window are step-scoped
 - `STAGNATION` termination leaves the task in its current state (like
   `MAX_TURNS` — the task is not failed, it's returned to the caller)
 
@@ -640,8 +647,8 @@ is derived from `CompressionMetadata.compactions_performed`.
 ### Compaction Hook
 
 `CompactionCallback` is a type alias (`Callable[[AgentContext], Coroutine[...,
-AgentContext | None]]`) wired into both `ReactLoop` and `PlanExecuteLoop` via
-their constructors — the same injection pattern as `checkpoint_callback`,
+AgentContext | None]]`) wired into `ReactLoop`, `PlanExecuteLoop`, and
+`HybridLoop` via their constructors — the same injection pattern as `checkpoint_callback`,
 `stagnation_detector`, and `approval_gate`.
 
 The default implementation (`make_compaction_callback` in
@@ -678,8 +685,10 @@ previously compacted (archived 12 turns). Previous error: ...
   boundaries (between completed turns)
 - **PlanExecuteLoop**: compaction checked within step execution at turn
   boundaries, before stagnation detection
+- **HybridLoop**: compaction checked at turn boundaries within the
+  mini-ReAct sub-loop, same as PlanExecuteLoop
 
-Both loops use the shared `invoke_compaction()` helper from `loop_helpers.py`.
+All loops use the shared `invoke_compaction()` helper from `loop_helpers.py`.
 
 ---
 

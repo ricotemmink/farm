@@ -59,6 +59,9 @@ EXECUTION_PLAN_REPLAN_COMPLETE: Final[str] = "execution.plan.replan_complete"
 EXECUTION_PLAN_REPLAN_EXHAUSTED: Final[str] = "execution.plan.replan_exhausted"
 EXECUTION_PLAN_PARSE_ERROR: Final[str] = "execution.plan.parse_error"
 EXECUTION_PLAN_STEP_TRUNCATED: Final[str] = "execution.plan.step_truncated"
+EXECUTION_PLAN_STEP_INDEX_OUT_OF_RANGE: Final[str] = (
+    "execution.plan.step_index_out_of_range"
+)
 
 EXECUTION_RECOVERY_START: Final[str] = "execution.recovery.start"
 EXECUTION_RECOVERY_COMPLETE: Final[str] = "execution.recovery.complete"
@@ -80,3 +83,17 @@ EXECUTION_LOOP_HYBRID_FALLBACK: Final[str] = "execution.loop.hybrid_fallback"
 EXECUTION_LOOP_NO_RULE_MATCH: Final[str] = "execution.loop.no_rule_match"
 EXECUTION_LOOP_UNKNOWN_TYPE: Final[str] = "execution.loop.unknown_type"
 EXECUTION_LOOP_BUDGET_UNAVAILABLE: Final[str] = "execution.loop.budget_unavailable"
+
+# Hybrid loop events
+EXECUTION_HYBRID_STEP_TURN_LIMIT: Final[str] = "execution.hybrid.step_turn_limit"
+EXECUTION_HYBRID_PROGRESS_SUMMARY: Final[str] = "execution.hybrid.progress_summary"
+EXECUTION_HYBRID_REPLAN_DECIDED: Final[str] = "execution.hybrid.replan_decided"
+EXECUTION_HYBRID_TURN_BUDGET_WARNING: Final[str] = (
+    "execution.hybrid.turn_budget_warning"
+)
+EXECUTION_HYBRID_PLAN_TRUNCATED: Final[str] = "execution.hybrid.plan_truncated"
+EXECUTION_HYBRID_REPLAN_PARSE_TRACE: Final[str] = "execution.hybrid.replan_parse_trace"
+EXECUTION_HYBRID_PROGRESS_SUMMARY_EMPTY: Final[str] = (
+    "execution.hybrid.progress_summary_empty"
+)
+EXECUTION_PLAN_SUMMARY_FALLBACK: Final[str] = "execution.plan.summary_fallback"
