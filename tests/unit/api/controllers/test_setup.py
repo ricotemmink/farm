@@ -6,6 +6,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from hypothesis import HealthCheck, given
+from hypothesis import settings as hsettings
+from hypothesis import strategies as st
 from litestar.testing import TestClient
 from pydantic import ValidationError
 
@@ -192,6 +195,157 @@ class TestSetupCompany:
         assert data["company_name"] == "Test Corp"
         assert data["template_applied"] is None
         assert data["department_count"] == 0
+        assert data["description"] is None
+
+        # Verify description persisted as "" (absent convention).
+        app_state = test_client.app.state.app_state
+        settings_repo = app_state.persistence._settings_repo
+        stored = settings_repo._store.get(("company", "description"))
+        assert stored is not None
+        assert stored[0] == ""
+
+    @pytest.mark.parametrize(
+        ("description_input", "expected_response", "expected_stored"),
+        [
+            (
+                "An AI-powered test organization",
+                "An AI-powered test organization",
+                "An AI-powered test organization",
+            ),
+            ("  hello world  ", "hello world", "hello world"),
+            ("   ", None, ""),
+            ("", None, ""),
+        ],
+        ids=["normal", "stripped", "whitespace-only", "empty"],
+    )
+    def test_description_normalization(
+        self,
+        test_client: TestClient[Any],
+        description_input: str,
+        expected_response: str | None,
+        expected_stored: str,
+    ) -> None:
+        """Description is stripped and blank values normalized to None."""
+        resp = test_client.post(
+            "/api/v1/setup/company",
+            json={
+                "company_name": "Test Corp",
+                "description": description_input,
+            },
+        )
+        assert resp.status_code == 201
+        data = resp.json()["data"]
+        assert data["description"] == expected_response
+
+        # Verify persistence.
+        app_state = test_client.app.state.app_state
+        settings_repo = app_state.persistence._settings_repo
+        stored = settings_repo._store.get(("company", "description"))
+        assert stored is not None
+        assert stored[0] == expected_stored
+
+    @given(description=st.text(max_size=1000))
+    @hsettings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_description_normalization_invariants(
+        self,
+        test_client: TestClient[Any],
+        description: str,
+    ) -> None:
+        """Normalization invariant: blank -> None, non-blank -> stripped."""
+        resp = test_client.post(
+            "/api/v1/setup/company",
+            json={
+                "company_name": "Test Corp",
+                "description": description,
+            },
+        )
+        assert resp.status_code == 201
+        data = resp.json()["data"]
+
+        stripped = description.strip()
+        if stripped == "":
+            assert data["description"] is None
+        else:
+            assert data["description"] == stripped
+
+        # Verify persistence matches.
+        app_state = test_client.app.state.app_state
+        settings_repo = app_state.persistence._settings_repo
+        stored = settings_repo._store.get(("company", "description"))
+        assert stored is not None
+        expected_stored = stripped or ""
+        assert stored[0] == expected_stored
+
+    def test_company_description_too_long(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        """Description exceeding 1000 characters is rejected."""
+        resp = test_client.post(
+            "/api/v1/setup/company",
+            json={
+                "company_name": "Test Corp",
+                "description": "x" * 1001,
+            },
+        )
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["success"] is False
+        assert body["error_detail"]["error_category"] == "validation"
+
+    def test_description_at_max_length_accepted(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        """Description of exactly 1000 characters is accepted."""
+        resp = test_client.post(
+            "/api/v1/setup/company",
+            json={
+                "company_name": "Test Corp",
+                "description": "x" * 1000,
+            },
+        )
+        assert resp.status_code == 201
+        data = resp.json()["data"]
+        assert data["description"] == "x" * 1000
+
+        # Verify persistence.
+        app_state = test_client.app.state.app_state
+        settings_repo = app_state.persistence._settings_repo
+        stored = settings_repo._store.get(("company", "description"))
+        assert stored is not None
+        assert stored[0] == "x" * 1000
+
+    def test_description_overwrite_clears_stale(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        """Re-creating company without description clears previous value."""
+        # First create with a description.
+        resp = test_client.post(
+            "/api/v1/setup/company",
+            json={
+                "company_name": "Test Corp",
+                "description": "Original description",
+            },
+        )
+        assert resp.status_code == 201
+        assert resp.json()["data"]["description"] == "Original description"
+
+        # Re-create without description -- stale value must be cleared.
+        resp = test_client.post(
+            "/api/v1/setup/company",
+            json={"company_name": "Test Corp v2"},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["data"]["description"] is None
+
+        # Verify persistence cleared.
+        app_state = test_client.app.state.app_state
+        settings_repo = app_state.persistence._settings_repo
+        stored = settings_repo._store.get(("company", "description"))
+        assert stored is not None
+        assert stored[0] == ""
 
     def test_company_with_template(
         self,
@@ -476,6 +630,7 @@ class TestSetupDTOs:
 
         req = SetupCompanyRequest(company_name="Test Corp")
         assert req.template_name is None
+        assert req.description is None
 
     def test_setup_status_response_frozen(self) -> None:
         from synthorg.api.controllers.setup import SetupStatusResponse

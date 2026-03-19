@@ -43,6 +43,21 @@ vi.mock('primevue/button', () => ({
   }),
 }))
 
+vi.mock('primevue/textarea', () => ({
+  default: defineComponent({
+    props: ['modelValue', 'id', 'rows', 'placeholder'],
+    emits: ['update:modelValue'],
+    setup(props, { emit }) {
+      return () =>
+        h('textarea', {
+          id: props.id,
+          value: props.modelValue,
+          onInput: (e: Event) => emit('update:modelValue', (e.target as HTMLTextAreaElement).value),
+        })
+    },
+  }),
+}))
+
 vi.mock('primevue/select', () => ({
   default: defineComponent({
     props: ['modelValue', 'options', 'optionLabel', 'optionValue', 'placeholder', 'disabled'],
@@ -84,7 +99,7 @@ vi.mock('@/api/endpoints/setup', () => ({
     min_password_length: 12,
   }),
   listTemplates: vi.fn().mockResolvedValue([]),
-  createCompany: vi.fn().mockResolvedValue({ company_name: 'Test', template_applied: null, department_count: 0 }),
+  createCompany: vi.fn().mockResolvedValue({ company_name: 'Test', description: null, template_applied: null, department_count: 0 }),
   createAgent: vi.fn().mockResolvedValue({ name: 'Agent', role: 'CEO', department: 'exec', model_provider: 'p', model_id: 'm' }),
   completeSetup: vi.fn().mockResolvedValue({ setup_complete: true }),
 }))
