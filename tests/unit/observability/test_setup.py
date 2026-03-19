@@ -13,7 +13,12 @@ if TYPE_CHECKING:
 from synthorg.observability.config import LogConfig, SinkConfig
 from synthorg.observability.correlation import bind_correlation_id
 from synthorg.observability.enums import LogLevel, SinkType
-from synthorg.observability.setup import _DEFAULT_LOGGER_LEVELS, configure_logging
+from synthorg.observability.setup import (
+    _DEFAULT_LOGGER_LEVELS,
+    _apply_console_level_override,
+    _attach_handlers,
+    configure_logging,
+)
 
 pytestmark = pytest.mark.timeout(30)
 
@@ -51,7 +56,7 @@ class TestConfigureLogging:
     def test_default_config_creates_handlers(self) -> None:
         configure_logging()
         root = logging.getLogger()
-        assert len(root.handlers) == 7
+        assert len(root.handlers) == 8
 
     def test_custom_config_creates_handlers(self) -> None:
         configure_logging(_console_only_config())
@@ -104,7 +109,7 @@ class TestConfigureLogging:
     def test_none_config_uses_defaults(self) -> None:
         configure_logging(None)
         root = logging.getLogger()
-        assert len(root.handlers) == 7
+        assert len(root.handlers) == 8
 
 
 @pytest.mark.unit
@@ -191,3 +196,215 @@ class TestCorrelationPipeline:
         assert content
         record = json.loads(content)
         assert record["request_id"] == "test-req-123"
+
+
+@pytest.mark.unit
+class TestApplyConsoleLevelOverride:
+    """Tests for _apply_console_level_override."""
+
+    def test_no_env_var_returns_unchanged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("SYNTHORG_LOG_LEVEL", raising=False)
+        config = _console_only_config()
+        result = _apply_console_level_override(config)
+        assert result is config
+
+    def test_valid_level_overrides_console_sink(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("SYNTHORG_LOG_LEVEL", "warning")
+        config = _console_only_config()
+        result = _apply_console_level_override(config)
+        assert result.sinks[0].level == LogLevel.WARNING
+
+    def test_invalid_level_falls_back_to_info(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("SYNTHORG_LOG_LEVEL", "bogus")
+        config = _console_only_config()
+        result = _apply_console_level_override(config)
+        assert result.sinks[0].level == LogLevel.INFO
+        captured = capsys.readouterr()
+        assert "Invalid SYNTHORG_LOG_LEVEL" in captured.err
+
+    def test_file_sinks_unaffected(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("SYNTHORG_LOG_LEVEL", "error")
+        config = LogConfig(
+            sinks=(
+                SinkConfig(
+                    sink_type=SinkType.CONSOLE,
+                    level=LogLevel.INFO,
+                    json_format=False,
+                ),
+                SinkConfig(
+                    sink_type=SinkType.FILE,
+                    level=LogLevel.DEBUG,
+                    file_path="test.log",
+                    json_format=True,
+                ),
+            ),
+        )
+        result = _apply_console_level_override(config)
+        assert result.sinks[0].level == LogLevel.ERROR
+        assert result.sinks[1].level == LogLevel.DEBUG
+
+    def test_no_console_sink_warns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("SYNTHORG_LOG_LEVEL", "debug")
+        config = LogConfig(
+            sinks=(
+                SinkConfig(
+                    sink_type=SinkType.FILE,
+                    level=LogLevel.INFO,
+                    file_path="only-file.log",
+                    json_format=True,
+                ),
+            ),
+        )
+        result = _apply_console_level_override(config)
+        assert result.sinks[0].level == LogLevel.INFO
+        captured = capsys.readouterr()
+        assert "no CONSOLE sink found" in captured.err
+
+
+@pytest.mark.unit
+class TestCriticalSinkFailure:
+    """Tests for critical sink failure enforcement in _attach_handlers."""
+
+    def test_non_critical_sink_failure_skipped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Non-critical sink failure is tolerated."""
+        import synthorg.observability.setup as _setup
+
+        config = LogConfig(
+            sinks=(
+                SinkConfig(
+                    sink_type=SinkType.FILE,
+                    level=LogLevel.DEBUG,
+                    file_path="debug.log",
+                    json_format=True,
+                ),
+            ),
+        )
+
+        def _boom(**_kwargs: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        monkeypatch.setattr(_setup, "build_handler", _boom)
+        root = logging.getLogger()
+        initial_count = len(root.handlers)
+        # Should not raise -- non-critical sink failures are skipped.
+        _attach_handlers(config, root, [])
+        assert len(root.handlers) == initial_count
+
+    def test_critical_audit_sink_failure_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """audit.log failure raises RuntimeError."""
+        import synthorg.observability.setup as _setup
+
+        config = LogConfig(
+            sinks=(
+                SinkConfig(
+                    sink_type=SinkType.FILE,
+                    level=LogLevel.INFO,
+                    file_path="audit.log",
+                    json_format=True,
+                ),
+            ),
+        )
+
+        def _boom(**_kwargs: object) -> None:
+            msg = "permission denied"
+            raise OSError(msg)
+
+        monkeypatch.setattr(_setup, "build_handler", _boom)
+        root = logging.getLogger()
+        with pytest.raises(RuntimeError, match=r"audit\.log"):
+            _attach_handlers(config, root, [])
+
+    def test_critical_access_sink_failure_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """access.log failure raises RuntimeError."""
+        import synthorg.observability.setup as _setup
+
+        config = LogConfig(
+            sinks=(
+                SinkConfig(
+                    sink_type=SinkType.FILE,
+                    level=LogLevel.INFO,
+                    file_path="access.log",
+                    json_format=True,
+                ),
+            ),
+        )
+
+        def _boom(**_kwargs: object) -> None:
+            msg = "permission denied"
+            raise OSError(msg)
+
+        monkeypatch.setattr(_setup, "build_handler", _boom)
+        root = logging.getLogger()
+        with pytest.raises(RuntimeError, match=r"access\.log"):
+            _attach_handlers(config, root, [])
+
+    def test_critical_sink_failure_chains_original_cause(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RuntimeError chains the original OS error."""
+        import synthorg.observability.setup as _setup
+
+        config = LogConfig(
+            sinks=(
+                SinkConfig(
+                    sink_type=SinkType.FILE,
+                    level=LogLevel.INFO,
+                    file_path="audit.log",
+                    json_format=True,
+                ),
+            ),
+        )
+
+        def _boom(**_kwargs: object) -> None:
+            msg = "permission denied"
+            raise OSError(msg)
+
+        monkeypatch.setattr(_setup, "build_handler", _boom)
+        root = logging.getLogger()
+        with pytest.raises(RuntimeError) as exc_info:
+            _attach_handlers(config, root, [])
+        assert isinstance(exc_info.value.__cause__, OSError)
+
+
+@pytest.mark.unit
+class TestConfigureLoggingIntegration:
+    """Integration tests for configure_logging with env var overrides."""
+
+    def test_synthorg_log_level_applied_end_to_end(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SYNTHORG_LOG_LEVEL env var takes effect through configure_logging."""
+        monkeypatch.setenv("SYNTHORG_LOG_LEVEL", "warning")
+        configure_logging(_console_only_config())
+        root = logging.getLogger()
+        # The console handler level should reflect the override.
+        assert any(h.level == logging.WARNING for h in root.handlers)

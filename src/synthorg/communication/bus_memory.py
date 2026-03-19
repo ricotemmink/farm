@@ -6,9 +6,10 @@ deployments and testing.
 
 import asyncio
 import contextlib
+import time
 from collections import deque
 from datetime import UTC, datetime
-from typing import NoReturn
+from typing import Final, NoReturn
 
 from synthorg.communication.channel import Channel
 from synthorg.communication.config import MessageBusConfig  # noqa: TC001
@@ -35,12 +36,12 @@ from synthorg.observability.events.communication import (
     COMM_CHANNEL_ALREADY_EXISTS,
     COMM_CHANNEL_CREATED,
     COMM_CHANNEL_NOT_FOUND,
+    COMM_CHANNELS_IDLE_SUMMARY,
     COMM_DIRECT_SENT,
     COMM_HISTORY_QUERIED,
     COMM_MESSAGE_DELIVERED,
     COMM_MESSAGE_PUBLISHED,
     COMM_RECEIVE_SHUTDOWN,
-    COMM_RECEIVE_TIMEOUT,
     COMM_RECEIVE_UNSUBSCRIBED,
     COMM_SEND_DIRECT_INVALID,
     COMM_SUBSCRIPTION_CREATED,
@@ -52,6 +53,9 @@ logger = get_logger(__name__)
 
 _DM_SEPARATOR = ":"
 """Separator used in deterministic direct-channel names."""
+
+_IDLE_SUMMARY_INTERVAL_SECONDS: Final[float] = 60.0
+"""Minimum seconds between idle-channel summary log emissions."""
 
 
 def _raise_channel_not_found(channel_name: str) -> NoReturn:
@@ -102,6 +106,8 @@ class InMemoryMessageBus:
         self._waiters: dict[tuple[str, str], int] = {}
         self._running = False
         self._shutdown_event = asyncio.Event()
+        self._idle_poll_count: int = 0
+        self._last_idle_summary: float = time.monotonic()
 
     @property
     def is_running(self) -> bool:
@@ -121,6 +127,8 @@ class InMemoryMessageBus:
                 raise MessageBusAlreadyRunningError(msg)
             self._running = True
             self._shutdown_event.clear()
+            self._idle_poll_count = 0
+            self._last_idle_summary = time.monotonic()
             maxlen = self._config.retention.max_messages_per_channel
             for name in self._config.channels:
                 ch = Channel(name=name, type=ChannelType.TOPIC)
@@ -479,19 +487,20 @@ class InMemoryMessageBus:
             else:
                 self._waiters[key] = current - 1
         if result is None:
-            await self._log_receive_null(channel_name, subscriber_id, timeout)
+            await self._log_receive_null(channel_name, subscriber_id)
         return result
 
     async def _log_receive_null(
         self,
         channel_name: str,
         subscriber_id: str,
-        timeout_seconds: float | None,
     ) -> None:
         """Log the cause when ``receive()`` returns ``None``.
 
         Acquires the lock to safely inspect bus state (queue map
         and shutdown flag) so the inferred reason is not racy.
+        For normal idle timeouts, increments a counter and emits
+        a periodic summary instead of per-timeout spam.
         """
         async with self._lock:
             is_shutdown = self._shutdown_event.is_set()
@@ -509,12 +518,17 @@ class InMemoryMessageBus:
                 subscriber=subscriber_id,
             )
         else:
-            logger.debug(
-                COMM_RECEIVE_TIMEOUT,
-                channel=channel_name,
-                subscriber=subscriber_id,
-                timeout=timeout_seconds,
-            )
+            self._idle_poll_count += 1
+            now = time.monotonic()
+            if now - self._last_idle_summary >= _IDLE_SUMMARY_INTERVAL_SECONDS:
+                logger.debug(
+                    COMM_CHANNELS_IDLE_SUMMARY,
+                    idle_polls=self._idle_poll_count,
+                    subscriber_count=len(self._queues),
+                    interval_seconds=round(now - self._last_idle_summary, 1),
+                )
+                self._idle_poll_count = 0
+                self._last_idle_summary = now
 
     async def _await_with_shutdown(
         self,

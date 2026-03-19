@@ -6,12 +6,14 @@ import pytest
 from litestar import Litestar
 from litestar.testing import TestClient
 
-from synthorg.api.app import create_app
+from synthorg.api.app import _bootstrap_app_logging, create_app
 from synthorg.api.middleware import _SECURITY_HEADERS
 from synthorg.api.state import AppState
 from synthorg.budget.tracker import CostTracker
 from synthorg.communication.bus_memory import InMemoryMessageBus
+from synthorg.config.schema import RootConfig
 from synthorg.engine.task_engine import TaskEngine
+from synthorg.observability.config import DEFAULT_SINKS, LogConfig
 
 
 @pytest.mark.unit
@@ -415,6 +417,12 @@ class TestAutoWirePhase1:
     ) -> None:
         """Warning is logged when no persistence is available."""
         monkeypatch.delenv("SYNTHORG_DB_PATH", raising=False)
+        # Prevent bootstrap_logging from resetting structlog's
+        # capture_logs context during create_app().
+        monkeypatch.setattr(
+            "synthorg.api.app._bootstrap_app_logging",
+            lambda config: config,
+        )
         import structlog
 
         with structlog.testing.capture_logs() as logs:
@@ -903,3 +911,138 @@ class TestAutoWirePhase1ErrorPaths:
                 task_engine=None,
                 provider_registry=None,
             )
+
+
+@pytest.mark.unit
+class TestBootstrapAppLogging:
+    """Tests for _bootstrap_app_logging env var branches."""
+
+    def test_no_log_dir_calls_bootstrap(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Without SYNTHORG_LOG_DIR, bootstrap_logging is called unchanged."""
+        monkeypatch.delenv("SYNTHORG_LOG_DIR", raising=False)
+        calls: list[object] = []
+        monkeypatch.setattr(
+            "synthorg.api.app.bootstrap_logging",
+            calls.append,
+        )
+        config = RootConfig(company_name="test-co")
+        result = _bootstrap_app_logging(config)
+        assert len(calls) == 1
+        assert calls[0] is config
+        assert result is config
+
+    def test_log_dir_with_existing_logging_config(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SYNTHORG_LOG_DIR overrides log_dir in existing logging config."""
+        monkeypatch.setenv("SYNTHORG_LOG_DIR", "/custom/logs")
+        calls: list[RootConfig] = []
+        monkeypatch.setattr(
+            "synthorg.api.app.bootstrap_logging",
+            calls.append,
+        )
+        config = RootConfig(
+            company_name="test-co",
+            logging=LogConfig(sinks=DEFAULT_SINKS, log_dir="original"),
+        )
+        result = _bootstrap_app_logging(config)
+        assert len(calls) == 1
+        assert calls[0].logging is not None
+        assert calls[0].logging.log_dir == "/custom/logs"
+        # Return value is the patched config, not the original.
+        assert result is not config
+        assert result.logging is not None
+        assert result.logging.log_dir == "/custom/logs"
+
+    def test_log_dir_without_logging_config(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SYNTHORG_LOG_DIR creates a LogConfig when none exists."""
+        monkeypatch.setenv("SYNTHORG_LOG_DIR", "/data/logs")
+        calls: list[RootConfig] = []
+        monkeypatch.setattr(
+            "synthorg.api.app.bootstrap_logging",
+            calls.append,
+        )
+        config = RootConfig(company_name="test-co")
+        assert config.logging is None
+        result = _bootstrap_app_logging(config)
+        assert len(calls) == 1
+        assert calls[0].logging is not None
+        assert calls[0].logging.log_dir == "/data/logs"
+        assert len(calls[0].logging.sinks) == len(DEFAULT_SINKS)
+        # Return value carries the new logging config.
+        assert result.logging is not None
+        assert result.logging.log_dir == "/data/logs"
+
+    def test_whitespace_only_log_dir_treated_as_unset(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Whitespace-only SYNTHORG_LOG_DIR behaves like unset."""
+        monkeypatch.setenv("SYNTHORG_LOG_DIR", "   ")
+        calls: list[object] = []
+        monkeypatch.setattr(
+            "synthorg.api.app.bootstrap_logging",
+            calls.append,
+        )
+        config = RootConfig(company_name="test-co")
+        result = _bootstrap_app_logging(config)
+        assert len(calls) == 1
+        assert calls[0] is config
+        assert result is config
+
+    def test_path_traversal_in_log_dir_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SYNTHORG_LOG_DIR with '..' raises ValueError."""
+        monkeypatch.setenv("SYNTHORG_LOG_DIR", "../../etc")
+        monkeypatch.setattr(
+            "synthorg.api.app.bootstrap_logging",
+            lambda _: None,
+        )
+        config = RootConfig(company_name="test-co")
+        with pytest.raises(ValueError, match="path traversal"):
+            _bootstrap_app_logging(config)
+
+    def test_bootstrap_failure_prints_critical_and_reraises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """create_app re-raises and prints CRITICAL on logging failure."""
+        monkeypatch.setattr(
+            "synthorg.api.app._bootstrap_app_logging",
+            _raise_runtime_error,
+        )
+        with pytest.raises(RuntimeError, match="boom"):
+            create_app()
+        captured = capsys.readouterr()
+        assert "CRITICAL" in captured.err
+
+    def test_patched_config_preserved_on_app_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """create_app stores the SYNTHORG_LOG_DIR-patched config on AppState."""
+        monkeypatch.setenv("SYNTHORG_LOG_DIR", "/custom/volume/logs")
+        # Prevent bootstrap_logging from actually reconfiguring structlog.
+        monkeypatch.setattr(
+            "synthorg.api.app.bootstrap_logging",
+            lambda _config: None,
+        )
+        app = create_app()
+        app_state = app.state["app_state"]
+        assert app_state.config.logging is not None
+        assert app_state.config.logging.log_dir == "/custom/volume/logs"
+
+
+def _raise_runtime_error(_config: object) -> None:
+    msg = "boom"
+    raise RuntimeError(msg)

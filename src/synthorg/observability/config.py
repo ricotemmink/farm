@@ -5,8 +5,8 @@ configuration.  All models are immutable and validated on construction.
 
 .. note::
 
-    ``DEFAULT_SINKS`` provides the standard seven-sink layout described
-    in the design spec (console + six file sinks).
+    ``DEFAULT_SINKS`` provides the standard eight-sink layout described
+    in the design spec (console + seven file sinks).
 """
 
 from collections import Counter
@@ -235,6 +235,13 @@ DEFAULT_SINKS: tuple[SinkConfig, ...] = (
         sink_type=SinkType.FILE,
         level=LogLevel.DEBUG,
         file_path="debug.log",
+        rotation=RotationConfig(),
+        json_format=True,
+    ),
+    SinkConfig(
+        sink_type=SinkType.FILE,
+        level=LogLevel.INFO,
+        file_path="access.log",
         rotation=RotationConfig(),
         json_format=True,
     ),

@@ -122,4 +122,7 @@ HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=30s \
 ENV PYTHONWARNINGS="ignore::UserWarning:pydantic.v1"
 
 ENTRYPOINT []
-CMD ["/app/.venv/bin/uvicorn", "synthorg.api.app:create_app", "--factory"]
+# --no-access-log: Uvicorn's default access logger is disabled because
+# RequestLoggingMiddleware provides richer structured access logging via
+# structlog (method, path, status_code, duration_ms, request_id).
+CMD ["/app/.venv/bin/uvicorn", "synthorg.api.app:create_app", "--factory", "--no-access-log"]

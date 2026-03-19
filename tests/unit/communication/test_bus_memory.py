@@ -733,3 +733,85 @@ class TestHistoryEdgeCases:
         )
         history = await bus.get_channel_history("#general", limit=-5)
         assert history == ()
+
+
+@pytest.mark.unit
+class TestIdleSummary:
+    """Tests for the periodic idle channel summary log."""
+
+    async def test_idle_polls_increment_without_logging(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Idle polls below the time threshold do not emit a summary."""
+        import time as _time
+
+        clock = 1000.0
+        monkeypatch.setattr(_time, "monotonic", lambda: clock)
+        bus = InMemoryMessageBus(config=_make_config())
+        await bus.start()
+        await bus.subscribe("#general", "agent-a")
+        for _ in range(5):
+            result = await bus.receive("#general", "agent-a", timeout=0.0)
+            assert result is None
+        assert bus._idle_poll_count == 5
+
+    async def test_summary_emits_after_time_interval(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Summary fires when time interval elapses."""
+        import time as _time
+
+        from synthorg.communication.bus_memory import (
+            _IDLE_SUMMARY_INTERVAL_SECONDS,
+        )
+
+        clock = 1000.0
+        monkeypatch.setattr(_time, "monotonic", lambda: clock)
+        bus = InMemoryMessageBus(config=_make_config())
+        await bus.start()
+        await bus.subscribe("#general", "agent-a")
+        # First idle poll -- counter increments.
+        await bus.receive("#general", "agent-a", timeout=0.0)
+        assert bus._idle_poll_count == 1
+
+        # Advance past the summary interval.
+        clock = 1000.0 + _IDLE_SUMMARY_INTERVAL_SECONDS + 1.0
+        monkeypatch.setattr(_time, "monotonic", lambda: clock)
+        await bus.receive("#general", "agent-a", timeout=0.0)
+        # Counter should have been reset after summary.
+        assert bus._idle_poll_count == 0
+
+    async def test_message_delivery_still_works(self) -> None:
+        """Message delivery is not affected by idle summary changes."""
+        bus = InMemoryMessageBus(config=_make_config())
+        await bus.start()
+        await bus.subscribe("#general", "agent-a")
+        await bus.publish(
+            _make_message(channel="#general", content="hello"),
+        )
+        envelope = await bus.receive("#general", "agent-a", timeout=0.5)
+        assert envelope is not None
+        assert envelope.message.content == "hello"
+
+    async def test_idle_state_reset_on_restart(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Idle counters reset when the bus is restarted."""
+        import time as _time
+
+        clock = 1000.0
+        monkeypatch.setattr(_time, "monotonic", lambda: clock)
+        bus = InMemoryMessageBus(config=_make_config())
+        await bus.start()
+        await bus.subscribe("#general", "agent-a")
+        await bus.receive("#general", "agent-a", timeout=0.0)
+        assert bus._idle_poll_count == 1
+
+        await bus.stop()
+        clock = 2000.0
+        monkeypatch.setattr(_time, "monotonic", lambda: clock)
+        await bus.start()
+        assert bus._idle_poll_count == 0

@@ -8,9 +8,10 @@ lifecycle hooks (startup/shutdown).
 import asyncio
 import contextlib
 import os
+import sys
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Any
 
 from litestar import Litestar, Router
@@ -48,6 +49,7 @@ from synthorg.communication.meeting.orchestrator import (
     MeetingOrchestrator,  # noqa: TC001
 )
 from synthorg.communication.meeting.scheduler import MeetingScheduler  # noqa: TC001
+from synthorg.config import bootstrap_logging
 from synthorg.config.schema import RootConfig
 from synthorg.core.approval import ApprovalItem  # noqa: TC001
 from synthorg.engine.coordination.service import MultiAgentCoordinator  # noqa: TC001
@@ -55,6 +57,7 @@ from synthorg.engine.task_engine import TaskEngine  # noqa: TC001
 from synthorg.hr.performance.tracker import PerformanceTracker  # noqa: TC001
 from synthorg.hr.registry import AgentRegistryService  # noqa: TC001
 from synthorg.observability import get_logger
+from synthorg.observability.config import DEFAULT_SINKS, LogConfig
 from synthorg.observability.events.api import (
     API_APP_SHUTDOWN,
     API_APP_STARTUP,
@@ -328,6 +331,57 @@ def _build_lifecycle(  # noqa: PLR0913, C901
 #   to code calling get_api_config(), not to the middleware itself.
 
 
+def _bootstrap_app_logging(effective_config: RootConfig) -> RootConfig:
+    """Activate the structured logging pipeline.
+
+    Applies the ``SYNTHORG_LOG_DIR`` env var override (for Docker
+    volume paths) before calling :func:`bootstrap_logging`.
+
+    When the env var is set with an existing logging config, patches
+    ``log_dir``.  When set without a logging config, creates a
+    default config with ``DEFAULT_SINKS``.  Otherwise, delegates
+    directly to ``bootstrap_logging``.
+
+    Args:
+        effective_config: Root config (possibly without a logging
+            section).
+
+    Returns:
+        The config actually used for logging -- either the original
+        ``effective_config`` or a patched copy with the
+        ``SYNTHORG_LOG_DIR`` override applied.  Callers should use
+        the returned value so that ``AppState.config.logging``
+        reflects the active logging configuration.
+
+    Raises:
+        ValueError: If ``SYNTHORG_LOG_DIR`` contains ``..`` path
+            traversal components.
+    """
+    log_dir = os.environ.get("SYNTHORG_LOG_DIR", "").strip()
+    if not log_dir:
+        bootstrap_logging(effective_config)
+        return effective_config
+
+    # Validate before model_copy -- Pydantic validators do not run
+    # on model_copy(update=...), so we must check manually.
+    if ".." in PurePath(log_dir).parts:
+        msg = f"SYNTHORG_LOG_DIR contains '..' path traversal component: {log_dir!r}"
+        raise ValueError(msg)
+
+    base_log_cfg = effective_config.logging or LogConfig(
+        sinks=DEFAULT_SINKS,
+    )
+    patched = effective_config.model_copy(
+        update={
+            "logging": base_log_cfg.model_copy(
+                update={"log_dir": log_dir},
+            ),
+        },
+    )
+    bootstrap_logging(patched)
+    return patched
+
+
 def create_app(  # noqa: PLR0913
     *,
     config: RootConfig | None = None,
@@ -371,6 +425,23 @@ def create_app(  # noqa: PLR0913
         Configured Litestar application.
     """
     effective_config = config or RootConfig(company_name="default")
+
+    # Activate the structured logging pipeline (8 sinks) before any
+    # other setup so that auto-wiring, persistence, and bus logs all
+    # flow through the configured sinks.  Respects SYNTHORG_LOG_DIR
+    # env var for Docker log directory override.
+    try:
+        effective_config = _bootstrap_app_logging(effective_config)
+    except Exception as exc:
+        print(  # noqa: T201
+            f"CRITICAL: Failed to initialise logging pipeline: {exc}. "
+            "Check SYNTHORG_LOG_DIR, SYNTHORG_LOG_LEVEL, and the "
+            "'logging' section of your config file.",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
+
     api_config = effective_config.api
 
     # Resolve runtime paths for backup service wiring.
