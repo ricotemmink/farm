@@ -122,6 +122,18 @@ class TestProviderCrudEndpoints:
         )
         assert resp.status_code == 403
 
+    def test_probe_preset_requires_write_access(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        """POST /providers/probe-preset is guarded by write access."""
+        resp = test_client.post(
+            "/api/v1/providers/probe-preset",
+            json={"preset_name": "ollama"},
+            headers=make_auth_headers("observer"),
+        )
+        assert resp.status_code == 403
+
 
 def _make_provider_state_and_mgmt() -> tuple[MagicMock, AsyncMock]:
     """Create a mock Litestar State with a mock provider management service.
@@ -190,3 +202,64 @@ class TestDiscoverModelsEndpoint:
                 state=state,
                 name="nonexistent",
             )
+
+
+@pytest.mark.unit
+@pytest.mark.timeout(30)
+class TestProbePresetEndpoint:
+    """Tests for POST /providers/probe-preset."""
+
+    async def test_unknown_preset_raises_validation_error(self) -> None:
+        """Unknown preset name produces a validation error."""
+        state, _ = _make_provider_state_and_mgmt()
+        from synthorg.api.dto import ProbePresetRequest
+        from synthorg.api.errors import ApiValidationError
+
+        ctrl = _provider_controller()
+        with pytest.raises(ApiValidationError):
+            await ctrl.probe_preset.fn(
+                ctrl,
+                state=state,
+                data=ProbePresetRequest(preset_name="nonexistent-preset"),
+            )
+
+    async def test_preset_with_no_candidates_returns_empty(self) -> None:
+        """Preset with no candidate URLs returns zero candidates tried."""
+        state, _ = _make_provider_state_and_mgmt()
+        from synthorg.api.dto import ProbePresetRequest
+
+        ctrl = _provider_controller()
+        result = await ctrl.probe_preset.fn(
+            ctrl,
+            state=state,
+            data=ProbePresetRequest(preset_name="openrouter"),
+        )
+        assert result.data.candidates_tried == 0
+        assert result.data.url is None
+
+    async def test_successful_probe_maps_result(self) -> None:
+        """Successful probe result is correctly mapped to response DTO."""
+        from unittest.mock import patch
+
+        from synthorg.api.dto import ProbePresetRequest
+        from synthorg.providers.discovery import ProbeResult
+
+        state, _ = _make_provider_state_and_mgmt()
+        ctrl = _provider_controller()
+        mock_result = ProbeResult(
+            url="http://host.docker.internal:11434",
+            model_count=3,
+            candidates_tried=1,
+        )
+        with patch(
+            "synthorg.api.controllers.providers.probe_preset_urls",
+            AsyncMock(return_value=mock_result),
+        ):
+            result = await ctrl.probe_preset.fn(
+                ctrl,
+                state=state,
+                data=ProbePresetRequest(preset_name="ollama"),
+            )
+        assert result.data.url == "http://host.docker.internal:11434"
+        assert result.data.model_count == 3
+        assert result.data.candidates_tried == 1

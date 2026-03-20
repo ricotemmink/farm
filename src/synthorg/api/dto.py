@@ -490,7 +490,9 @@ class CoordinationResultResponse(BaseModel):
 # ── Provider management DTOs ────────────────────────────────
 
 _PROVIDER_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$")
-_RESERVED_PROVIDER_NAMES: frozenset[str] = frozenset({"presets", "from-preset"})
+_RESERVED_PROVIDER_NAMES: frozenset[str] = frozenset(
+    {"presets", "from-preset", "probe-preset"},
+)
 
 
 def _validate_provider_name(v: str) -> str:
@@ -713,6 +715,34 @@ class DiscoverModelsResponse(BaseModel):
 
     discovered_models: tuple[ProviderModelConfig, ...]
     provider_name: NotBlankStr
+
+
+class ProbePresetRequest(BaseModel):
+    """Request to probe a preset's candidate URLs for reachability.
+
+    Attributes:
+        preset_name: Preset identifier to probe.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    preset_name: NotBlankStr = Field(max_length=64)
+
+
+class ProbePresetResponse(BaseModel):
+    """Result of probing a preset's candidate URLs.
+
+    Attributes:
+        url: The first reachable base URL, or ``None`` if none responded.
+        model_count: Number of models discovered at the URL.
+        candidates_tried: Number of candidate URLs attempted.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    url: NotBlankStr | None = None
+    model_count: int = Field(default=0, ge=0)
+    candidates_tried: int = Field(default=0, ge=0)
 
 
 def to_provider_response(config: ProviderConfig) -> ProviderResponse:

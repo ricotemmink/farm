@@ -9,9 +9,11 @@ import httpx
 import pytest
 
 from synthorg.providers.discovery import (
+    ProbeResult,
     _SsrfCheckResult,
     _validate_discovery_url,
     discover_models,
+    probe_preset_urls,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.timeout(30)]
@@ -422,3 +424,168 @@ class TestInferPresetHint:
         from synthorg.providers.management.service import _infer_preset_hint
 
         assert _infer_preset_hint(url) == expected
+
+
+class TestProbePresetUrls:
+    """Tests for probe_preset_urls candidate URL probing."""
+
+    async def test_returns_first_reachable_url(self) -> None:
+        """First reachable candidate wins."""
+        ollama_response = _mock_response(
+            {"models": [{"name": "llama3"}]},
+        )
+        client = _mock_client(ollama_response)
+
+        with patch(
+            "synthorg.providers.discovery.httpx.AsyncClient",
+            return_value=client,
+        ):
+            result = await probe_preset_urls(
+                (
+                    "http://host.docker.internal:11434",
+                    "http://localhost:11434",
+                ),
+                "ollama",
+            )
+        assert result.url == "http://host.docker.internal:11434"
+        assert result.model_count == 1
+        assert result.candidates_tried == 1
+
+    async def test_skips_unreachable_tries_next(self) -> None:
+        """Unreachable URL is skipped, next one is tried."""
+        ok_response = _mock_response(
+            {"models": [{"name": "phi3"}, {"name": "llama3"}]},
+        )
+
+        async def side_effect_get(url: str, **kwargs: Any) -> httpx.Response:
+            if "host.docker.internal" in url:
+                msg = "refused"
+                raise httpx.ConnectError(msg)
+            return ok_response
+
+        client = _mock_client(ok_response)
+        client.get.side_effect = side_effect_get
+
+        with patch(
+            "synthorg.providers.discovery.httpx.AsyncClient",
+            return_value=client,
+        ):
+            result = await probe_preset_urls(
+                (
+                    "http://host.docker.internal:11434",
+                    "http://172.17.0.1:11434",
+                ),
+                "ollama",
+            )
+        assert result.url == "http://172.17.0.1:11434"
+        assert result.model_count == 2
+        assert result.candidates_tried == 2
+
+    async def test_all_unreachable_returns_empty(self) -> None:
+        """When all candidates fail, returns empty result."""
+        client = _mock_client(side_effect=httpx.ConnectError("refused"))
+
+        with patch(
+            "synthorg.providers.discovery.httpx.AsyncClient",
+            return_value=client,
+        ):
+            result = await probe_preset_urls(
+                ("http://a:11434", "http://b:11434"),
+                "ollama",
+            )
+        assert result.url is None
+        assert result.model_count == 0
+        assert result.candidates_tried == 2
+
+    async def test_empty_candidates(self) -> None:
+        """No candidates to probe returns empty result."""
+        result = await probe_preset_urls((), "ollama")
+        assert result == ProbeResult(candidates_tried=0)
+
+    async def test_standard_api_probe(self) -> None:
+        """Standard API presets probe /models endpoint."""
+        response = _mock_response(
+            {"data": [{"id": "model-a"}, {"id": "model-b"}]},
+        )
+        client = _mock_client(response)
+
+        with patch(
+            "synthorg.providers.discovery.httpx.AsyncClient",
+            return_value=client,
+        ):
+            result = await probe_preset_urls(
+                ("http://host.docker.internal:1234/v1",),
+                "lm-studio",
+            )
+        assert result.url == "http://host.docker.internal:1234/v1"
+        assert result.model_count == 2
+        assert result.candidates_tried == 1
+
+    async def test_probe_timeout_skips_url(self) -> None:
+        """Timeout is handled gracefully and URL is skipped."""
+        client = _mock_client(side_effect=httpx.TimeoutException("timed out"))
+
+        with patch(
+            "synthorg.providers.discovery.httpx.AsyncClient",
+            return_value=client,
+        ):
+            result = await probe_preset_urls(
+                ("http://slow-host:11434",),
+                "ollama",
+            )
+        assert result.url is None
+        assert result.candidates_tried == 1
+
+    async def test_probe_non_2xx_skips_url(self) -> None:
+        """Non-2xx response is treated as a miss."""
+        response = _mock_response({"error": "not found"}, status_code=404)
+        client = _mock_client(response)
+
+        with patch(
+            "synthorg.providers.discovery.httpx.AsyncClient",
+            return_value=client,
+        ):
+            result = await probe_preset_urls(
+                ("http://host:11434",),
+                "ollama",
+            )
+        assert result.url is None
+        assert result.candidates_tried == 1
+
+    async def test_probe_json_decode_error_skips_url(self) -> None:
+        """Non-JSON 200 response is treated as a miss."""
+        # Real httpx.Response with non-JSON body -- .json() raises
+        # JSONDecodeError exactly like production.
+        html_response = httpx.Response(
+            status_code=200,
+            content=b"<html>not json</html>",
+            request=httpx.Request("GET", "http://test"),
+        )
+        client = _mock_client(html_response)
+
+        with patch(
+            "synthorg.providers.discovery.httpx.AsyncClient",
+            return_value=client,
+        ):
+            result = await probe_preset_urls(
+                ("http://host:11434",),
+                "ollama",
+            )
+        assert result.url is None
+        assert result.candidates_tried == 1
+
+    async def test_probe_non_dict_json_skips_url(self) -> None:
+        """JSON array response is treated as a miss."""
+        response = _mock_response([{"not": "a dict"}])
+        client = _mock_client(response)
+
+        with patch(
+            "synthorg.providers.discovery.httpx.AsyncClient",
+            return_value=client,
+        ):
+            result = await probe_preset_urls(
+                ("http://host:11434",),
+                "ollama",
+            )
+        assert result.url is None
+        assert result.candidates_tried == 1
