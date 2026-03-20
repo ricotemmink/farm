@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
 
 @pytest.mark.unit
-@pytest.mark.timeout(30)
 class TestProviderController:
     def test_list_providers_empty(self, test_client: TestClient[Any]) -> None:
         resp = test_client.get("/api/v1/providers")
@@ -33,9 +32,15 @@ class TestProviderController:
         resp = test_client.get("/api/v1/providers/nonexistent/models")
         assert resp.status_code == 404
 
+    def test_oversized_provider_name_rejected(
+        self, test_client: TestClient[Any]
+    ) -> None:
+        long_name = "x" * 129
+        resp = test_client.get(f"/api/v1/providers/{long_name}")
+        assert resp.status_code == 400
+
 
 @pytest.mark.unit
-@pytest.mark.timeout(30)
 class TestProviderResponseSecurity:
     def test_to_provider_response_strips_secrets(self) -> None:
         from synthorg.api.dto import to_provider_response
@@ -91,7 +96,6 @@ class TestProviderResponseSecurity:
 
 
 @pytest.mark.unit
-@pytest.mark.timeout(30)
 class TestProviderCrudEndpoints:
     def test_get_presets_returns_all(
         self,
@@ -107,7 +111,6 @@ class TestProviderCrudEndpoints:
         self,
         test_client: TestClient[Any],
     ) -> None:
-        test_client.headers.update(make_auth_headers("observer"))
         resp = test_client.post(
             "/api/v1/providers",
             json={
@@ -115,6 +118,7 @@ class TestProviderCrudEndpoints:
                 "driver": "litellm",
                 "auth_type": "none",
             },
+            headers=make_auth_headers("observer"),
         )
         assert resp.status_code == 403
 
@@ -142,7 +146,6 @@ def _provider_controller() -> ProviderController:
 
 
 @pytest.mark.unit
-@pytest.mark.timeout(30)
 class TestDiscoverModelsEndpoint:
     """Tests for POST /providers/{name}/discover-models."""
 

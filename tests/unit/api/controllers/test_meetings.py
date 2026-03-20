@@ -180,6 +180,7 @@ class TestMeetingController:
         assert resp.status_code == 404
         body = resp.json()
         assert body["success"] is False
+        assert "error_code" in body or "type" in body or "error" in body
 
     def test_trigger_endpoint_calls_mock_scheduler(
         self,
@@ -200,6 +201,25 @@ class TestMeetingController:
             "deploy_complete",
             context={},
         )
+
+    def test_oversized_meeting_id_rejected(
+        self,
+        meeting_client: TestClient[Any],
+    ) -> None:
+        long_id = "x" * 129
+        resp = meeting_client.get(f"/api/v1/meetings/{long_id}")
+        assert resp.status_code == 400
+
+    def test_oversized_meeting_type_query_rejected(
+        self,
+        meeting_client: TestClient[Any],
+    ) -> None:
+        long_type = "x" * 129
+        resp = meeting_client.get(
+            "/api/v1/meetings",
+            params={"meeting_type": long_type},
+        )
+        assert resp.status_code == 422
 
     def test_503_when_orchestrator_not_configured(
         self,

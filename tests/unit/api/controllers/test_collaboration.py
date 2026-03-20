@@ -221,7 +221,7 @@ class TestClearOverride:
         collab_client: TestClient[Any],
         override_store: CollaborationOverrideStore,
     ) -> None:
-        """DELETE removes the active override."""
+        """DELETE removes the active override and returns 204 with empty body."""
         override_store.set_override(
             CollaborationOverride(
                 agent_id=NotBlankStr("agent-001"),
@@ -234,7 +234,8 @@ class TestClearOverride:
         resp = collab_client.delete(
             "/api/v1/agents/agent-001/collaboration/override",
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 204
+        assert resp.content == b""
 
         # Verify removed.
         stored = override_store.get_active_override(
@@ -251,6 +252,21 @@ class TestClearOverride:
             "/api/v1/agents/agent-001/collaboration/override",
         )
         assert resp.status_code == 404
+
+
+@pytest.mark.unit
+class TestCollaborationPathParamValidation:
+    """Path parameter validation via Litestar Parameter constraints."""
+
+    def test_oversized_agent_id_rejected(
+        self,
+        collab_client: TestClient[Any],
+    ) -> None:
+        long_id = "x" * 129
+        resp = collab_client.get(
+            f"/api/v1/agents/{long_id}/collaboration/score",
+        )
+        assert resp.status_code == 400
 
 
 @pytest.mark.unit

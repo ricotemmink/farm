@@ -21,3 +21,8 @@ class TestProjectController:
         body = resp.json()
         assert body["success"] is False
         assert "not implemented" in body["error"].lower()
+
+    def test_oversized_project_id_rejected(self, test_client: TestClient[Any]) -> None:
+        long_id = "x" * 129
+        resp = test_client.get(f"/api/v1/projects/{long_id}")
+        assert resp.status_code == 400

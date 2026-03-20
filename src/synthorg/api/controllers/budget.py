@@ -1,12 +1,16 @@
-"""Budget controller — read-only access to cost data."""
+"""Budget controller -- read-only access to cost data."""
+
+from typing import Annotated
 
 from litestar import Controller, get
 from litestar.datastructures import State  # noqa: TC002
+from litestar.params import Parameter
 from pydantic import BaseModel, ConfigDict, Field
 
 from synthorg.api.dto import ApiResponse, PaginatedResponse
 from synthorg.api.guards import require_read_access
 from synthorg.api.pagination import PaginationLimit, PaginationOffset, paginate
+from synthorg.api.path_params import PathId  # noqa: TC001
 from synthorg.api.state import AppState  # noqa: TC001
 from synthorg.budget.config import BudgetConfig  # noqa: TC001
 from synthorg.budget.cost_record import CostRecord  # noqa: TC001
@@ -58,8 +62,8 @@ class BudgetController(Controller):
     async def list_cost_records(
         self,
         state: State,
-        agent_id: str | None = None,
-        task_id: str | None = None,
+        agent_id: Annotated[str, Parameter(max_length=128)] | None = None,
+        task_id: Annotated[str, Parameter(max_length=128)] | None = None,
         offset: PaginationOffset = 0,
         limit: PaginationLimit = 50,
     ) -> PaginatedResponse[CostRecord]:
@@ -87,7 +91,7 @@ class BudgetController(Controller):
     async def get_agent_spending(
         self,
         state: State,
-        agent_id: str,
+        agent_id: PathId,
     ) -> ApiResponse[AgentSpending]:
         """Get total spending for an agent.
 
