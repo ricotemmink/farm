@@ -51,24 +51,21 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	// Migrate: generate settings encryption key if missing (pre-v0.3.9 installs).
-	// 32 bytes -> 44-char URL-safe base64 = valid Fernet key.
-	if state.SettingsKey == "" {
-		key, genErr := generateSecret(32)
-		if genErr != nil {
-			return fmt.Errorf("generating settings encryption key: %w", genErr)
-		}
-		state.SettingsKey = key
-		if saveErr := config.Save(state); saveErr != nil {
-			return fmt.Errorf("saving updated config: %w", saveErr)
-		}
-		out := ui.NewUI(cmd.OutOrStdout())
-		out.Success("Generated settings encryption key for this installation.")
+	// Detect dirty installation state (e.g. after partial uninstall).
+	// When recovery is chosen, force compose + image refresh even if the
+	// stored version matches the target (artifacts may be missing).
+	abort, recovered, healthErr := checkInstallationHealth(cmd, state)
+	if healthErr != nil {
+		return healthErr
+	}
+	if abort {
+		return nil
 	}
 
 	// Regenerate compose.yml from the current template to pick up any
 	// template changes (new env vars, hardening tweaks, service config).
-	applied, err := refreshCompose(cmd, state)
+	// In recovery mode, also generate a missing compose.yml from the template.
+	applied, err := refreshCompose(cmd, state, recovered)
 	if err != nil {
 		return err
 	}
@@ -90,10 +87,10 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 			return nil
 		}
 		// User insisted -- update images but preserve their compose.
-		return updateContainerImages(cmd, state, true)
+		return updateContainerImages(cmd, state, true, recovered)
 	}
 
-	return updateContainerImages(cmd, state, false)
+	return updateContainerImages(cmd, state, false, recovered)
 }
 
 // errReexec is a sentinel error returned by updateCLI when the binary was
@@ -181,7 +178,7 @@ func ChildExitCode(err error) (int, bool) {
 // Arguments are reconstructed from known flag values rather than forwarding
 // raw os.Args to avoid silently propagating unexpected flags.
 //
-// Returns a *childExitError if the child exits non-zero, so the caller
+// Returns a *ChildExitError if the child exits non-zero, so the caller
 // can propagate the exit code rather than printing a generic error.
 func reexecUpdate(cmd *cobra.Command) error {
 	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Re-launching updated CLI to continue...")
@@ -227,9 +224,11 @@ func reexecUpdate(cmd *cobra.Command) error {
 
 // refreshCompose regenerates compose.yml from the current embedded template.
 // If the regenerated compose differs from what is on disk, it shows the diff
-// and asks the user to approve. Returns true if compose is up to date or
-// changes were applied; false if the user declined.
-func refreshCompose(cmd *cobra.Command, state config.State) (bool, error) {
+// and asks the user to approve. When force is true (recovery mode), a missing
+// compose.yml is generated from the template without prompting.
+// Returns true if compose is up to date or changes were applied; false if
+// the user declined.
+func refreshCompose(cmd *cobra.Command, state config.State, force bool) (bool, error) {
 	out := cmd.OutOrStdout()
 
 	safeDir, err := safeStateDir(state)
@@ -243,7 +242,23 @@ func refreshCompose(cmd *cobra.Command, state config.State) (bool, error) {
 		return false, err
 	}
 	if existing == nil {
-		return true, nil // no compose.yml on disk -- nothing to refresh
+		if !force {
+			return true, nil // no compose.yml on disk -- nothing to refresh
+		}
+		// Recovery mode: compose.yml is missing, generate from template.
+		// loadAndGenerate returns (nil, nil, nil) when the file is absent,
+		// so we must generate the content explicitly.
+		params := compose.ParamsFromState(state)
+		params.DigestPins = state.VerifiedDigests
+		generated, genErr := compose.Generate(params)
+		if genErr != nil {
+			return false, fmt.Errorf("generating compose.yml during recovery: %w", genErr)
+		}
+		if wErr := atomicWriteFile(composePath, generated, safeDir); wErr != nil {
+			return false, fmt.Errorf("writing compose.yml during recovery: %w", wErr)
+		}
+		_, _ = fmt.Fprintln(out, "Generated compose.yml from template.")
+		return true, nil
 	}
 
 	if bytes.Equal(existing, fresh) {
@@ -322,7 +337,7 @@ func applyComposeDiff(cmd *cobra.Command, composePath string, existing, fresh []
 // Covers common secret naming conventions to prevent leaking credentials
 // in terminal scrollback or CI logs when the compose template changes.
 var secretKeyPattern = regexp.MustCompile(
-	`(?i)^\s*\w*(SECRET|PASSWORD|TOKEN|API_KEY|CREDENTIALS|ENCRYPTION_KEY|SETTINGS_KEY)\w*\s*:`,
+	`(?i)^\s*\w*(SECRET|PASSWORD|TOKEN|API_KEY|CREDENTIALS|ENCRYPTION_KEY|SETTINGS_KEY|PRIVATE_KEY|CERT)\w*\s*:`,
 )
 
 // lineDiff produces a bag-based diff showing added (+) and removed (-) lines
@@ -388,39 +403,18 @@ func targetImageTag(ver string) string {
 	if tag == "" || tag == "dev" {
 		return "latest"
 	}
-	if !isValidImageTag(tag) {
+	if !config.IsValidImageTag(tag) {
 		return "latest"
 	}
 	return tag
 }
 
-// isValidImageTag checks that tag matches [a-zA-Z0-9][a-zA-Z0-9._-]*.
-func isValidImageTag(tag string) bool {
-	if len(tag) == 0 {
-		return false
-	}
-	first := tag[0]
-	if !isAlphaNum(first) {
-		return false
-	}
-	for i := 1; i < len(tag); i++ {
-		c := tag[i]
-		if !isAlphaNum(c) && c != '.' && c != '_' && c != '-' {
-			return false
-		}
-	}
-	return true
-}
-
-func isAlphaNum(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-}
-
 // updateContainerImages offers to update container images to match the
-// current CLI version. Skips if images already match. When preserveCompose
-// is true, only image references are patched in the existing compose
-// instead of regenerating from the template.
-func updateContainerImages(cmd *cobra.Command, state config.State, preserveCompose bool) error {
+// current CLI version. Skips if images already match unless forceRefresh
+// is true (recovery mode -- images may be missing despite matching tag).
+// When preserveCompose is true, only image references are patched in the
+// existing compose instead of regenerating from the template.
+func updateContainerImages(cmd *cobra.Command, state config.State, preserveCompose bool, forceRefresh bool) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -432,7 +426,7 @@ func updateContainerImages(cmd *cobra.Command, state config.State, preserveCompo
 	}
 
 	// Check if container images already match the target version.
-	if state.ImageTag == tag {
+	if state.ImageTag == tag && !forceRefresh {
 		_, _ = fmt.Fprintf(out, "Container images already at %s\n", tag)
 		return nil
 	}
@@ -457,7 +451,17 @@ func updateContainerImages(cmd *cobra.Command, state config.State, preserveCompo
 
 	updatedState := state
 	updatedState.ImageTag = tag
-	return restartIfRunning(cmd, info, safeDir, updatedState)
+	restarted, restartErr := restartIfRunning(cmd, info, safeDir, updatedState)
+	if restartErr != nil {
+		return restartErr
+	}
+
+	// Only offer old image cleanup when the new images are confirmed running.
+	// Removing images while old containers are still active would break them.
+	if restarted {
+		return cleanupOldImages(cmd, info, updatedState)
+	}
+	return nil
 }
 
 // confirmUpdate prompts the user to confirm an update action.
@@ -496,9 +500,15 @@ func pullAndPersist(ctx context.Context, cmd *cobra.Command, info docker.Info, s
 
 	rollback := func() {
 		if backupExists {
-			_ = os.WriteFile(composePath, backup, 0o600)
+			if wErr := os.WriteFile(composePath, backup, 0o600); wErr != nil {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+					"Warning: failed to restore compose.yml backup: %v\n", wErr)
+			}
 		} else {
-			_ = os.Remove(composePath)
+			if rErr := os.Remove(composePath); rErr != nil && !errors.Is(rErr, os.ErrNotExist) {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+					"Warning: failed to clean up compose.yml: %v\n", rErr)
+			}
 		}
 	}
 
@@ -634,7 +644,9 @@ func patchComposeImageRefs(tag string, digestPins map[string]string, sandboxEnab
 }
 
 // restartIfRunning checks if containers are running and offers a restart.
-func restartIfRunning(cmd *cobra.Command, info docker.Info, safeDir string, state config.State) error {
+// Returns (true, nil) when containers were restarted and passed health checks.
+// Returns (false, nil) when restart was skipped or health check failed.
+func restartIfRunning(cmd *cobra.Command, info docker.Info, safeDir string, state config.State) (bool, error) {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -642,43 +654,42 @@ func restartIfRunning(cmd *cobra.Command, info docker.Info, safeDir string, stat
 	if err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 			"Warning: could not check container status: %v\nIf containers are running, restart manually: synthorg stop && synthorg start\n", err)
-		return nil
+		return false, nil
 	}
 	if psOut == "" {
-		return nil
+		return false, nil
 	}
 
 	if !isInteractive() {
 		_, _ = fmt.Fprintln(out, "Non-interactive mode: skipping restart. Run 'synthorg stop && synthorg start' to apply new images.")
-		return nil
+		return false, nil
 	}
 
 	restart, err := confirmRestart()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !restart {
-		return nil
+		return false, nil
 	}
 
 	_, _ = fmt.Fprintln(out, "Restarting...")
 	if err := composeRun(ctx, cmd, info, safeDir, "down"); err != nil {
-		return fmt.Errorf("stopping containers: %w", err)
+		return false, fmt.Errorf("stopping containers: %w", err)
 	}
 	if err := composeRun(ctx, cmd, info, safeDir, "up", "-d"); err != nil {
-		return fmt.Errorf("restarting containers: %w", err)
+		return false, fmt.Errorf("restarting containers: %w", err)
 	}
 
 	_, _ = fmt.Fprintln(out, "Waiting for backend to become healthy...")
 	healthURL := fmt.Sprintf("http://localhost:%d/api/v1/health", state.BackendPort)
 	if err := health.WaitForHealthy(ctx, healthURL, 90*time.Second, 2*time.Second, 5*time.Second); err != nil {
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: health check did not pass after restart: %v\n", err)
-	} else {
-		_, _ = fmt.Fprintln(out, "Containers restarted with new images and healthy.")
-		_, _ = fmt.Fprintf(out, "Dashboard: http://localhost:%d\n", state.WebPort)
+		return false, nil
 	}
-
-	return nil
+	_, _ = fmt.Fprintln(out, "Containers restarted with new images and healthy.")
+	_, _ = fmt.Fprintf(out, "Dashboard: http://localhost:%d\n", state.WebPort)
+	return true, nil
 }
 
 func confirmRestart() (bool, error) {

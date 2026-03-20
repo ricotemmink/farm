@@ -38,7 +38,7 @@ from synthorg.providers.errors import (
     ProviderValidationError,
 )
 from synthorg.providers.models import ChatMessage
-from synthorg.providers.presets import get_preset
+from synthorg.providers.presets import ProviderPreset, get_preset
 from synthorg.providers.registry import ProviderRegistry
 
 if TYPE_CHECKING:
@@ -359,12 +359,12 @@ class ProviderManagementService:
 
         models = request.models if request.models is not None else preset.default_models
         base_url = request.base_url or preset.default_base_url
-
-        # Auto-discover models for no-auth presets with a base URL.
-        if not models and preset.auth_type == AuthType.NONE and base_url:
-            discovered = await discover_models(base_url, preset.name)
-            if discovered:
-                models = discovered
+        models = await self._maybe_discover_preset_models(
+            preset,
+            base_url,
+            models,
+            trust_url=request.base_url is None,
+        )
 
         create_request = CreateProviderRequest(
             name=request.name,
@@ -375,6 +375,39 @@ class ProviderManagementService:
             models=models,
         )
         return await self.create_provider(create_request)
+
+    async def _maybe_discover_preset_models(
+        self,
+        preset: ProviderPreset,
+        base_url: str | None,
+        models: tuple[ProviderModelConfig, ...],
+        *,
+        trust_url: bool,
+    ) -> tuple[ProviderModelConfig, ...]:
+        """Auto-discover models for no-auth presets when none are provided.
+
+        Only attempts discovery when the preset uses ``AuthType.NONE``,
+        a base URL is available, and no models were explicitly provided.
+        Only trusts the URL (skips SSRF) when using the preset's own
+        default -- user-supplied overrides go through normal validation.
+
+        Args:
+            preset: Resolved preset definition.
+            base_url: Provider base URL (may be user-overridden).
+            models: Explicitly provided models (may be empty).
+            trust_url: Whether to skip SSRF validation.
+
+        Returns:
+            Discovered models if any, otherwise the original models.
+        """
+        if models or preset.auth_type != AuthType.NONE or not base_url:
+            return models
+        discovered = await discover_models(
+            base_url,
+            preset.name,
+            trust_url=trust_url,
+        )
+        return discovered or models
 
     async def discover_models_for_provider(
         self,
@@ -413,10 +446,12 @@ class ProviderManagementService:
 
         resolved_hint = preset_hint or _infer_preset_hint(config.base_url)
         headers = _build_discovery_headers(config)
+        trust = self._resolve_discovery_trust(preset_hint, config.base_url)
         discovered = await discover_models(
             config.base_url,
             resolved_hint,
             headers=headers,
+            trust_url=trust,
         )
 
         if discovered:
@@ -429,6 +464,41 @@ class ProviderManagementService:
                 return ()
 
         return discovered
+
+    @staticmethod
+    def _resolve_discovery_trust(
+        preset_hint: str | None,
+        base_url: str,
+    ) -> bool:
+        """Determine whether to trust a URL for SSRF-free discovery.
+
+        Trust is granted only when both conditions are met:
+
+        1. ``preset_hint`` resolves to a known preset in the registry.
+        2. ``base_url`` matches one of the preset's ``candidate_urls``
+           or its ``default_base_url`` (trailing-slash-insensitive).
+
+        This prevents an attacker from storing an arbitrary URL in
+        the provider config and passing a valid ``preset_hint`` to
+        bypass SSRF validation.
+
+        Args:
+            preset_hint: Optional preset name hint.
+            base_url: The stored provider base URL.
+
+        Returns:
+            True if the URL is trusted, False otherwise.
+        """
+        if preset_hint is None:
+            return False
+        preset = get_preset(preset_hint)
+        if preset is None:
+            return False
+        normalized = base_url.rstrip("/")
+        trusted_urls = {u.rstrip("/") for u in preset.candidate_urls}
+        if preset.default_base_url:
+            trusted_urls.add(preset.default_base_url.rstrip("/"))
+        return normalized in trusted_urls
 
     async def _apply_discovered_models(
         self,

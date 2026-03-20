@@ -33,13 +33,13 @@ from synthorg.observability.events.api import (
     API_RESOURCE_NOT_FOUND,
     API_VALIDATION_FAILED,
 )
-from synthorg.providers.discovery import probe_preset_urls
 from synthorg.providers.errors import (
     ProviderAlreadyExistsError,
     ProviderNotFoundError,
     ProviderValidationError,
 )
 from synthorg.providers.presets import ProviderPreset, get_preset, list_presets
+from synthorg.providers.probing import probe_preset_urls
 
 logger = get_logger(__name__)
 
@@ -108,10 +108,7 @@ class ProviderController(Controller):
             return ApiResponse(
                 data=ProbePresetResponse(candidates_tried=0),
             )
-        result = await probe_preset_urls(
-            preset.candidate_urls,
-            preset.name,
-        )
+        result = await probe_preset_urls(preset.name)
         return ApiResponse(
             data=ProbePresetResponse(
                 url=result.url,

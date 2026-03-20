@@ -3,16 +3,18 @@
 import socket
 from collections.abc import Generator
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
 
 from synthorg.providers.discovery import (
-    ProbeResult,
     _SsrfCheckResult,
     _validate_discovery_url,
     discover_models,
+)
+from synthorg.providers.probing import (
+    ProbeResult,
     probe_preset_urls,
 )
 
@@ -435,18 +437,24 @@ class TestProbePresetUrls:
             {"models": [{"name": "llama3"}]},
         )
         client = _mock_client(ollama_response)
+        fake_preset = Mock(
+            candidate_urls=(
+                "http://host.docker.internal:11434",
+                "http://localhost:11434",
+            ),
+        )
 
-        with patch(
-            "synthorg.providers.discovery.httpx.AsyncClient",
-            return_value=client,
+        with (
+            patch(
+                "synthorg.providers.presets.get_preset",
+                return_value=fake_preset,
+            ),
+            patch(
+                "synthorg.providers.probing.httpx.AsyncClient",
+                return_value=client,
+            ),
         ):
-            result = await probe_preset_urls(
-                (
-                    "http://host.docker.internal:11434",
-                    "http://localhost:11434",
-                ),
-                "ollama",
-            )
+            result = await probe_preset_urls("ollama")
         assert result.url == "http://host.docker.internal:11434"
         assert result.model_count == 1
         assert result.candidates_tried == 1
@@ -465,18 +473,24 @@ class TestProbePresetUrls:
 
         client = _mock_client(ok_response)
         client.get.side_effect = side_effect_get
+        fake_preset = Mock(
+            candidate_urls=(
+                "http://host.docker.internal:11434",
+                "http://172.17.0.1:11434",
+            ),
+        )
 
-        with patch(
-            "synthorg.providers.discovery.httpx.AsyncClient",
-            return_value=client,
+        with (
+            patch(
+                "synthorg.providers.presets.get_preset",
+                return_value=fake_preset,
+            ),
+            patch(
+                "synthorg.providers.probing.httpx.AsyncClient",
+                return_value=client,
+            ),
         ):
-            result = await probe_preset_urls(
-                (
-                    "http://host.docker.internal:11434",
-                    "http://172.17.0.1:11434",
-                ),
-                "ollama",
-            )
+            result = await probe_preset_urls("ollama")
         assert result.url == "http://172.17.0.1:11434"
         assert result.model_count == 2
         assert result.candidates_tried == 2
@@ -484,22 +498,34 @@ class TestProbePresetUrls:
     async def test_all_unreachable_returns_empty(self) -> None:
         """When all candidates fail, returns empty result."""
         client = _mock_client(side_effect=httpx.ConnectError("refused"))
+        fake_preset = Mock(
+            candidate_urls=("http://a:11434", "http://b:11434"),
+        )
 
-        with patch(
-            "synthorg.providers.discovery.httpx.AsyncClient",
-            return_value=client,
+        with (
+            patch(
+                "synthorg.providers.presets.get_preset",
+                return_value=fake_preset,
+            ),
+            patch(
+                "synthorg.providers.probing.httpx.AsyncClient",
+                return_value=client,
+            ),
         ):
-            result = await probe_preset_urls(
-                ("http://a:11434", "http://b:11434"),
-                "ollama",
-            )
+            result = await probe_preset_urls("ollama")
         assert result.url is None
         assert result.model_count == 0
         assert result.candidates_tried == 2
 
     async def test_empty_candidates(self) -> None:
         """No candidates to probe returns empty result."""
-        result = await probe_preset_urls((), "ollama")
+        fake_preset = Mock(candidate_urls=())
+
+        with patch(
+            "synthorg.providers.presets.get_preset",
+            return_value=fake_preset,
+        ):
+            result = await probe_preset_urls("ollama")
         assert result == ProbeResult(candidates_tried=0)
 
     async def test_standard_api_probe(self) -> None:
@@ -508,15 +534,25 @@ class TestProbePresetUrls:
             {"data": [{"id": "model-a"}, {"id": "model-b"}]},
         )
         client = _mock_client(response)
+        fake_preset = Mock(
+            candidate_urls=(
+                "http://host.docker.internal:1234/v1",
+                "http://172.17.0.1:1234/v1",
+                "http://localhost:1234/v1",
+            ),
+        )
 
-        with patch(
-            "synthorg.providers.discovery.httpx.AsyncClient",
-            return_value=client,
+        with (
+            patch(
+                "synthorg.providers.presets.get_preset",
+                return_value=fake_preset,
+            ),
+            patch(
+                "synthorg.providers.probing.httpx.AsyncClient",
+                return_value=client,
+            ),
         ):
-            result = await probe_preset_urls(
-                ("http://host.docker.internal:1234/v1",),
-                "lm-studio",
-            )
+            result = await probe_preset_urls("lm-studio")
         assert result.url == "http://host.docker.internal:1234/v1"
         assert result.model_count == 2
         assert result.candidates_tried == 1
@@ -524,15 +560,21 @@ class TestProbePresetUrls:
     async def test_probe_timeout_skips_url(self) -> None:
         """Timeout is handled gracefully and URL is skipped."""
         client = _mock_client(side_effect=httpx.TimeoutException("timed out"))
+        fake_preset = Mock(
+            candidate_urls=("http://slow-host:11434",),
+        )
 
-        with patch(
-            "synthorg.providers.discovery.httpx.AsyncClient",
-            return_value=client,
+        with (
+            patch(
+                "synthorg.providers.presets.get_preset",
+                return_value=fake_preset,
+            ),
+            patch(
+                "synthorg.providers.probing.httpx.AsyncClient",
+                return_value=client,
+            ),
         ):
-            result = await probe_preset_urls(
-                ("http://slow-host:11434",),
-                "ollama",
-            )
+            result = await probe_preset_urls("ollama")
         assert result.url is None
         assert result.candidates_tried == 1
 
@@ -540,15 +582,21 @@ class TestProbePresetUrls:
         """Non-2xx response is treated as a miss."""
         response = _mock_response({"error": "not found"}, status_code=404)
         client = _mock_client(response)
+        fake_preset = Mock(
+            candidate_urls=("http://host:11434",),
+        )
 
-        with patch(
-            "synthorg.providers.discovery.httpx.AsyncClient",
-            return_value=client,
+        with (
+            patch(
+                "synthorg.providers.presets.get_preset",
+                return_value=fake_preset,
+            ),
+            patch(
+                "synthorg.providers.probing.httpx.AsyncClient",
+                return_value=client,
+            ),
         ):
-            result = await probe_preset_urls(
-                ("http://host:11434",),
-                "ollama",
-            )
+            result = await probe_preset_urls("ollama")
         assert result.url is None
         assert result.candidates_tried == 1
 
@@ -562,15 +610,21 @@ class TestProbePresetUrls:
             request=httpx.Request("GET", "http://test"),
         )
         client = _mock_client(html_response)
+        fake_preset = Mock(
+            candidate_urls=("http://host:11434",),
+        )
 
-        with patch(
-            "synthorg.providers.discovery.httpx.AsyncClient",
-            return_value=client,
+        with (
+            patch(
+                "synthorg.providers.presets.get_preset",
+                return_value=fake_preset,
+            ),
+            patch(
+                "synthorg.providers.probing.httpx.AsyncClient",
+                return_value=client,
+            ),
         ):
-            result = await probe_preset_urls(
-                ("http://host:11434",),
-                "ollama",
-            )
+            result = await probe_preset_urls("ollama")
         assert result.url is None
         assert result.candidates_tried == 1
 
@@ -578,14 +632,108 @@ class TestProbePresetUrls:
         """JSON array response is treated as a miss."""
         response = _mock_response([{"not": "a dict"}])
         client = _mock_client(response)
+        fake_preset = Mock(
+            candidate_urls=("http://host:11434",),
+        )
 
-        with patch(
-            "synthorg.providers.discovery.httpx.AsyncClient",
-            return_value=client,
+        with (
+            patch(
+                "synthorg.providers.presets.get_preset",
+                return_value=fake_preset,
+            ),
+            patch(
+                "synthorg.providers.probing.httpx.AsyncClient",
+                return_value=client,
+            ),
         ):
-            result = await probe_preset_urls(
-                ("http://host:11434",),
-                "ollama",
-            )
+            result = await probe_preset_urls("ollama")
         assert result.url is None
         assert result.candidates_tried == 1
+
+
+class TestDiscoverModelsTrustedUrl:
+    """Tests for discover_models with trust_url=True (SSRF bypass)."""
+
+    async def test_trusted_url_skips_ssrf_validation(self) -> None:
+        """trust_url=True bypasses SSRF validation entirely."""
+        response = _mock_response(
+            {"data": [{"id": "test-model-001"}]},
+        )
+        with (
+            patch(
+                "synthorg.providers.discovery.httpx.AsyncClient",
+            ) as mock_cls,
+            patch(
+                "synthorg.providers.discovery._validate_discovery_url",
+            ) as mock_ssrf,
+        ):
+            mock_cls.return_value = _mock_client(response)
+
+            result = await discover_models(
+                "http://localhost:1234/v1",
+                "lm-studio",
+                trust_url=True,
+            )
+
+        # SSRF validation must NOT have been called.
+        mock_ssrf.assert_not_called()
+        assert len(result) == 1
+        assert result[0].id == "test-model-001"
+
+    async def test_trusted_url_uses_original_url(self) -> None:
+        """trust_url=True sends the request to the original URL (no IP pinning)."""
+        response = _mock_response(
+            {"data": [{"id": "test-model-001"}]},
+        )
+        with patch(
+            "synthorg.providers.discovery.httpx.AsyncClient",
+        ) as mock_cls:
+            client = _mock_client(response)
+            mock_cls.return_value = client
+
+            await discover_models(
+                "http://localhost:1234/v1",
+                "lm-studio",
+                trust_url=True,
+            )
+
+            # The request should go to the original URL, not an IP-pinned one.
+            client.get.assert_called_once()
+            call_args = client.get.call_args
+            url = call_args[0][0]
+            assert "localhost" in url
+            # No Host header rewriting when trusted.
+            headers = call_args[1].get("headers", call_args.kwargs.get("headers", {}))
+            assert "Host" not in headers
+
+    async def test_trusted_url_logs_ssrf_bypass(self) -> None:
+        """trust_url=True logs the SSRF bypass event."""
+        response = _mock_response(
+            {"data": [{"id": "test-model-001"}]},
+        )
+        with (
+            patch(
+                "synthorg.providers.discovery.httpx.AsyncClient",
+            ) as mock_cls,
+            patch(
+                "synthorg.providers.discovery.logger",
+            ) as mock_logger,
+        ):
+            mock_cls.return_value = _mock_client(response)
+
+            await discover_models(
+                "http://localhost:1234/v1",
+                "lm-studio",
+                trust_url=True,
+            )
+
+        # Verify the SSRF bypass event was logged.
+        from synthorg.observability.events.provider import (
+            PROVIDER_DISCOVERY_SSRF_BYPASSED,
+        )
+
+        mock_logger.warning.assert_any_call(
+            PROVIDER_DISCOVERY_SSRF_BYPASSED,
+            preset="lm-studio",
+            url="http://localhost:1234/v1/models",
+        )
