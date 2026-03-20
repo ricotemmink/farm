@@ -163,7 +163,7 @@ class DegradationAction(StrEnum):
 
     Members:
         FALLBACK: Route to a fallback provider.
-        QUEUE: Queue for later (not yet implemented).
+        QUEUE: Wait for quota window reset, then retry.
         ALERT: Raise error and alert user.
     """
 
@@ -312,6 +312,14 @@ class QuotaCheckResult(BaseModel):
             msg = "Allowed QuotaCheckResult must not have exhausted_windows"
             raise ValueError(msg)
         return self
+
+
+def always_allowed_result(provider_name: NotBlankStr) -> QuotaCheckResult:
+    """Build an always-allowed QuotaCheckResult."""
+    return QuotaCheckResult(
+        allowed=True,
+        provider_name=provider_name,
+    )
 
 
 def window_start(

@@ -9,7 +9,8 @@ import contextlib
 import time
 from typing import TYPE_CHECKING
 
-from synthorg.budget.errors import BudgetExhaustedError
+from synthorg.budget.errors import BudgetExhaustedError, QuotaExhaustedError
+from synthorg.budget.quota import DegradationAction
 from synthorg.engine._security_factory import (
     make_security_interceptor,
     registry_with_approval_tool,
@@ -65,6 +66,9 @@ from synthorg.observability.correlation import correlation_scope
 from synthorg.observability.events.approval_gate import (
     APPROVAL_GATE_LOOP_WIRING_WARNING,
 )
+from synthorg.observability.events.degradation import (
+    DEGRADATION_PROVIDER_SWAPPED,
+)
 from synthorg.observability.events.execution import (
     EXECUTION_ENGINE_BUDGET_STOPPED,
     EXECUTION_ENGINE_COMPLETE,
@@ -84,6 +88,7 @@ from synthorg.observability.events.execution import (
 )
 from synthorg.observability.events.prompt import PROMPT_TOKEN_RATIO_HIGH
 from synthorg.providers.enums import MessageRole
+from synthorg.providers.errors import DriverNotRegisteredError
 from synthorg.providers.models import ChatMessage
 from synthorg.security.audit import AuditLog
 from synthorg.security.autonomy.models import EffectiveAutonomy  # noqa: TC001
@@ -93,6 +98,7 @@ from synthorg.tools.permissions import ToolPermissionChecker
 if TYPE_CHECKING:
     from synthorg.api.approval_store import ApprovalStore
     from synthorg.budget.coordination_config import ErrorTaxonomyConfig
+    from synthorg.budget.degradation import PreFlightResult
     from synthorg.budget.enforcer import BudgetEnforcer
     from synthorg.budget.tracker import CostTracker
     from synthorg.core.agent import AgentIdentity
@@ -119,6 +125,7 @@ if TYPE_CHECKING:
     )
     from synthorg.providers.models import CompletionConfig
     from synthorg.providers.protocol import CompletionProvider
+    from synthorg.providers.registry import ProviderRegistry
     from synthorg.security.config import SecurityConfig
     from synthorg.security.protocol import SecurityInterceptionStrategy
     from synthorg.tools.registry import ToolRegistry
@@ -215,6 +222,7 @@ class AgentEngine:
         hybrid_loop_config: HybridLoopConfig | None = None,
         compaction_callback: CompactionCallback | None = None,
         plan_execute_config: PlanExecuteConfig | None = None,
+        provider_registry: ProviderRegistry | None = None,
     ) -> None:
         if execution_loop is not None and auto_loop_config is not None:
             msg = "execution_loop and auto_loop_config are mutually exclusive"
@@ -224,6 +232,7 @@ class AgentEngine:
             )
             raise ValueError(msg)
         self._provider = provider
+        self._provider_registry = provider_registry
         self._approval_store = approval_store
         self._parked_context_repo = parked_context_repo
         self._stagnation_detector = stagnation_detector
@@ -361,6 +370,7 @@ class AgentEngine:
             start = time.monotonic()
             ctx: AgentContext | None = None
             system_prompt: SystemPrompt | None = None
+            provider: CompletionProvider = self._provider
             try:
                 loop_mode = (
                     "auto"
@@ -375,9 +385,17 @@ class AgentEngine:
                     max_turns=max_turns,
                 )
 
-                # Pre-flight budget enforcement
+                # Pre-flight budget enforcement + degradation
                 if self._budget_enforcer:
-                    await self._budget_enforcer.check_can_execute(agent_id)
+                    preflight = await self._budget_enforcer.check_can_execute(
+                        agent_id,
+                        provider_name=identity.model.provider,
+                    )
+                    provider, identity = self._apply_degradation(
+                        preflight,
+                        identity,
+                        provider,
+                    )
                     identity = await self._budget_enforcer.resolve_model(
                         identity,
                     )
@@ -409,6 +427,7 @@ class AgentEngine:
                     timeout_seconds=timeout_seconds,
                     tool_invoker=tool_invoker,
                     effective_autonomy=effective_autonomy,
+                    provider=provider,
                 )
             except MemoryError, RecursionError:
                 logger.exception(
@@ -441,6 +460,7 @@ class AgentEngine:
                     system_prompt=system_prompt,
                     completion_config=completion_config,
                     effective_autonomy=effective_autonomy,
+                    provider=provider,
                 )
 
     async def _execute(  # noqa: PLR0913
@@ -457,6 +477,7 @@ class AgentEngine:
         timeout_seconds: float | None = None,
         tool_invoker: ToolInvoker | None = None,
         effective_autonomy: EffectiveAutonomy | None = None,
+        provider: CompletionProvider | None = None,
     ) -> AgentRunResult:
         """Run execution loop, record costs, apply transitions, and build result."""
         budget_checker: BudgetChecker | None
@@ -487,6 +508,7 @@ class AgentEngine:
             tool_invoker=tool_invoker,
             start=start,
             timeout_seconds=timeout_seconds,
+            provider=provider or self._provider,
         )
 
         execution_result = await self._post_execution_pipeline(
@@ -496,6 +518,7 @@ class AgentEngine:
             task_id,
             completion_config=completion_config,
             effective_autonomy=effective_autonomy,
+            provider=provider or self._provider,
         )
 
         return self._build_and_log_result(
@@ -515,6 +538,7 @@ class AgentEngine:
         *,
         completion_config: CompletionConfig | None = None,
         effective_autonomy: EffectiveAutonomy | None = None,
+        provider: CompletionProvider | None = None,
     ) -> ExecutionResult:
         """Post-execution: costs, transitions, recovery, classify.
 
@@ -554,6 +578,7 @@ class AgentEngine:
                 task_id,
                 completion_config=completion_config,
                 effective_autonomy=effective_autonomy,
+                provider=provider,
             )
             # Sync post-recovery status to TaskEngine (typically FAILED,
             # depends on recovery strategy).
@@ -670,6 +695,7 @@ class AgentEngine:
         tool_invoker: ToolInvoker | None,
         start: float,
         timeout_seconds: float | None,
+        provider: CompletionProvider | None = None,
     ) -> ExecutionResult:
         """Execute the loop, using ``asyncio.wait`` for timeout control.
 
@@ -680,7 +706,7 @@ class AgentEngine:
         wrapped_loop = self._make_loop_with_callback(loop, agent_id, task_id)
         coro = wrapped_loop.execute(
             context=ctx,
-            provider=self._provider,
+            provider=provider or self._provider,
             tool_invoker=tool_invoker,
             budget_checker=budget_checker,
             shutdown_checker=self._shutdown_checker,
@@ -776,6 +802,7 @@ class AgentEngine:
         *,
         completion_config: CompletionConfig | None = None,
         effective_autonomy: EffectiveAutonomy | None = None,
+        provider: CompletionProvider | None = None,
     ) -> ExecutionResult:
         """Invoke the configured recovery strategy on error outcomes.
 
@@ -807,6 +834,7 @@ class AgentEngine:
                     task_id,
                     completion_config=completion_config,
                     effective_autonomy=effective_autonomy,
+                    provider=provider,
                 )
 
             updated_ctx = ctx.model_copy(
@@ -853,6 +881,7 @@ class AgentEngine:
         *,
         completion_config: CompletionConfig | None = None,
         effective_autonomy: EffectiveAutonomy | None = None,
+        provider: CompletionProvider | None = None,
     ) -> ExecutionResult:
         """Resume execution from a checkpoint.
 
@@ -880,6 +909,7 @@ class AgentEngine:
                 task_id,
                 completion_config=completion_config,
                 effective_autonomy=effective_autonomy,
+                provider=provider,
             )
         except MemoryError, RecursionError:
             raise
@@ -909,6 +939,7 @@ class AgentEngine:
         *,
         completion_config: CompletionConfig | None = None,
         effective_autonomy: EffectiveAutonomy | None = None,
+        provider: CompletionProvider | None = None,
     ) -> tuple[ExecutionResult, str]:
         """Deserialize checkpoint context and run the resumed loop.
 
@@ -928,10 +959,11 @@ class AgentEngine:
             task_id,
             completion_config=completion_config,
             effective_autonomy=effective_autonomy,
+            provider=provider,
         )
         return result, checkpoint_ctx.execution_id
 
-    async def _execute_resumed_loop(
+    async def _execute_resumed_loop(  # noqa: PLR0913
         self,
         checkpoint_ctx: AgentContext,
         agent_id: str,
@@ -939,6 +971,7 @@ class AgentEngine:
         *,
         completion_config: CompletionConfig | None = None,
         effective_autonomy: EffectiveAutonomy | None = None,
+        provider: CompletionProvider | None = None,
     ) -> ExecutionResult:
         """Run the execution loop on a reconstituted checkpoint context."""
         budget_checker: BudgetChecker | None
@@ -964,7 +997,7 @@ class AgentEngine:
         loop = self._make_loop_with_callback(base_loop, agent_id, task_id)
         return await loop.execute(
             context=checkpoint_ctx,
-            provider=self._provider,
+            provider=provider or self._provider,
             tool_invoker=self._make_tool_invoker(
                 checkpoint_ctx.identity,
                 task_id=task_id,
@@ -1198,6 +1231,76 @@ class AgentEngine:
                 total_tokens=metrics.tokens_per_task,
             )
 
+    def _apply_degradation(
+        self,
+        preflight: PreFlightResult,
+        identity: AgentIdentity,
+        provider: CompletionProvider,
+    ) -> tuple[CompletionProvider, AgentIdentity]:
+        """Apply degradation result: swap provider if FALLBACK selected.
+
+        Note:
+            FALLBACK assumes the fallback provider supports the same
+            ``model_id`` as the original.  If fallback providers serve
+            different models, a model mapping in ``DegradationConfig``
+            or ``ModelResolver`` integration is needed.
+        """
+        effective = preflight.effective_provider
+        if effective is None or effective == identity.model.provider:
+            return provider, identity
+
+        # FALLBACK: need a different provider driver
+        original = identity.model.provider
+        if self._provider_registry is None:
+            logger.warning(
+                DEGRADATION_PROVIDER_SWAPPED,
+                original_provider=original,
+                fallback_provider=effective,
+                error="no provider_registry available",
+                result="failed",
+            )
+            msg = (
+                f"FALLBACK selected provider {effective!r} "
+                f"but no provider_registry available"
+            )
+            raise QuotaExhaustedError(
+                msg,
+                provider_name=original,
+                degradation_action=DegradationAction.FALLBACK,
+            )
+
+        try:
+            new_provider = self._provider_registry.get(effective)
+        except DriverNotRegisteredError as exc:
+            logger.warning(
+                DEGRADATION_PROVIDER_SWAPPED,
+                original_provider=original,
+                fallback_provider=effective,
+                error=str(exc),
+                result="failed",
+            )
+            msg = f"Fallback provider {effective!r} not found in registry"
+            raise QuotaExhaustedError(
+                msg,
+                provider_name=original,
+                degradation_action=DegradationAction.FALLBACK,
+            ) from exc
+
+        logger.info(
+            DEGRADATION_PROVIDER_SWAPPED,
+            original_provider=identity.model.provider,
+            fallback_provider=effective,
+            result="success",
+        )
+        new_identity = identity.model_copy(
+            update={
+                "model": identity.model.model_copy(
+                    update={"provider": effective},
+                ),
+            },
+        )
+        return new_provider, new_identity
+
     def _handle_budget_error(  # noqa: PLR0913
         self,
         *,
@@ -1269,6 +1372,7 @@ class AgentEngine:
         system_prompt: SystemPrompt | None = None,
         completion_config: CompletionConfig | None = None,
         effective_autonomy: EffectiveAutonomy | None = None,
+        provider: CompletionProvider | None = None,
     ) -> AgentRunResult:
         """Build an error ``AgentRunResult`` when the execution pipeline fails.
 
@@ -1301,6 +1405,7 @@ class AgentEngine:
                 ctx,
                 completion_config=completion_config,
                 effective_autonomy=effective_autonomy,
+                provider=provider,
             )
             # Sync fatal-error recovery status to TaskEngine (best-effort).
             error_ctx = error_execution.context
@@ -1368,6 +1473,7 @@ class AgentEngine:
         *,
         completion_config: CompletionConfig | None = None,
         effective_autonomy: EffectiveAutonomy | None = None,
+        provider: CompletionProvider | None = None,
     ) -> ExecutionResult:
         """Create an error ``ExecutionResult`` and apply recovery."""
         error_ctx = ctx or AgentContext.from_identity(identity, task=task)
@@ -1383,4 +1489,5 @@ class AgentEngine:
             task_id,
             completion_config=completion_config,
             effective_autonomy=effective_autonomy,
+            provider=provider,
         )
