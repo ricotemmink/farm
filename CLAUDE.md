@@ -238,6 +238,7 @@ site/               # Astro landing page (synthorg.io)
 - **Pre-push hooks**: mypy type-check + pytest unit tests + golangci-lint + go vet + go test (CLI, conditional on `cli/**/*.go`) (fast gate before push, skipped in pre-commit.ci — dedicated CI jobs already run these)
 - **Pre-commit.ci**: autoupdate disabled (`autoupdate_schedule: never`) — Dependabot owns hook version bumps via `pre-commit` ecosystem
 - **GitHub issue queries**: use `gh issue list` via Bash (not MCP tools) — MCP `list_issues` has unreliable field data
+- **Merge strategy**: squash merge -- PR body becomes the squash commit message on main. Trailers (e.g. `Release-As`, `Closes #N`) must be in the PR body to land in the final commit.
 - **PR issue references**: preserve existing `Closes #NNN` references — never remove unless explicitly asked
 
 ## Post-Implementation (MANDATORY)
@@ -253,6 +254,30 @@ site/               # Astro landing page (synthorg.io)
 - After the PR exists, use `/aurelio-review-pr` to handle external reviewer feedback
 - The `/commit-push-pr` command is effectively blocked (it calls `gh pr create` internally)
 - **Fix everything valid — never skip**: When review agents find valid issues (including pre-existing issues in surrounding code, suggestions, and findings adjacent to the PR's changes), fix them all. No deferring, no "out of scope" skipping.
+
+## Releasing
+
+- **Automated by Release Please**: every push to `main` triggers the release workflow, which creates/updates a release PR with an auto-generated changelog
+- **Version bumping** (pre-1.0, due to `bump-minor-pre-major` + `bump-patch-for-minor-pre-major`): `fix:` = patch, `feat:` = patch, `feat!:` or `BREAKING CHANGE` footer = minor. Post-1.0: standard semver (fix=patch, feat=minor, breaking=major)
+- **Merge strategy**: squash merge -- all PRs are squash-merged, so the **PR body becomes the squash commit message** on main. This is what Release Please parses.
+- **Override version with `Release-As` trailer**: to force a specific version (e.g. 0.4.0), add `Release-As: 0.4.0` as a **git trailer** at the very end of the **PR body** (which becomes the squash commit message). It MUST be in the **final paragraph** -- a standalone line after all other content, separated by a blank line. Placing it mid-body will be **silently ignored** by the Conventional Commits parser.
+
+  Correct PR body format:
+  ```
+  ## Summary
+  - Description of changes...
+
+  ## Test plan
+  - [x] Tests pass
+
+  Release-As: 0.4.0
+  ```
+
+- **Release flow**: merge release PR -> draft GitHub Release + tag created -> tag triggers Docker + CLI workflows (build, sign, attach assets) -> finalize-release workflow publishes the draft once both complete
+- **Config files**: `.github/release-please-config.json` (settings, changelog sections, extra-files), `.github/.release-please-manifest.json` (current version -- do not edit manually)
+- **Fixing wrong version on open release PR**: add `Release-As: X.Y.Z` as a trailer at the end of any PR body that will be squash-merged to main -- RP will regenerate the release PR with the correct version on its next run
+- **Changelog**: `.github/CHANGELOG.md` (auto-generated, do not edit manually)
+- **Version locations updated by RP**: `pyproject.toml` (`[tool.commitizen].version`), `src/synthorg/__init__.py` (`__version__`)
 
 ## CI
 
