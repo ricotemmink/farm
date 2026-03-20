@@ -9,6 +9,8 @@ from synthorg.engine.context import AgentContext
 from synthorg.providers.enums import MessageRole
 from synthorg.providers.models import ChatMessage
 
+pytestmark = pytest.mark.timeout(30)
+
 
 def _msg(role: MessageRole, content: str) -> ChatMessage:
     """Create a chat message."""
@@ -230,3 +232,104 @@ class TestMakeCompactionCallback:
         assert result2 is not None
         assert result2.compression_metadata is not None
         assert result2.compression_metadata.compactions_performed == 2
+
+
+@pytest.mark.unit
+class TestCompactionSanitization:
+    """Assistant content snippets are sanitized in compaction summaries."""
+
+    @pytest.mark.parametrize(
+        ("user_prompt", "assistant_text", "forbidden_substr", "expected_token"),
+        [
+            pytest.param(
+                "read the config",
+                r"I read C:\Users\dev\project\secrets.yaml and found credentials",
+                "C:\\Users",
+                "[REDACTED_PATH]",
+                id="path",
+            ),
+            pytest.param(
+                "call the API",
+                "Called https://api.internal.io/v1/secret?key=abc123 successfully",
+                "https://",
+                "[REDACTED_URL]",
+                id="url",
+            ),
+        ],
+    )
+    async def test_assistant_snippet_sanitized(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+        user_prompt: str,
+        assistant_text: str,
+        forbidden_substr: str,
+        expected_token: str,
+    ) -> None:
+        config = CompactionConfig(
+            fill_threshold_percent=80.0,
+            min_messages_to_compact=4,
+            preserve_recent_turns=1,
+        )
+        callback = make_compaction_callback(config=config)
+
+        messages = (
+            _msg(MessageRole.SYSTEM, "system prompt"),
+            _msg(MessageRole.USER, user_prompt),
+            _msg(MessageRole.ASSISTANT, assistant_text),
+            _msg(MessageRole.USER, "what next"),
+            _msg(MessageRole.ASSISTANT, "processing data now"),
+            _msg(MessageRole.USER, "continue"),
+            _msg(MessageRole.ASSISTANT, "done with the task"),
+            _msg(MessageRole.USER, "thanks"),
+        )
+        ctx = _build_context(
+            sample_agent_with_personality,
+            messages=messages,
+            capacity=1000,
+            fill=850,
+        )
+        result = await callback(ctx)
+        assert result is not None
+        summary_msg = result.conversation[1]
+        assert summary_msg.content is not None
+        assert forbidden_substr not in summary_msg.content
+        assert expected_token in summary_msg.content
+
+    async def test_assistant_long_path_crossing_boundary_is_sanitized(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+    ) -> None:
+        """A path crossing the 100-char snippet boundary is still redacted."""
+        config = CompactionConfig(
+            fill_threshold_percent=80.0,
+            min_messages_to_compact=4,
+            preserve_recent_turns=1,
+        )
+        callback = make_compaction_callback(config=config)
+
+        long_path = "C:\\Users\\dev\\" + ("nested\\" * 20) + "secrets.yaml"
+        messages = (
+            _msg(MessageRole.SYSTEM, "system prompt"),
+            _msg(MessageRole.USER, "analyze logs"),
+            _msg(
+                MessageRole.ASSISTANT,
+                f"I inspected {long_path} and extracted values",
+            ),
+            _msg(MessageRole.USER, "continue"),
+            _msg(MessageRole.ASSISTANT, "working"),
+            _msg(MessageRole.USER, "continue"),
+            _msg(MessageRole.ASSISTANT, "done"),
+            _msg(MessageRole.USER, "thanks"),
+        )
+        ctx = _build_context(
+            sample_agent_with_personality,
+            messages=messages,
+            capacity=1000,
+            fill=850,
+        )
+        result = await callback(ctx)
+        assert result is not None
+        summary_msg = result.conversation[1]
+        assert summary_msg.content is not None
+        assert "C:\\Users\\dev" not in summary_msg.content
+        assert "[REDACTED_PATH]" in summary_msg.content

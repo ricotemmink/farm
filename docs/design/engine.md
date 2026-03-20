@@ -215,8 +215,12 @@ Agent / API  ──submit()──▶  asyncio.Queue  ──▶  _processing_loop
 - **Typed errors**: `TaskNotFoundError` and `TaskVersionConflictError` provide
   precise failure classification — API controllers catch these directly instead
   of parsing error strings.
-- **Error sanitization**: Internal exception details (SQL paths, stack traces)
-  are replaced with a generic message before reaching callers.
+- **Error sanitization**: Internal exception details (file paths, URLs) are
+  redacted via a shared ``sanitize_message()`` helper
+  (``engine/sanitization.py``) before reaching callers or LLM context.
+  Long messages are truncated, which also limits stack trace exposure.
+  Applied in ``_handle_fatal_error``, checkpoint reconciliation, and
+  compaction summaries.
 - **Queue full**: `TaskEngineQueueFullError` signals backpressure when the
   queue is at capacity.
 
@@ -675,8 +679,10 @@ message when `context_fill_percent` exceeds a configurable threshold (default
 | `min_messages_to_compact` | `4` | Minimum messages before compaction is allowed |
 | `preserve_recent_turns` | `3` | Recent turn pairs to keep uncompressed |
 
-Compaction errors are logged but never propagated — compaction is advisory,
-not critical.
+Assistant message snippets included in the summary are sanitized via
+``sanitize_message()`` to redact file paths and URLs before injection into LLM
+context. Compaction errors are logged but never propagated — compaction is
+advisory, not critical.
 
 ### Compressed Checkpoint Recovery
 
@@ -684,6 +690,9 @@ not critical.
 checkpoint JSON. On resume, `deserialize_and_reconcile()` detects compressed
 checkpoints and includes compression-aware information in the reconciliation
 message:
+
+The ``error_message`` is sanitized via ``sanitize_message()`` before inclusion to
+prevent file paths and URLs from leaking into LLM context.
 
 ```text
 Execution resumed from checkpoint at turn 8. Note: conversation was
