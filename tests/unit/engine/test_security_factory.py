@@ -14,7 +14,9 @@ pytestmark = [pytest.mark.unit, pytest.mark.timeout(30)]
 
 
 def _make_audit_log() -> MagicMock:
-    return MagicMock()
+    from synthorg.security.audit import AuditLog
+
+    return MagicMock(spec=AuditLog)
 
 
 def _make_security_config(*, enabled: bool = True) -> MagicMock:
@@ -92,6 +94,181 @@ class TestMakeSecurityInterceptor:
         )
         result = make_security_interceptor(cfg, _make_audit_log())
         assert result is not None
+
+
+class TestCustomPolicyWiring:
+    """Custom policies are wired into the rule engine pipeline."""
+
+    def test_custom_policies_included_in_rules(self) -> None:
+        from synthorg.security.config import (
+            RuleEngineConfig,
+            SecurityConfig,
+            SecurityPolicyRule,
+        )
+        from synthorg.security.rules.custom_policy_rule import (
+            CustomPolicyRule,
+        )
+
+        policy = SecurityPolicyRule(
+            name="block-deploy",
+            action_types=("deploy:staging",),
+        )
+        cfg = SecurityConfig(
+            enabled=True,
+            rule_engine=RuleEngineConfig(),
+            custom_policies=(policy,),
+        )
+        svc = make_security_interceptor(cfg, _make_audit_log())
+
+        assert svc is not None
+        engine = svc._rule_engine  # type: ignore[attr-defined]
+        custom_rules = [r for r in engine._rules if isinstance(r, CustomPolicyRule)]
+        assert len(custom_rules) == 1
+        assert custom_rules[0].name == "custom_policy:block-deploy"
+
+    def test_disabled_custom_policies_excluded(self) -> None:
+        from synthorg.security.config import (
+            RuleEngineConfig,
+            SecurityConfig,
+            SecurityPolicyRule,
+        )
+        from synthorg.security.rules.custom_policy_rule import (
+            CustomPolicyRule,
+        )
+
+        policy = SecurityPolicyRule(
+            name="disabled-rule",
+            action_types=("code:write",),
+            enabled=False,
+        )
+        cfg = SecurityConfig(
+            enabled=True,
+            rule_engine=RuleEngineConfig(),
+            custom_policies=(policy,),
+        )
+        svc = make_security_interceptor(cfg, _make_audit_log())
+
+        assert svc is not None
+        engine = svc._rule_engine  # type: ignore[attr-defined]
+        custom_rules = [r for r in engine._rules if isinstance(r, CustomPolicyRule)]
+        assert len(custom_rules) == 0
+
+    def test_custom_policies_after_detectors_by_default(self) -> None:
+        from synthorg.security.config import (
+            RuleEngineConfig,
+            SecurityConfig,
+            SecurityPolicyRule,
+        )
+        from synthorg.security.rules.credential_detector import (
+            CredentialDetector,
+        )
+        from synthorg.security.rules.custom_policy_rule import (
+            CustomPolicyRule,
+        )
+
+        policy = SecurityPolicyRule(
+            name="my-rule",
+            action_types=("code:write",),
+        )
+        cfg = SecurityConfig(
+            enabled=True,
+            rule_engine=RuleEngineConfig(
+                credential_patterns_enabled=True,
+            ),
+            custom_policies=(policy,),
+        )
+        svc = make_security_interceptor(cfg, _make_audit_log())
+
+        assert svc is not None
+        engine = svc._rule_engine  # type: ignore[attr-defined]
+        rules = engine._rules
+
+        # Find positions
+        detector_idx = next(
+            i for i, r in enumerate(rules) if isinstance(r, CredentialDetector)
+        )
+        custom_idx = next(
+            i for i, r in enumerate(rules) if isinstance(r, CustomPolicyRule)
+        )
+        assert custom_idx > detector_idx
+
+    def test_custom_policies_before_detectors_when_bypass(self) -> None:
+        from synthorg.security.config import (
+            RuleEngineConfig,
+            SecurityConfig,
+            SecurityPolicyRule,
+        )
+        from synthorg.security.rules.credential_detector import (
+            CredentialDetector,
+        )
+        from synthorg.security.rules.custom_policy_rule import (
+            CustomPolicyRule,
+        )
+
+        policy = SecurityPolicyRule(
+            name="early-rule",
+            action_types=("code:write",),
+        )
+        cfg = SecurityConfig(
+            enabled=True,
+            rule_engine=RuleEngineConfig(
+                credential_patterns_enabled=True,
+                custom_allow_bypasses_detectors=True,
+            ),
+            custom_policies=(policy,),
+        )
+        svc = make_security_interceptor(cfg, _make_audit_log())
+
+        assert svc is not None
+        engine = svc._rule_engine  # type: ignore[attr-defined]
+        rules = engine._rules
+
+        detector_idx = next(
+            i for i, r in enumerate(rules) if isinstance(r, CredentialDetector)
+        )
+        custom_idx = next(
+            i for i, r in enumerate(rules) if isinstance(r, CustomPolicyRule)
+        )
+        assert custom_idx < detector_idx
+
+    def test_mixed_enabled_disabled_custom_policies(self) -> None:
+        from synthorg.security.config import (
+            RuleEngineConfig,
+            SecurityConfig,
+            SecurityPolicyRule,
+        )
+        from synthorg.security.rules.custom_policy_rule import (
+            CustomPolicyRule,
+        )
+
+        policies = (
+            SecurityPolicyRule(
+                name="enabled-1",
+                action_types=("code:write",),
+            ),
+            SecurityPolicyRule(
+                name="disabled-1",
+                action_types=("code:read",),
+                enabled=False,
+            ),
+            SecurityPolicyRule(
+                name="enabled-2",
+                action_types=("vcs:push",),
+            ),
+        )
+        cfg = SecurityConfig(
+            enabled=True,
+            rule_engine=RuleEngineConfig(),
+            custom_policies=policies,
+        )
+        svc = make_security_interceptor(cfg, _make_audit_log())
+
+        assert svc is not None
+        engine = svc._rule_engine  # type: ignore[attr-defined]
+        custom_rules = [r for r in engine._rules if isinstance(r, CustomPolicyRule)]
+        assert len(custom_rules) == 2
+        names = {r.name for r in custom_rules}
+        assert names == {"custom_policy:enabled-1", "custom_policy:enabled-2"}
 
 
 class TestRegistryWithApprovalTool:

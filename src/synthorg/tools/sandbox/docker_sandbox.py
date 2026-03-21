@@ -29,9 +29,18 @@ from synthorg.observability.events.docker import (
     DOCKER_EXECUTE_TIMEOUT,
     DOCKER_HEALTH_CHECK,
 )
+from synthorg.observability.events.sandbox import SANDBOX_NETWORK_ENFORCEMENT
 from synthorg.tools.sandbox.docker_config import DockerSandboxConfig
 from synthorg.tools.sandbox.errors import SandboxError, SandboxStartError
 from synthorg.tools.sandbox.result import SandboxResult
+
+_RESERVED_ENV_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "SANDBOX_ALLOWED_HOSTS",
+        "SANDBOX_DNS_ALLOWED",
+        "SANDBOX_LOOPBACK_ALLOWED",
+    }
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -202,17 +211,55 @@ class DockerSandbox:
         Returns:
             A dict suitable for ``aiodocker`` container creation.
         """
+        env_list = self._validate_env(env_overrides)
+        host_config = self._build_host_config()
+        container_config: dict[str, Any] = {
+            "Image": self._config.image,
+            "Cmd": [command, *args],
+            "WorkingDir": container_cwd,
+            "Env": env_list,
+            "HostConfig": host_config,
+            "AttachStdout": True,
+            "AttachStderr": True,
+        }
+        self._apply_network_enforcement(
+            container_config,
+            host_config,
+            env_list,
+        )
+        return container_config
+
+    def _validate_env(
+        self,
+        env_overrides: Mapping[str, str] | None,
+    ) -> list[str]:
+        """Validate env_overrides and return the env list."""
+        if env_overrides:
+            conflicting = sorted(
+                set(env_overrides) & _RESERVED_ENV_KEYS,
+            )
+            if conflicting:
+                msg = (
+                    "env_overrides cannot set reserved sandbox "
+                    f"control variables: {conflicting}"
+                )
+                logger.warning(
+                    DOCKER_EXECUTE_FAILED,
+                    error=msg,
+                    conflicting_keys=conflicting,
+                )
+                raise SandboxError(msg)
+        return [f"{k}={v}" for k, v in (env_overrides or {}).items()]
+
+    def _build_host_config(self) -> dict[str, Any]:
+        """Build the Docker host config dict."""
         bind_path = _to_posix_bind_path(self._workspace)
         mount_mode = self._config.mount_mode
         bind_str = f"{bind_path}:{_CONTAINER_WORKSPACE}:{mount_mode}"
-
-        env_list = [f"{k}={v}" for k, v in (env_overrides or {}).items()]
-
         memory_bytes = self._parse_memory_limit(
             self._config.memory_limit,
         )
         nano_cpus = int(self._config.cpu_limit * _NANO_CPUS_MULTIPLIER)
-
         host_config: dict[str, Any] = {
             "Binds": [bind_str],
             "Tmpfs": {"/tmp": "size=64m,noexec,nosuid"},  # noqa: S108
@@ -226,18 +273,46 @@ class DockerSandbox:
         }
         if self._config.runtime is not None:
             host_config["Runtime"] = self._config.runtime
-        # TODO(#50): allowed_hosts is not yet enforced at runtime;
-        # needs iptables/nftables rules or Docker network plugin.
+        return host_config
 
-        return {
-            "Image": self._config.image,
-            "Cmd": [command, *args],
-            "WorkingDir": container_cwd,
-            "Env": env_list,
-            "HostConfig": host_config,
-            "AttachStdout": True,
-            "AttachStderr": True,
-        }
+    def _apply_network_enforcement(
+        self,
+        container_config: dict[str, Any],
+        host_config: dict[str, Any],
+        env_list: list[str],
+    ) -> None:
+        """Apply allowed_hosts iptables enforcement if configured.
+
+        Modifies *container_config*, *host_config*, and *env_list*
+        in place when ``allowed_hosts`` is non-empty and network is
+        not ``"none"``.  When active, adds the ``NET_ADMIN``
+        capability, sets the container user to ``root``, and
+        replaces the entrypoint with ``sandbox-init`` (which applies
+        iptables rules then drops privileges via ``setpriv``).
+        """
+        if not self._config.allowed_hosts:
+            return
+        if self._config.network == "none":
+            return
+
+        hosts_csv = ",".join(self._config.allowed_hosts)
+        env_list.append(f"SANDBOX_ALLOWED_HOSTS={hosts_csv}")
+        dns_flag = "1" if self._config.dns_allowed else "0"
+        lo_flag = "1" if self._config.loopback_allowed else "0"
+        env_list.append(f"SANDBOX_DNS_ALLOWED={dns_flag}")
+        env_list.append(f"SANDBOX_LOOPBACK_ALLOWED={lo_flag}")
+        host_config["CapAdd"] = ["NET_ADMIN"]
+        # iptables needs /run/xtables.lock which requires a writable /run.
+        # ReadonlyRootfs is True, so mount a tmpfs on /run.
+        host_config["Tmpfs"]["/run"] = "size=1m,nosuid,noexec"
+        container_config["User"] = "root"
+        container_config["Entrypoint"] = ["/usr/local/bin/sandbox-init"]
+        logger.debug(
+            SANDBOX_NETWORK_ENFORCEMENT,
+            allowed_hosts=hosts_csv,
+            dns_allowed=self._config.dns_allowed,
+            loopback_allowed=self._config.loopback_allowed,
+        )
 
     @staticmethod
     def _parse_memory_limit(limit: str) -> int:

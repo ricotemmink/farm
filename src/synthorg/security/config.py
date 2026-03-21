@@ -138,12 +138,24 @@ class SecurityPolicyRule(BaseModel):
 
     @model_validator(mode="after")
     def _check_action_type_format(self) -> SecurityPolicyRule:
-        """Validate that action_types entries use ``category:action`` format."""
+        """Validate that action_types entries use ``category:action`` format.
+
+        Requires exactly one colon with non-empty, non-whitespace
+        segments on each side.
+        """
         for at in self.action_types:
-            if ":" not in at:
+            parts = at.split(":")
+            if len(parts) != 2:  # noqa: PLR2004
                 msg = (
-                    f"action_type {at!r} in policy {self.name!r} must use "
-                    "'category:action' format"
+                    f"action_type {at!r} in policy {self.name!r} must "
+                    "contain exactly one ':' (category:action)"
+                )
+                raise ValueError(msg)
+            category, action = parts
+            if not category.strip() or not action.strip():
+                msg = (
+                    f"action_type {at!r} in policy {self.name!r} has "
+                    "empty or whitespace-only category or action segment"
                 )
                 raise ValueError(msg)
         return self
@@ -158,6 +170,11 @@ class RuleEngineConfig(BaseModel):
         destructive_op_detection_enabled: Detect destructive operations.
         path_traversal_detection_enabled: Detect path traversal attacks.
         max_argument_length: Maximum argument string length for scanning.
+        custom_allow_bypasses_detectors: When ``True``, custom ALLOW
+            policies are placed before detectors, allowing them to
+            short-circuit security scanning.  When ``False`` (default),
+            custom policies are placed after all detectors so security
+            scanning always runs first.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -167,6 +184,7 @@ class RuleEngineConfig(BaseModel):
     destructive_op_detection_enabled: bool = True
     path_traversal_detection_enabled: bool = True
     max_argument_length: int = Field(default=100_000, gt=0)
+    custom_allow_bypasses_detectors: bool = False
 
 
 class SecurityConfig(BaseModel):
@@ -218,6 +236,48 @@ class SecurityConfig(BaseModel):
             msg = (
                 f"hard_deny_action_types and auto_approve_action_types "
                 f"must not overlap: {sorted(overlap)}"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _check_unique_custom_policy_names(self) -> SecurityConfig:
+        """Reject duplicate custom policy names."""
+        seen: set[str] = set()
+        for policy in self.custom_policies:
+            if policy.name in seen:
+                msg = f"duplicate custom policy name {policy.name!r}"
+                raise ValueError(msg)
+            seen.add(policy.name)
+        return self
+
+    @model_validator(mode="after")
+    def _check_no_allow_or_escalate_bypass(self) -> SecurityConfig:
+        """Reject ALLOW/ESCALATE policies when bypass mode is enabled.
+
+        With ``custom_allow_bypasses_detectors=True``, custom policies
+        are placed before detectors.  Both ALLOW and ESCALATE verdicts
+        short-circuit the rule engine, so either would skip all
+        security detectors (credential, path traversal, etc.).  Only
+        DENY policies are safe in bypass position.
+        """
+        if not self.rule_engine.custom_allow_bypasses_detectors:
+            return self
+        unsafe_verdicts = {
+            SecurityVerdictType.ALLOW,
+            SecurityVerdictType.ESCALATE,
+        }
+        unsafe_policies = [
+            p.name
+            for p in self.custom_policies
+            if p.enabled and p.verdict in unsafe_verdicts
+        ]
+        if unsafe_policies:
+            msg = (
+                "custom_allow_bypasses_detectors=True cannot be used "
+                "with ALLOW or ESCALATE custom policies (would skip "
+                "all security detectors): "
+                f"{sorted(unsafe_policies)}"
             )
             raise ValueError(msg)
         return self
