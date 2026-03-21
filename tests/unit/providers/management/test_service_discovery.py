@@ -4,14 +4,21 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from synthorg.api.config import ServerConfig
 from synthorg.api.dto import CreateFromPresetRequest, UpdateProviderRequest
 from synthorg.config.schema import ProviderModelConfig
+from synthorg.providers.enums import AuthType
 from synthorg.providers.errors import ProviderNotFoundError
 from synthorg.providers.management.service import ProviderManagementService
+from synthorg.providers.presets import ProviderPreset
+from synthorg.providers.url_utils import redact_url
 
 from .conftest import make_create_request
 
 pytestmark = pytest.mark.timeout(30)
+
+# Derived from the default ServerConfig so tests track port changes automatically.
+_BACKEND_PORT = ServerConfig().port
 
 
 @pytest.mark.unit
@@ -317,3 +324,168 @@ class TestApplyDiscoveredModelsTOCTOU:
         assert provider.models == (
             ProviderModelConfig(id="test-model-001", alias="medium"),
         )
+
+
+@pytest.mark.unit
+class TestSelfConnectionGuard:
+    """Tests for the self-connection guard in trust resolution.
+
+    The guard rejects URLs that point at the backend itself, even
+    when the URL matches a preset's candidate_urls.  The port is
+    derived from ``_BACKEND_PORT`` (the ``ServerConfig`` default)
+    so tests track port changes automatically.
+    """
+
+    @pytest.mark.parametrize(
+        ("base_url", "expected_trust"),
+        [
+            pytest.param(
+                f"http://localhost:{_BACKEND_PORT}/v1",
+                False,
+                id="localhost-backend-port-rejected",
+            ),
+            pytest.param(
+                f"http://127.0.0.1:{_BACKEND_PORT}/v1",
+                False,
+                id="loopback-backend-port-rejected",
+            ),
+            pytest.param(
+                f"http://host.docker.internal:{_BACKEND_PORT}/v1",
+                False,
+                id="docker-internal-backend-port-rejected",
+            ),
+            pytest.param(
+                f"http://172.17.0.1:{_BACKEND_PORT}/v1",
+                False,
+                id="docker-bridge-backend-port-rejected",
+            ),
+            pytest.param(
+                f"http://example-provider.example.com:{_BACKEND_PORT}/v1",
+                True,
+                id="remote-host-same-port-allowed",
+            ),
+        ],
+    )
+    async def test_self_connection_detection(
+        self,
+        service: ProviderManagementService,
+        base_url: str,
+        *,
+        expected_trust: bool,
+    ) -> None:
+        """URLs pointing at the backend itself are never trusted."""
+        fake_preset = ProviderPreset(
+            name="test-local",
+            display_name="Test Local",
+            description="Fake preset for self-connection guard tests",
+            driver="litellm",
+            auth_type=AuthType.NONE,
+            candidate_urls=(base_url,),
+        )
+        await service.create_provider(
+            make_create_request(base_url=base_url),
+        )
+
+        with (
+            patch(
+                "synthorg.providers.management.service.get_preset",
+                return_value=fake_preset,
+            ),
+            patch(
+                "synthorg.providers.management.service.discover_models",
+                new_callable=AsyncMock,
+                return_value=(),
+            ) as mock_discover,
+        ):
+            await service.discover_models_for_provider(
+                "test-provider",
+                preset_hint="test-local",
+            )
+
+        mock_discover.assert_awaited_once()
+        call_kwargs = mock_discover.call_args
+        assert call_kwargs.kwargs["trust_url"] is expected_trust
+
+    async def test_self_connection_via_default_base_url(
+        self,
+        service: ProviderManagementService,
+    ) -> None:
+        """Self-connection guard fires even when URL matches via default_base_url."""
+        self_url = f"http://localhost:{_BACKEND_PORT}/v1"
+        fake_preset = ProviderPreset(
+            name="test-local",
+            display_name="Test Local",
+            description="Fake preset with self-URL as default_base_url",
+            driver="litellm",
+            auth_type=AuthType.NONE,
+            default_base_url=self_url,
+        )
+        await service.create_provider(
+            make_create_request(base_url=self_url),
+        )
+
+        with (
+            patch(
+                "synthorg.providers.management.service.get_preset",
+                return_value=fake_preset,
+            ),
+            patch(
+                "synthorg.providers.management.service.discover_models",
+                new_callable=AsyncMock,
+                return_value=(),
+            ) as mock_discover,
+        ):
+            await service.discover_models_for_provider(
+                "test-provider",
+                preset_hint="test-local",
+            )
+
+        mock_discover.assert_awaited_once()
+        assert mock_discover.call_args.kwargs["trust_url"] is False
+
+    async def test_self_connection_logs_warning(
+        self,
+        service: ProviderManagementService,
+    ) -> None:
+        """Self-connection guard emits a warning log on rejection."""
+        self_url = f"http://localhost:{_BACKEND_PORT}/v1"
+        fake_preset = ProviderPreset(
+            name="test-local",
+            display_name="Test Local",
+            description="Fake preset for log assertion",
+            driver="litellm",
+            auth_type=AuthType.NONE,
+            candidate_urls=(self_url,),
+        )
+        await service.create_provider(
+            make_create_request(base_url=self_url),
+        )
+
+        with (
+            patch(
+                "synthorg.providers.management.service.get_preset",
+                return_value=fake_preset,
+            ),
+            patch(
+                "synthorg.providers.management.service.discover_models",
+                new_callable=AsyncMock,
+                return_value=(),
+            ),
+            patch(
+                "synthorg.providers.management.service.logger",
+            ) as mock_logger,
+        ):
+            await service.discover_models_for_provider(
+                "test-provider",
+                preset_hint="test-local",
+            )
+
+        mock_logger.warning.assert_called_once()
+        call_args = mock_logger.warning.call_args
+        from synthorg.observability.events.provider import (
+            PROVIDER_DISCOVERY_SELF_CONNECTION_BLOCKED,
+        )
+
+        assert call_args.args[0] == PROVIDER_DISCOVERY_SELF_CONNECTION_BLOCKED
+        assert call_args.kwargs["url"] == redact_url(self_url)
+        assert call_args.kwargs["backend_port"] == _BACKEND_PORT
