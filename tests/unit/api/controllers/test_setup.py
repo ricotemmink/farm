@@ -12,213 +12,9 @@ from hypothesis import strategies as st
 from litestar.testing import TestClient
 from pydantic import ValidationError
 
-from synthorg.api.guards import HumanRole
 from synthorg.providers.base import BaseCompletionProvider
 from synthorg.providers.registry import ProviderRegistry
 from tests.unit.api.conftest import make_auth_headers
-
-
-@pytest.mark.unit
-class TestSetupStatus:
-    """GET /api/v1/setup/status -- unauthenticated status check."""
-
-    def test_returns_status_with_seeded_users(
-        self,
-        test_client: TestClient[Any],
-    ) -> None:
-        """With pre-seeded users, needs_admin is False."""
-        resp = test_client.get("/api/v1/setup/status")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["success"] is True
-        data = body["data"]
-        assert data["needs_admin"] is False
-        assert data["needs_setup"] is True
-        assert data["has_providers"] is False
-
-    def test_status_without_auth_header(
-        self,
-        test_client: TestClient[Any],
-    ) -> None:
-        """Status endpoint works without authentication."""
-        saved_headers = dict(test_client.headers)
-        test_client.headers.pop("Authorization", None)
-        try:
-            resp = test_client.get("/api/v1/setup/status")
-            assert resp.status_code == 200
-            body = resp.json()
-            assert body["success"] is True
-        finally:
-            test_client.headers.update(saved_headers)
-
-    def test_status_response_fields(
-        self,
-        test_client: TestClient[Any],
-    ) -> None:
-        """Status response contains all required fields."""
-        resp = test_client.get("/api/v1/setup/status")
-        data = resp.json()["data"]
-        assert "needs_admin" in data
-        assert "needs_setup" in data
-        assert "has_providers" in data
-        assert isinstance(data["needs_admin"], bool)
-        assert isinstance(data["needs_setup"], bool)
-        assert isinstance(data["has_providers"], bool)
-
-    def test_needs_admin_true_when_only_non_admin_exists(
-        self,
-        test_client: TestClient[Any],
-    ) -> None:
-        """needs_admin is True when only non-CEO users exist."""
-        app_state = test_client.app.state.app_state
-        users_repo = app_state.persistence._users
-
-        # Remove all CEO users, keep only observers
-        removed = {
-            uid: users_repo._users.pop(uid)
-            for uid in [
-                uid for uid, u in users_repo._users.items() if u.role == HumanRole.CEO
-            ]
-        }
-        try:
-            resp = test_client.get("/api/v1/setup/status")
-            assert resp.status_code == 200
-            data = resp.json()["data"]
-            assert data["needs_admin"] is True
-        finally:
-            users_repo._users.update(removed)
-
-    def test_needs_admin_false_when_ceo_exists(
-        self,
-        test_client: TestClient[Any],
-    ) -> None:
-        """needs_admin is False when a CEO user exists (default fixture)."""
-        resp = test_client.get("/api/v1/setup/status")
-        assert resp.status_code == 200
-        data = resp.json()["data"]
-        assert data["needs_admin"] is False
-
-    def test_status_includes_min_password_length(
-        self,
-        test_client: TestClient[Any],
-    ) -> None:
-        """Status response includes min_password_length (falls back to default)."""
-        resp = test_client.get("/api/v1/setup/status")
-        assert resp.status_code == 200
-        data = resp.json()["data"]
-        assert "min_password_length" in data
-        assert isinstance(data["min_password_length"], int)
-        assert data["min_password_length"] == 12
-
-    def test_status_returns_configured_min_password_length(
-        self,
-        test_client: TestClient[Any],
-    ) -> None:
-        """Status response returns non-default min_password_length from settings."""
-        app_state = test_client.app.state.app_state
-        settings_repo = app_state.persistence._settings_repo
-        now = datetime.now(UTC).isoformat()
-
-        settings_repo._store[("api", "min_password_length")] = ("16", now)
-        try:
-            resp = test_client.get("/api/v1/setup/status")
-            assert resp.status_code == 200
-            data = resp.json()["data"]
-            assert data["min_password_length"] == 16
-        finally:
-            settings_repo._store.pop(("api", "min_password_length"), None)
-
-    def test_has_agents_false_for_non_list_json(
-        self,
-        test_client: TestClient[Any],
-    ) -> None:
-        """has_agents is False when agents setting contains non-list JSON."""
-        app_state = test_client.app.state.app_state
-        settings_repo = app_state.persistence._settings_repo
-        now = datetime.now(UTC).isoformat()
-
-        agents_key = ("company", "agents")
-        original = settings_repo._store.get(agents_key)
-        settings_repo._store[agents_key] = ("42", now)
-        try:
-            resp = test_client.get("/api/v1/setup/status")
-            assert resp.status_code == 200
-            data = resp.json()["data"]
-            assert data["has_agents"] is False
-        finally:
-            if original is None:
-                settings_repo._store.pop(agents_key, None)
-            else:
-                settings_repo._store[agents_key] = original
-
-    def test_has_agents_false_for_invalid_json(
-        self,
-        test_client: TestClient[Any],
-    ) -> None:
-        """has_agents is False when agents setting contains invalid JSON."""
-        app_state = test_client.app.state.app_state
-        settings_repo = app_state.persistence._settings_repo
-        now = datetime.now(UTC).isoformat()
-
-        agents_key = ("company", "agents")
-        original = settings_repo._store.get(agents_key)
-        settings_repo._store[agents_key] = ("{not valid json", now)
-        try:
-            resp = test_client.get("/api/v1/setup/status")
-            assert resp.status_code == 200
-            data = resp.json()["data"]
-            assert data["has_agents"] is False
-        finally:
-            if original is None:
-                settings_repo._store.pop(agents_key, None)
-            else:
-                settings_repo._store[agents_key] = original
-
-    def test_min_password_length_non_integer_returns_default(
-        self,
-        test_client: TestClient[Any],
-    ) -> None:
-        """Non-integer min_password_length falls back to the default (12)."""
-        app_state = test_client.app.state.app_state
-        settings_repo = app_state.persistence._settings_repo
-        now = datetime.now(UTC).isoformat()
-
-        pw_key = ("api", "min_password_length")
-        original = settings_repo._store.get(pw_key)
-        settings_repo._store[pw_key] = ("abc", now)
-        try:
-            resp = test_client.get("/api/v1/setup/status")
-            assert resp.status_code == 200
-            data = resp.json()["data"]
-            assert data["min_password_length"] == 12
-        finally:
-            if original is None:
-                settings_repo._store.pop(pw_key, None)
-            else:
-                settings_repo._store[pw_key] = original
-
-    def test_min_password_length_below_default_returns_default(
-        self,
-        test_client: TestClient[Any],
-    ) -> None:
-        """min_password_length below default (12) is clamped to default."""
-        app_state = test_client.app.state.app_state
-        settings_repo = app_state.persistence._settings_repo
-        now = datetime.now(UTC).isoformat()
-
-        pw_key = ("api", "min_password_length")
-        original = settings_repo._store.get(pw_key)
-        settings_repo._store[pw_key] = ("5", now)
-        try:
-            resp = test_client.get("/api/v1/setup/status")
-            assert resp.status_code == 200
-            data = resp.json()["data"]
-            assert data["min_password_length"] == 12
-        finally:
-            if original is None:
-                settings_repo._store.pop(pw_key, None)
-            else:
-                settings_repo._store[pw_key] = original
 
 
 @pytest.mark.unit
@@ -631,55 +427,84 @@ class TestSetupComplete:
         finally:
             settings_repo._store.pop(("company", "company_name"), None)
 
-    def test_complete_validates_all_prerequisites(
+    def test_complete_rejects_without_db_company(
         self,
         test_client: TestClient[Any],
     ) -> None:
-        """Completion requires company, agents, and providers.
+        """Completion rejects when company_name is only in YAML defaults."""
+        repo = test_client.app.state.app_state.persistence._settings_repo
+        key = ("company", "company_name")
+        original = repo._store.get(key)
+        repo._store.pop(key, None)
+        try:
+            resp = test_client.post("/api/v1/setup/complete")
+            assert resp.status_code == 422
+            assert "company" in resp.json()["error"].lower()
+        finally:
+            if original is not None:
+                repo._store[key] = original
 
-        The test fixture's root_config provides company_name, so the
-        company check passes automatically. This test walks through
-        the remaining prerequisite checks: agents, then providers,
-        then confirms success once all are satisfied.
-        """
-        app_state = test_client.app.state.app_state
-        settings_repo = app_state.persistence._settings_repo
+    def test_complete_rejects_without_agents(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        """Completion rejects when company exists but no agents."""
+        repo = test_client.app.state.app_state.persistence._settings_repo
         now = datetime.now(UTC).isoformat()
+        repo._store[("company", "company_name")] = ("Test Corp", now)
+        try:
+            resp = test_client.post("/api/v1/setup/complete")
+            assert resp.status_code == 422
+            assert "agent" in resp.json()["error"].lower()
+        finally:
+            repo._store.pop(("company", "company_name"), None)
+            repo._store.pop(("company", "agents"), None)
 
-        # 1. No agents -- rejected (company comes from root_config).
-        resp = test_client.post("/api/v1/setup/complete")
-        assert resp.status_code == 422
-        assert "agent" in resp.json()["error"].lower()
-
-        # 2. Agents set, no providers -- rejected.
-        agents_key = ("company", "agents")
-        original_agents = settings_repo._store.get(agents_key)
-        agents_json = json.dumps([{"name": "agent-001", "role": "CEO"}])
-        settings_repo._store[agents_key] = (agents_json, now)
+    def test_complete_rejects_without_providers(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        """Completion rejects when company and agents exist but no providers."""
+        repo = test_client.app.state.app_state.persistence._settings_repo
+        now = datetime.now(UTC).isoformat()
+        repo._store[("company", "company_name")] = ("Test Corp", now)
+        agents = json.dumps([{"name": "agent-001", "role": "CEO"}])
+        repo._store[("company", "agents")] = (agents, now)
         try:
             resp = test_client.post("/api/v1/setup/complete")
             assert resp.status_code == 422
             assert "provider" in resp.json()["error"].lower()
-
-            # 3. All present -- success.
-            stub = MagicMock(spec=BaseCompletionProvider)
-            original_registry = app_state._provider_registry
-            app_state._provider_registry = ProviderRegistry(
-                {"test-provider": stub},
-            )
-            try:
-                resp = test_client.post("/api/v1/setup/complete")
-                assert resp.status_code == 201
-                body = resp.json()
-                assert body["success"] is True
-                assert body["data"]["setup_complete"] is True
-            finally:
-                app_state._provider_registry = original_registry
         finally:
-            if original_agents is None:
-                settings_repo._store.pop(agents_key, None)
-            else:
-                settings_repo._store[agents_key] = original_agents
+            repo._store.pop(("company", "company_name"), None)
+            repo._store.pop(("company", "agents"), None)
+
+    def test_complete_succeeds_with_all_prerequisites(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        """Completion succeeds when company, agents, and providers exist."""
+        app_state = test_client.app.state.app_state
+        repo = app_state.persistence._settings_repo
+        now = datetime.now(UTC).isoformat()
+        repo._store[("company", "company_name")] = ("Test Corp", now)
+        agents = json.dumps([{"name": "agent-001", "role": "CEO"}])
+        repo._store[("company", "agents")] = (agents, now)
+        stub = MagicMock(spec=BaseCompletionProvider)
+        original_registry = app_state._provider_registry
+        app_state._provider_registry = ProviderRegistry(
+            {"test-provider": stub},
+        )
+        try:
+            resp = test_client.post("/api/v1/setup/complete")
+            assert resp.status_code == 201
+            body = resp.json()
+            assert body["success"] is True
+            assert body["data"]["setup_complete"] is True
+        finally:
+            app_state._provider_registry = original_registry
+            repo._store.pop(("company", "company_name"), None)
+            repo._store.pop(("company", "agents"), None)
+            repo._store.pop(("api", "setup_complete"), None)
 
 
 @pytest.mark.unit

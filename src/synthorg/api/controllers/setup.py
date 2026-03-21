@@ -43,6 +43,7 @@ from synthorg.observability.events.setup import (
     SETUP_TEMPLATES_LISTED,
 )
 from synthorg.persistence.errors import QueryError
+from synthorg.settings.enums import SettingSource
 from synthorg.settings.errors import SettingNotFoundError
 
 if TYPE_CHECKING:
@@ -87,39 +88,22 @@ class SetupController(Controller):
             Setup status envelope.
         """
         app_state: AppState = state.app_state
-        persistence = app_state.persistence
-
-        admin_count: int | None = None
-        try:
-            admin_count = await persistence.users.count_by_role(HumanRole.CEO)
-        except QueryError:
-            logger.warning(
-                SETUP_STATUS_SETTINGS_UNAVAILABLE,
-                context="admin_count",
-                exc_info=True,
-            )
-        needs_admin = admin_count == 0 if admin_count is not None else True
-
         settings_svc = app_state.settings_service
-        try:
-            entry = await settings_svc.get_entry("api", "setup_complete")
-            needs_setup = entry.value != "true"
-        except MemoryError, RecursionError:
-            raise
-        except Exception:
-            logger.warning(
-                SETUP_STATUS_SETTINGS_UNAVAILABLE,
-                exc_info=True,
-            )
-            needs_setup = True
 
+        needs_admin = await _check_needs_admin(app_state.persistence)
+        needs_setup = await _check_needs_setup(settings_svc)
         has_providers = (
             app_state.has_provider_registry and len(app_state.provider_registry) > 0
         )
-
-        has_company = await _check_has_company(settings_svc)
-        has_agents = await _check_has_agents(settings_svc)
-        min_password_length = await _resolve_min_password_length(settings_svc)
+        async with asyncio.TaskGroup() as tg:
+            co_task = tg.create_task(_check_has_company(settings_svc))
+            ag_task = tg.create_task(_check_has_agents(settings_svc))
+            pw_task = tg.create_task(
+                _resolve_min_password_length(settings_svc),
+            )
+        has_company = co_task.result()
+        has_agents = ag_task.result()
+        min_password_length = pw_task.result()
 
         logger.debug(
             SETUP_STATUS_CHECKED,
@@ -129,7 +113,6 @@ class SetupController(Controller):
             has_company=has_company,
             has_agents=has_agents,
         )
-
         return ApiResponse(
             data=SetupStatusResponse(
                 needs_admin=needs_admin,
@@ -185,10 +168,8 @@ class SetupController(Controller):
     ) -> ApiResponse[SetupCompanyResponse]:
         """Create company configuration during first-run setup.
 
-        Persists the company name, optional description, and optionally
-        applies a template to create department structure. Calling this
-        endpoint again overwrites the previously set company name,
-        description, and departments.
+        Persists company name, description, and optionally applies a
+        template.  Re-calling overwrites previous values.
 
         Args:
             data: Company creation payload.
@@ -246,8 +227,8 @@ class SetupController(Controller):
     ) -> ApiResponse[SetupAgentResponse]:
         """Create an agent during first-run setup.
 
-        Validates the provider and model, builds an agent configuration,
-        and appends it to the company settings.
+        Validates provider/model, builds agent config, and appends
+        to company settings.
 
         Args:
             data: Agent creation payload.
@@ -332,9 +313,9 @@ class SetupController(Controller):
             logger.warning(SETUP_NO_COMPANY)
             raise ApiValidationError(msg)
 
-        # Verify at least one agent has been created.
-        existing_agents = await _get_existing_agents(settings_svc)
-        if not existing_agents:
+        # Verify at least one agent has been created (strict: propagate errors).
+        has_agents = await _check_has_agents(settings_svc, strict=True)
+        if not has_agents:
             msg = "At least one agent must be created before completing setup"
             logger.warning(SETUP_NO_AGENTS)
             raise ApiValidationError(msg)
@@ -355,12 +336,48 @@ class SetupController(Controller):
 # ── Helpers ──────────────────────────────────────────────────
 
 
+async def _check_needs_admin(persistence: Any) -> bool:
+    """Return True if no CEO-role user exists (fail-open on error)."""
+    count: int | None = None
+    try:
+        count = await persistence.users.count_by_role(HumanRole.CEO)
+    except QueryError:
+        logger.warning(
+            SETUP_STATUS_SETTINGS_UNAVAILABLE,
+            context="admin_count",
+            exc_info=True,
+        )
+        return True
+    return count == 0 if count is not None else True
+
+
+async def _check_needs_setup(settings_svc: SettingsService) -> bool:
+    """Return True if setup is still needed (fail-open on error)."""
+    try:
+        entry = await settings_svc.get_entry("api", "setup_complete")
+    except MemoryError, RecursionError:
+        raise
+    except Exception:
+        logger.warning(
+            SETUP_STATUS_SETTINGS_UNAVAILABLE,
+            exc_info=True,
+        )
+        return True
+    else:
+        return entry.value != "true"
+
+
 async def _check_has_company(
     settings_svc: SettingsService,
     *,
     strict: bool = False,
 ) -> bool:
-    """Check whether a company name has been configured.
+    """Check whether a company name has been explicitly created.
+
+    Only values persisted to the database (i.e. saved by the user
+    through the setup wizard) count.  YAML/code defaults like
+    ``"SynthOrg"`` must not cause a fresh setup to report the
+    company as already existing.
 
     Args:
         settings_svc: Settings service instance.
@@ -368,10 +385,17 @@ async def _check_has_company(
             returning False (use for validation gates, not status checks).
 
     Returns:
-        True if a non-empty company name is stored, False otherwise.
+        True if a user-created company name exists, False otherwise.
     """
     try:
         entry = await settings_svc.get_entry("company", "company_name")
+        if entry.source != SettingSource.DATABASE:
+            logger.debug(
+                SETUP_STATUS_SETTINGS_DEFAULT_USED,
+                setting="company_name",
+                source=entry.source,
+            )
+            return False
         return bool(entry.value and entry.value.strip())
     except MemoryError, RecursionError:
         raise
@@ -382,31 +406,37 @@ async def _check_has_company(
         )
         return False
     except Exception:
-        if strict:
-            raise
         logger.warning(
             SETUP_STATUS_SETTINGS_UNAVAILABLE,
             setting="company_name",
             exc_info=True,
         )
+        if strict:
+            raise
         return False
 
 
-async def _check_has_agents(settings_svc: SettingsService) -> bool:
-    """Check whether any agents have been created.
+async def _check_has_agents(
+    settings_svc: SettingsService,
+    *,
+    strict: bool = False,
+) -> bool:
+    """Check whether any agents have been explicitly created.
+
+    Only values persisted to the database (i.e. saved by the user
+    through the setup wizard) count.  YAML/code defaults must not
+    cause a fresh setup to report agents as already existing.
 
     Args:
         settings_svc: Settings service instance.
+        strict: When True, propagate parsing/validation exceptions
+            instead of returning False (use for validation gates).
 
     Returns:
-        True if a non-empty agents list is stored, False otherwise.
+        True if user-created agents exist, False otherwise.
     """
     try:
         entry = await settings_svc.get_entry("company", "agents")
-        if not entry.value:
-            return False
-        parsed = json.loads(entry.value)
-        return isinstance(parsed, list) and bool(parsed)
     except MemoryError, RecursionError:
         raise
     except SettingNotFoundError:
@@ -415,20 +445,59 @@ async def _check_has_agents(settings_svc: SettingsService) -> bool:
             setting="agents",
         )
         return False
-    except json.JSONDecodeError:
-        logger.warning(
-            SETUP_AGENTS_CORRUPTED,
-            reason="invalid_json",
-            exc_info=True,
-        )
-        return False
     except Exception:
         logger.warning(
             SETUP_STATUS_SETTINGS_UNAVAILABLE,
             setting="agents",
             exc_info=True,
         )
+        if strict:
+            raise
         return False
+
+    if entry.source != SettingSource.DATABASE:
+        logger.debug(
+            SETUP_STATUS_SETTINGS_DEFAULT_USED,
+            setting="agents",
+            source=entry.source,
+        )
+        return False
+    if not entry.value:
+        return False
+    return _validate_agents_value(entry.value, strict=strict)
+
+
+def _validate_agents_value(raw: str, *, strict: bool) -> bool:
+    """Parse *raw* as JSON and return True if it is a non-empty list.
+
+    When *strict* is True, raises ``ApiValidationError`` on corrupted
+    data instead of returning False.
+    """
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning(
+            SETUP_AGENTS_CORRUPTED,
+            reason="invalid_json",
+            exc_info=True,
+        )
+        if strict:
+            msg = "Stored agents list is not valid JSON"
+            raise ApiValidationError(msg) from None
+        return False
+
+    if not isinstance(parsed, list):
+        logger.warning(
+            SETUP_AGENTS_CORRUPTED,
+            reason="non_list_json",
+            raw_type=type(parsed).__name__,
+        )
+        if strict:
+            msg = f"Stored agents list is {type(parsed).__name__}, expected list"
+            raise ApiValidationError(msg)
+        return False
+
+    return bool(parsed)
 
 
 async def _resolve_min_password_length(
@@ -690,6 +759,14 @@ async def _get_existing_agents(
         raise
     except SettingNotFoundError:
         logger.debug(SETUP_AGENTS_READ_FALLBACK, reason="entry_not_found")
+        return []
+
+    if entry.source != SettingSource.DATABASE:
+        logger.debug(
+            SETUP_AGENTS_READ_FALLBACK,
+            reason="non_database_source",
+            source=entry.source,
+        )
         return []
 
     try:
