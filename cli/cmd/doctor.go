@@ -68,10 +68,121 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	out.Link("API docs", fmt.Sprintf("http://localhost:%d/docs/api", state.BackendPort))
 
 	_, _ = fmt.Fprintln(out.Writer())
+	renderDoctorSummary(out, report)
+
+	_, _ = fmt.Fprintln(out.Writer())
 	out.Hint("Run 'synthorg doctor report' to file a bug report")
 	out.Hint("Run 'synthorg logs' to view container logs")
 
 	return nil
+}
+
+// doctorStatus classifies the overall health of the system from a diagnostic report.
+type doctorStatus int
+
+const (
+	doctorHealthy doctorStatus = iota
+	doctorWarnings
+	doctorErrors
+)
+
+// classifyDoctor inspects the report to determine the overall status.
+func classifyDoctor(r diagnostics.Report) (doctorStatus, []string) {
+	var warnings, errs []string
+
+	// Backend health.
+	switch r.HealthStatus {
+	case "200":
+		// ok
+	case "unreachable":
+		errs = append(errs, "backend unreachable")
+	case "":
+		// not checked
+	default:
+		errs = append(errs, fmt.Sprintf("backend unhealthy (HTTP %s)", r.HealthStatus))
+	}
+
+	// Container states.
+	if len(r.ContainerSummary) == 0 && r.ComposeFileExists {
+		warnings = append(warnings, "no containers detected")
+	}
+	for _, c := range r.ContainerSummary {
+		switch {
+		case c.Health == "unhealthy", c.State == "exited":
+			status := c.Health
+			if status == "" {
+				status = c.State
+			}
+			errs = append(errs, fmt.Sprintf("%s %s", c.Name, status))
+		case c.Health == "starting":
+			warnings = append(warnings, fmt.Sprintf("%s still starting", c.Name))
+		}
+	}
+
+	// Image availability.
+	for _, img := range r.ImageStatus {
+		if !strings.HasSuffix(img, ": available") {
+			warnings = append(warnings, img)
+		}
+	}
+
+	// Compose file.
+	switch {
+	case !r.ComposeFileExists:
+		errs = append(errs, "compose.yml not found")
+	case r.ComposeFileValid == nil:
+		warnings = append(warnings, "compose.yml exists, validity not checked")
+	case !*r.ComposeFileValid:
+		errs = append(errs, "compose.yml is invalid")
+	}
+
+	// Port conflicts.
+	for _, p := range r.PortConflicts {
+		errs = append(errs, fmt.Sprintf("port conflict: %s", p))
+	}
+
+	// Explicit errors from collection.
+	errs = append(errs, r.Errors...)
+
+	if len(errs) > 0 {
+		return doctorErrors, errs
+	}
+	if len(warnings) > 0 {
+		return doctorWarnings, warnings
+	}
+	return doctorHealthy, nil
+}
+
+// renderDoctorSummary prints a final summary box showing overall system status.
+func renderDoctorSummary(out *ui.UI, r diagnostics.Report) {
+	status, issues := classifyDoctor(r)
+
+	switch status {
+	case doctorHealthy:
+		out.Box("Status", []string{
+			fmt.Sprintf("  %s All systems healthy", ui.IconSuccess),
+		})
+	case doctorWarnings, doctorErrors:
+		count := len(issues)
+		plural := "s"
+		if count == 1 {
+			plural = ""
+		}
+
+		var title string
+		if status == doctorWarnings {
+			title = fmt.Sprintf("  %s %d warning%s detected", ui.IconWarning, count, plural)
+		} else {
+			title = fmt.Sprintf("  %s %d issue%s found", ui.IconError, count, plural)
+		}
+
+		lines := make([]string, 1, count+1)
+		lines[0] = title
+		for _, issue := range issues {
+			lines = append(lines, fmt.Sprintf("    %s %s", ui.IconHint, issue))
+		}
+		out.Box("Status", lines)
+	}
 }
 
 func renderDoctorEnvironment(out *ui.UI, r diagnostics.Report) {
