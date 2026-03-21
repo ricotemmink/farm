@@ -60,3 +60,21 @@ SETUP_ALREADY_COMPLETE: Final[str] = "setup.flow.already_complete"
 
 # Agents list corrupted in settings (JSON parse failure)
 SETUP_AGENTS_CORRUPTED: Final[str] = "setup.agents.corrupted"
+
+# Auto-created agents from template during company setup
+SETUP_AGENTS_AUTO_CREATED: Final[str] = "setup.agents.auto_created"
+
+# Agents list retrieved for review step
+SETUP_AGENTS_LISTED: Final[str] = "setup.agents.listed"
+
+# Agent model assignment updated in review step
+SETUP_AGENT_MODEL_UPDATED: Final[str] = "setup.agent.model_updated"
+
+# Agent index out of range during model update
+SETUP_AGENT_INDEX_OUT_OF_RANGE: Final[str] = "setup.agent.index_out_of_range"
+
+# Unexpected error while checking setup completion status
+SETUP_COMPLETE_CHECK_ERROR: Final[str] = "setup.flow.complete_check_error"
+
+# Agent dict missing critical fields during summary conversion
+SETUP_AGENT_SUMMARY_MISSING_FIELDS: Final[str] = "setup.agent.summary_missing_fields"

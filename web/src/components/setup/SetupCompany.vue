@@ -8,7 +8,7 @@ import * as setupApi from '@/api/endpoints/setup'
 import { getErrorMessage } from '@/utils/errors'
 
 const emit = defineEmits<{
-  next: [companyName: string]
+  next: [companyName: string, agentCount: number]
   previous: []
 }>()
 
@@ -26,6 +26,7 @@ const createdResult = ref<{
   companyName: string
   templateApplied: string | null
   departmentCount: number
+  agentCount: number
 } | null>(null)
 
 const isValid = computed(() => companyName.value.trim().length > 0)
@@ -60,9 +61,12 @@ async function handleCreate() {
       companyName: result.company_name,
       templateApplied: result.template_applied,
       departmentCount: result.department_count,
+      agentCount: result.agent_count,
     }
+    // Cache agents in the store for the Review Org step.
+    setup.setAgents(result.agents ?? [])
     editing.value = false
-    emit('next', companyName.value.trim())
+    emit('next', result.company_name, result.agent_count)
   } catch (err) {
     error.value = getErrorMessage(err)
   } finally {
@@ -124,7 +128,7 @@ onMounted(async () => {
           icon="pi pi-arrow-right"
           icon-pos="right"
           class="flex-1"
-          @click="emit('next', createdResult?.companyName ?? '')"
+          @click="emit('next', createdResult?.companyName ?? '', createdResult?.agentCount ?? 0)"
         />
       </div>
     </template>

@@ -560,20 +560,219 @@ class TestSetupDTOs:
 
 @pytest.mark.unit
 class TestExtractTemplateDepartments:
-    """Unit tests for the _extract_template_departments helper."""
+    """Unit tests for the _load_template_safe + _departments_to_json helpers."""
 
     def test_valid_template(self) -> None:
-        from synthorg.api.controllers.setup import _extract_template_departments
+        from synthorg.api.controllers.setup import _load_template_safe
+        from synthorg.api.controllers.setup_agents import departments_to_json
 
-        result = _extract_template_departments("solo_founder")
+        loaded = _load_template_safe("solo_founder")
+        result = departments_to_json(loaded.template.departments)
         assert result != ""
         departments = json.loads(result)
         assert len(departments) >= 1
         assert departments[0]["name"] in {"executive", "engineering"}
 
     def test_invalid_template(self) -> None:
-        from synthorg.api.controllers.setup import _extract_template_departments
+        from synthorg.api.controllers.setup import _load_template_safe
         from synthorg.api.errors import NotFoundError
 
         with pytest.raises(NotFoundError):
-            _extract_template_departments("nonexistent_template")
+            _load_template_safe("nonexistent_template")
+
+
+def _setup_mock_providers(
+    test_client: TestClient[Any],
+) -> tuple[Any, Any]:
+    """Wire up mock providers on the app state. Returns (app_state, original)."""
+    mock_model = MagicMock()
+    mock_model.id = "test-small-001"
+    mock_model.alias = None
+    mock_model.cost_per_1k_input = 0.01
+    mock_model.cost_per_1k_output = 0.02
+    mock_model.max_context = 200_000
+    mock_model.estimated_latency_ms = 100
+    mock_provider_config = MagicMock()
+    mock_provider_config.models = (mock_model,)
+
+    mock_mgmt = MagicMock()
+    mock_mgmt.list_providers = AsyncMock(
+        return_value={"test-provider": mock_provider_config},
+    )
+
+    app_state = test_client.app.state.app_state
+    original = app_state._provider_management
+    app_state._provider_management = mock_mgmt
+    return app_state, original
+
+
+@pytest.mark.unit
+class TestSetupCompanyAutoAgents:
+    """POST /api/v1/setup/company -- auto-create agents from template."""
+
+    def test_template_creates_agents(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        """Company creation with template auto-creates agents."""
+        app_state, original = _setup_mock_providers(test_client)
+        try:
+            resp = test_client.post(
+                "/api/v1/setup/company",
+                json={
+                    "company_name": "My Startup",
+                    "template_name": "startup",
+                },
+            )
+            assert resp.status_code == 201
+            data = resp.json()["data"]
+            assert data["agent_count"] >= 3
+            assert len(data["agents"]) >= 3
+            # Each agent should have a name, role, and model assignment.
+            for agent in data["agents"]:
+                assert agent["name"]
+                assert agent["role"]
+                assert agent["tier"] in {"large", "medium", "small"}
+                assert agent["model_provider"], "model_provider must be set"
+                assert agent["model_id"], "model_id must be set"
+        finally:
+            app_state._provider_management = original
+
+    def test_blank_company_has_no_agents(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        """Blank company (no template) creates zero agents."""
+        resp = test_client.post(
+            "/api/v1/setup/company",
+            json={"company_name": "Blank Corp"},
+        )
+        assert resp.status_code == 201
+        data = resp.json()["data"]
+        assert data["agent_count"] == 0
+        assert data["agents"] == []
+
+
+@pytest.mark.unit
+class TestSetupAgentsList:
+    """GET /api/v1/setup/agents -- list agents configured during setup."""
+
+    def test_empty_when_no_agents(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        resp = test_client.get("/api/v1/setup/agents")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["agents"] == []
+        assert data["agent_count"] == 0
+
+    def test_returns_agents_after_company_creation(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        app_state, original = _setup_mock_providers(test_client)
+        try:
+            # Create company with template.
+            test_client.post(
+                "/api/v1/setup/company",
+                json={
+                    "company_name": "Test Startup",
+                    "template_name": "solo_founder",
+                },
+            )
+            # Now list agents.
+            resp = test_client.get("/api/v1/setup/agents")
+            assert resp.status_code == 200
+            list_data = resp.json()["data"]
+            agents = list_data["agents"]
+            assert len(agents) >= 1
+            assert list_data["agent_count"] == len(agents)
+            assert agents[0]["role"]
+        finally:
+            app_state._provider_management = original
+
+
+@pytest.mark.unit
+class TestSetupAgentModelUpdate:
+    """PUT /api/v1/setup/agents/{index}/model -- reassign agent model."""
+
+    def test_out_of_range_index(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        app_state, original = _setup_mock_providers(test_client)
+        try:
+            resp = test_client.put(
+                "/api/v1/setup/agents/99/model",
+                json={
+                    "model_provider": "test-provider",
+                    "model_id": "test-small-001",
+                },
+            )
+            assert resp.status_code == 404
+        finally:
+            app_state._provider_management = original
+
+    def test_successful_model_update(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        app_state, original = _setup_mock_providers(test_client)
+        try:
+            # Create company with template to get agents.
+            test_client.post(
+                "/api/v1/setup/company",
+                json={
+                    "company_name": "Update Test",
+                    "template_name": "solo_founder",
+                },
+            )
+            # Update first agent's model.
+            resp = test_client.put(
+                "/api/v1/setup/agents/0/model",
+                json={
+                    "model_provider": "test-provider",
+                    "model_id": "test-small-001",
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()["data"]
+            assert data["model_provider"] == "test-provider"
+            assert data["model_id"] == "test-small-001"
+
+            # Verify persistence: GET agents and check the update stuck.
+            get_resp = test_client.get("/api/v1/setup/agents")
+            assert get_resp.status_code == 200
+            agents = get_resp.json()["data"]["agents"]
+            assert agents[0]["model_provider"] == "test-provider"
+            assert agents[0]["model_id"] == "test-small-001"
+        finally:
+            app_state._provider_management = original
+
+    def test_invalid_provider_rejected(
+        self,
+        test_client: TestClient[Any],
+    ) -> None:
+        app_state, original = _setup_mock_providers(test_client)
+        try:
+            # Create agents first -- verify seed succeeded.
+            seed = test_client.post(
+                "/api/v1/setup/company",
+                json={
+                    "company_name": "Validation Test",
+                    "template_name": "solo_founder",
+                },
+            )
+            assert seed.status_code == 201
+            assert seed.json()["data"]["agent_count"] >= 1
+            resp = test_client.put(
+                "/api/v1/setup/agents/0/model",
+                json={
+                    "model_provider": "nonexistent-provider",
+                    "model_id": "some-model",
+                },
+            )
+            assert resp.status_code == 404
+        finally:
+            app_state._provider_management = original
