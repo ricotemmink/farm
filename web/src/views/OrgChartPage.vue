@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
-import { VueFlow, type Node, type Edge } from '@vue-flow/core'
+import { computed, nextTick, onMounted, watch } from 'vue'
+import { RouterLink, useRouter } from 'vue-router'
+import { VueFlow, useVueFlow, type Node, type Edge } from '@vue-flow/core'
 import { Controls } from '@vue-flow/controls'
 import { MiniMap } from '@vue-flow/minimap'
 import '@vue-flow/core/dist/style.css'
@@ -12,25 +12,35 @@ import AppShell from '@/components/layout/AppShell.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import LoadingSkeleton from '@/components/common/LoadingSkeleton.vue'
 import ErrorBoundary from '@/components/common/ErrorBoundary.vue'
+import EmptyState from '@/components/common/EmptyState.vue'
 import OrgNode from '@/components/org-chart/OrgNode.vue'
 import { useCompanyStore } from '@/stores/company'
 import { useAgentStore } from '@/stores/agents'
 import { formatLabel } from '@/utils/format'
-import { sanitizeForLog } from '@/utils/logging'
 
 const router = useRouter()
 const companyStore = useCompanyStore()
 const agentStore = useAgentStore()
+const { fitView } = useVueFlow()
 
 async function retryFetch() {
-  try {
-    await Promise.all([companyStore.fetchDepartments(), agentStore.fetchAgents()])
-  } catch (err) {
-    console.error('Org chart data fetch failed:', sanitizeForLog(err))
-  }
+  await Promise.all([companyStore.fetchDepartments(), agentStore.fetchAgents()])
 }
 
 onMounted(retryFetch)
+
+const isLoading = computed(
+  () => companyStore.departmentsLoading || agentStore.loading,
+)
+
+const hasDepartments = computed(
+  () => companyStore.departments.length > 0,
+)
+
+const combinedError = computed(() => {
+  const errors = [companyStore.departmentsError, agentStore.error].filter(Boolean)
+  return errors.length > 0 ? errors.join(' | ') : null
+})
 
 const nodes = computed<Node[]>(() => {
   const result: Node[] = []
@@ -109,10 +119,30 @@ const edges = computed<Edge[]>(() => {
   return result
 })
 
+watch(
+  () => nodes.value.length,
+  async (len) => {
+    if (len > 0) {
+      await nextTick()
+      try {
+        await fitView()
+      } catch {
+        // fitView may throw if viewport is not ready; fit-view-on-init handles initial render
+      }
+    }
+  },
+  { once: true },
+)
+
 function onNodeClick(event: { node: Node }) {
   if (event.node.id.startsWith('agent-')) {
-    const name = event.node.id.replace('agent-', '')
+    const name = event.node.id.slice('agent-'.length)
     router.push(`/agents/${encodeURIComponent(name)}`)
+  } else if (
+    event.node.id.startsWith('dept-') ||
+    event.node.id.startsWith('team-')
+  ) {
+    router.push('/agents')
   }
 }
 </script>
@@ -121,8 +151,23 @@ function onNodeClick(event: { node: Node }) {
   <AppShell>
     <PageHeader title="Organization Chart" subtitle="Visual structure of departments, teams, and agents" />
 
-    <ErrorBoundary :error="companyStore.departmentsError ?? agentStore.error" @retry="retryFetch">
-      <LoadingSkeleton v-if="companyStore.departmentsLoading || agentStore.loading" :lines="6" />
+    <ErrorBoundary :error="combinedError" @retry="retryFetch">
+      <LoadingSkeleton v-if="isLoading && !hasDepartments" :lines="6" />
+      <EmptyState
+        v-else-if="!hasDepartments"
+        icon="pi pi-sitemap"
+        title="No departments"
+        message="Your organization has no departments configured yet. Set up your company structure to see the org chart."
+      >
+        <template #action>
+          <RouterLink
+            to="/settings"
+            class="text-sm text-brand-400 hover:text-brand-300"
+          >
+            Go to Settings
+          </RouterLink>
+        </template>
+      </EmptyState>
       <div v-else class="h-[calc(100vh-200px)] rounded-lg border border-slate-800 bg-slate-900">
         <VueFlow
           :nodes="nodes"
