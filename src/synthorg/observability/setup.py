@@ -33,6 +33,28 @@ _DEFAULT_LOGGER_LEVELS: tuple[tuple[str, LogLevel], ...] = (
     ("synthorg.templates", LogLevel.INFO),
 )
 
+# Third-party loggers that add their own handlers or emit noisy DEBUG
+# output.  Clearing their handlers and enforcing ``propagate = True``
+# routes all messages through the root logger where our structlog sinks
+# capture them uniformly.
+# Level is set to WARNING by default -- our provider/persistence layers
+# already log meaningful events at the appropriate level.
+_THIRD_PARTY_LOGGER_LEVELS: tuple[tuple[str, LogLevel], ...] = (
+    ("LiteLLM", LogLevel.WARNING),
+    ("LiteLLM Router", LogLevel.WARNING),
+    ("LiteLLM Proxy", LogLevel.WARNING),
+    ("aiosqlite", LogLevel.WARNING),
+    ("httpcore", LogLevel.WARNING),
+    ("httpcore.http11", LogLevel.WARNING),
+    ("httpcore.connection", LogLevel.WARNING),
+    ("httpx", LogLevel.WARNING),
+    ("uvicorn", LogLevel.WARNING),
+    ("uvicorn.error", LogLevel.WARNING),
+    ("uvicorn.access", LogLevel.WARNING),
+    ("anyio", LogLevel.WARNING),
+    ("multipart", LogLevel.WARNING),
+)
+
 # Processors shared between structlog and stdlib (foreign) chains.
 _BASE_PROCESSORS: tuple[Any, ...] = (
     structlog.stdlib.add_logger_name,
@@ -183,6 +205,47 @@ def _apply_logger_levels(config: LogConfig) -> None:
         logging.getLogger(name).setLevel(level.value)
 
 
+def _tame_third_party_loggers() -> None:
+    """Remove third-party handlers and silence noisy loggers.
+
+    Libraries like LiteLLM attach their own ``StreamHandler`` at import
+    time, causing duplicate output in Docker logs (once via the library
+    handler, once via root propagation through our structlog sinks).
+
+    This function strips those handlers so all output flows exclusively
+    through the structured logging pipeline. It also suppresses
+    LiteLLM's ``print_verbose()`` raw ``print()`` calls by setting
+    ``set_verbose = False`` at configuration time.
+
+    The LiteLLM module-level attribute suppression (``set_verbose``,
+    ``suppress_debug_info``) only executes when ``litellm`` is already
+    imported, avoiding expensive import side-effects.  Handler cleanup
+    and level enforcement run unconditionally -- ``logging.getLogger()``
+    does not trigger library imports.
+    """
+    # Suppress LiteLLM's raw print() output if already imported.
+    _litellm = sys.modules.get("litellm")
+    if _litellm is not None:
+        _litellm.set_verbose = False  # type: ignore[attr-defined]
+        _litellm.suppress_debug_info = True  # type: ignore[attr-defined]
+
+    for name, level in _THIRD_PARTY_LOGGER_LEVELS:
+        lg = logging.getLogger(name)
+        for handler in lg.handlers[:]:
+            lg.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                print(  # noqa: T201
+                    f"WARNING: Failed to close third-party log handler "
+                    f"{handler!r} on logger {name!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        lg.setLevel(level.value)
+        lg.propagate = True
+
+
 def _apply_console_level_override(config: LogConfig) -> LogConfig:
     """Override the console sink level from ``SYNTHORG_LOG_LEVEL``.
 
@@ -276,5 +339,8 @@ def configure_logging(config: LogConfig | None = None) -> None:
     # 6. Build and attach handlers for each sink
     _attach_handlers(config, root_logger, shared)
 
-    # 7. Apply per-logger levels
+    # 7. Tame third-party loggers (clear duplicate handlers, set defaults)
+    _tame_third_party_loggers()
+
+    # 8. Apply per-logger levels (after taming so user overrides take precedence)
     _apply_logger_levels(config)

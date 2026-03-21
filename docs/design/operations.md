@@ -1285,8 +1285,11 @@ names. Format: `"<domain>.<noun>.<verb>"` (e.g., `"api.request.started"`).
 Uvicorn's default access logger is **disabled** (`access_log=False`, `log_config=None`).
 HTTP access logging is handled by `RequestLoggingMiddleware`, which provides richer structured
 fields (method, path, status_code, duration_ms, request_id) through structlog. Uvicorn's own
-startup/error messages propagate through stdlib's root handler (which structlog wraps via
-`ProcessorFormatter`).
+handlers are cleared by `_tame_third_party_loggers()` and its loggers (`uvicorn`,
+`uvicorn.error`, `uvicorn.access`) are set to `WARNING` with `propagate = True` -- startup
+INFO messages (e.g., "Uvicorn running on ...") are intentionally suppressed since the
+application's own lifecycle logging provides equivalent structured events via structlog.
+Warning and error messages still propagate through the structlog pipeline.
 
 ### Litestar Integration
 
@@ -1296,6 +1299,28 @@ startup via `dictConfig()`, which triggers `_clearExistingHandlers` and destroys
 file sink handlers attached by `_bootstrap_app_logging()`. The bootstrap call in `create_app`
 runs before the Litestar constructor and sets up all 8 sinks; `logging_config=None` ensures
 they survive.
+
+### Third-Party Logger Taming
+
+LiteLLM and its HTTP stack (httpx, httpcore) attach their own `StreamHandler` instances at
+import time, producing duplicate output in Docker logs -- once via the library's own handler,
+and once again via root propagation through the structlog sinks.
+
+`_tame_third_party_loggers()` (called as step 7 of `configure_logging`, before per-logger level
+overrides so explicit user settings take precedence) resolves this by:
+
+- Suppressing LiteLLM's raw `print()` output via `litellm.set_verbose = False` and
+  `litellm.suppress_debug_info = True` (applied only when `litellm` is already imported --
+  avoids triggering LiteLLM's expensive import side-effects)
+- Clearing all handlers from `LiteLLM`, `LiteLLM Router`, `LiteLLM Proxy`, `aiosqlite`,
+  `httpcore`, `httpcore.http11`, `httpcore.connection`, `httpx`, `uvicorn`, `uvicorn.error`,
+  `uvicorn.access`, `anyio`, and `multipart` loggers
+- Setting each to `WARNING` and `propagate = True` so warnings and errors still flow through
+  the structlog pipeline
+
+The provider and persistence layers already log meaningful events at appropriate levels via
+their own structlog calls; the third-party loggers would otherwise add noisy DEBUG output
+that duplicates or contradicts those structured events.
 
 ### Docker Logging
 
