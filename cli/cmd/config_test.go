@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Aureliolo/synthorg/cli/internal/config"
@@ -156,6 +157,130 @@ func TestConfigSetRejectsInvalidChannel(t *testing.T) {
 	err := rootCmd.Execute()
 	if err == nil {
 		t.Fatal("expected error for invalid channel")
+	}
+}
+
+func TestConfigSetAutoCleanup(t *testing.T) {
+	tests := []struct {
+		name     string
+		initial  bool
+		setValue string
+		want     bool
+	}{
+		{"set to true", false, "true", true},
+		{"set to false", true, "false", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			state := config.DefaultState()
+			state.DataDir = dir
+			state.AutoCleanup = tt.initial
+			if err := config.Save(state); err != nil {
+				t.Fatal(err)
+			}
+
+			var buf bytes.Buffer
+			rootCmd.SetOut(&buf)
+			rootCmd.SetErr(&buf)
+			rootCmd.SetArgs([]string{"config", "set", "auto_cleanup", tt.setValue, "--data-dir", dir})
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			loaded, err := config.Load(dir)
+			if err != nil {
+				t.Fatalf("Load after set: %v", err)
+			}
+			if loaded.AutoCleanup != tt.want {
+				t.Errorf("AutoCleanup = %v, want %v", loaded.AutoCleanup, tt.want)
+			}
+		})
+	}
+}
+
+func FuzzConfigSetAutoCleanup(f *testing.F) {
+	f.Add("true")
+	f.Add("false")
+	f.Add("TRUE")
+	f.Add("1")
+	f.Add("yes")
+	f.Add("")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		dir := t.TempDir()
+		state := config.DefaultState()
+		state.DataDir = dir
+		if err := config.Save(state); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+
+		var buf bytes.Buffer
+		rootCmd.SetOut(&buf)
+		rootCmd.SetErr(&buf)
+		rootCmd.SetArgs([]string{"config", "set", "auto_cleanup", value, "--data-dir", dir})
+		err := rootCmd.Execute()
+
+		allowed := value == "true" || value == "false"
+		if allowed && err != nil {
+			t.Fatalf("unexpected error for %q: %v", value, err)
+		}
+		if !allowed && err == nil {
+			t.Fatalf("expected error for %q", value)
+		}
+	})
+}
+
+func TestConfigSetRejectsInvalidAutoCleanup(t *testing.T) {
+	dir := t.TempDir()
+	state := config.DefaultState()
+	state.DataDir = dir
+	if err := config.Save(state); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, value := range []string{"yes", "1", "YES", "True"} {
+		var buf bytes.Buffer
+		rootCmd.SetOut(&buf)
+		rootCmd.SetErr(&buf)
+		rootCmd.SetArgs([]string{"config", "set", "auto_cleanup", value, "--data-dir", dir})
+		err := rootCmd.Execute()
+		if err == nil {
+			t.Errorf("expected error for auto_cleanup=%q", value)
+		}
+	}
+}
+
+func TestConfigShowAutoCleanup(t *testing.T) {
+	dir := t.TempDir()
+	state := config.DefaultState()
+	state.DataDir = dir
+	if err := config.Save(state); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	rootCmd.SetOut(&buf)
+	rootCmd.SetErr(&buf)
+	rootCmd.SetArgs([]string{"config", "show", "--data-dir", dir})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out := buf.String()
+	found := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "Auto cleanup") {
+			found = true
+			if !strings.Contains(line, "false") {
+				t.Errorf("Auto cleanup line should contain 'false', got: %s", line)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'Auto cleanup' label in output")
 	}
 }
 

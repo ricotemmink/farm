@@ -195,6 +195,115 @@ func TestBuildImageDisplay(t *testing.T) {
 	}
 }
 
+func TestMergeKeepIDs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		current  map[string]bool
+		previous map[string]bool
+		wantLen  int
+	}{
+		{
+			"nil both",
+			nil,
+			nil,
+			0,
+		},
+		{
+			"current only",
+			map[string]bool{"aaa": true, "bbb": true},
+			nil,
+			2,
+		},
+		{
+			"previous only",
+			nil,
+			map[string]bool{"ccc": true, "ddd": true},
+			2,
+		},
+		{
+			"current and previous merged",
+			map[string]bool{"aaa": true, "bbb": true},
+			map[string]bool{"ccc": true, "ddd": true},
+			4,
+		},
+		{
+			"overlapping IDs deduplicated",
+			map[string]bool{"aaa": true, "bbb": true},
+			map[string]bool{"aaa": true, "ccc": true},
+			3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := mergeKeepIDs(tt.current, tt.previous)
+			if len(got) != tt.wantLen {
+				t.Errorf("len = %d, want %d", len(got), tt.wantLen)
+			}
+			// Verify all inputs are in the result.
+			for id := range tt.current {
+				if !got[id] {
+					t.Errorf("current ID %q missing from result", id)
+				}
+			}
+			for id := range tt.previous {
+				if !got[id] {
+					t.Errorf("previous ID %q missing from result", id)
+				}
+			}
+		})
+	}
+}
+
+func FuzzMergeKeepIDs(f *testing.F) {
+	f.Add("aaa,bbb", "bbb,ccc")
+	f.Add("", "")
+	f.Add("x", "")
+	f.Add("", "y")
+	f.Fuzz(func(t *testing.T, currentCSV, previousCSV string) {
+		toMap := func(csv string) map[string]bool {
+			m := map[string]bool{}
+			for _, p := range strings.Split(csv, ",") {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					m[p] = true
+				}
+			}
+			return m
+		}
+		current := toMap(currentCSV)
+		previous := toMap(previousCSV)
+		got := mergeKeepIDs(current, previous)
+
+		// Build expected union.
+		expected := make(map[string]bool)
+		for id := range current {
+			expected[id] = true
+		}
+		for id := range previous {
+			expected[id] = true
+		}
+
+		// Assert exact union: correct size, all expected present, no extras.
+		if len(got) != len(expected) {
+			t.Fatalf("len(got) = %d, want %d", len(got), len(expected))
+		}
+		for id := range expected {
+			if !got[id] {
+				t.Fatalf("missing expected id %q", id)
+			}
+		}
+		for id := range got {
+			if !expected[id] {
+				t.Fatalf("unexpected extra id %q", id)
+			}
+		}
+	})
+}
+
 func FuzzIsAllHex(f *testing.F) {
 	f.Add("0123456789abcdef")
 	f.Add("0123456789ABCDEF")
