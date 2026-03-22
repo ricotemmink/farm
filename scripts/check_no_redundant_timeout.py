@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Pre-commit hook: reject files containing em-dashes (U+2014)."""
+"""Pre-commit hook: reject tests with redundant pytest.mark.timeout(30).
 
+The global ``timeout = 30`` in pyproject.toml already applies to every test.
+Per-file ``pytest.mark.timeout(30)`` markers are redundant noise.
+Non-default overrides (e.g. ``timeout(60)``) are allowed.
+"""
+
+import re
 import sys
 from pathlib import Path
 
-# Build patterns without embedding the literal HTML entity in this file
-# (otherwise the pre-commit hook flags this script itself).
-_PATTERNS = ("\u2014", "&" + "mdash;", "&" + "#8212;", "&" + "#x2014;")
+_PATTERN = re.compile(r"pytest\.mark\.timeout\(\s*30\s*\)")
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def main() -> int:
-    """Scan files for em-dash characters and report locations."""
+    """Scan files for redundant pytest.mark.timeout(30) and report locations."""
     found = False
     for path in sys.argv[1:]:
         resolved = Path(path).resolve()
@@ -20,14 +24,18 @@ def main() -> int:
         try:
             with resolved.open(encoding="utf-8") as f:
                 for lineno, line in enumerate(f, 1):
-                    if any(p in line for p in _PATTERNS):
+                    if _PATTERN.search(line):
                         print(f"{path}:{lineno}: {line.rstrip()}")
                         found = True
         except (UnicodeDecodeError, OSError) as exc:
             print(f"WARNING: skipping {path}: {exc}", file=sys.stderr)
             continue
     if found:
-        print("\nEm-dashes (U+2014) found -- use ASCII double-dashes (--) instead.")
+        print(
+            "\npytest.mark.timeout(30) is redundant"
+            " -- pyproject.toml sets timeout = 30 globally."
+            "\nRemove the marker or use a different value for intentional overrides."
+        )
         return 1
     return 0
 
