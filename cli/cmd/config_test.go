@@ -284,6 +284,108 @@ func TestConfigShowAutoCleanup(t *testing.T) {
 	}
 }
 
+func TestConfigSetLogLevel(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"set to debug", "debug", "debug"},
+		{"set to info", "info", "info"},
+		{"set to warn", "warn", "warn"},
+		{"set to error", "error", "error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			state := config.DefaultState()
+			state.DataDir = dir
+			if err := config.Save(state); err != nil {
+				t.Fatal(err)
+			}
+
+			var buf bytes.Buffer
+			rootCmd.SetOut(&buf)
+			rootCmd.SetErr(&buf)
+			rootCmd.SetArgs([]string{"config", "set", "log_level", tt.value, "--data-dir", dir})
+			if err := rootCmd.Execute(); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			loaded, err := config.Load(dir)
+			if err != nil {
+				t.Fatalf("Load after set: %v", err)
+			}
+			if loaded.LogLevel != tt.want {
+				t.Errorf("LogLevel = %q, want %q", loaded.LogLevel, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfigSetRejectsInvalidLogLevel(t *testing.T) {
+	dir := t.TempDir()
+	state := config.DefaultState()
+	state.DataDir = dir
+	if err := config.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	orig := state.LogLevel
+
+	for _, value := range []string{"verbose", "trace", "INFO", "Debug", ""} {
+		var buf bytes.Buffer
+		rootCmd.SetOut(&buf)
+		rootCmd.SetErr(&buf)
+		rootCmd.SetArgs([]string{"config", "set", "log_level", value, "--data-dir", dir})
+		err := rootCmd.Execute()
+		if err == nil {
+			t.Errorf("expected error for log_level=%q", value)
+		}
+		loaded, loadErr := config.Load(dir)
+		if loadErr != nil {
+			t.Fatalf("Load after rejected %q: %v", value, loadErr)
+		}
+		if loaded.LogLevel != orig {
+			t.Errorf("rejected %q mutated LogLevel: got %q, want %q", value, loaded.LogLevel, orig)
+		}
+	}
+}
+
+func FuzzConfigSetLogLevel(f *testing.F) {
+	f.Add("debug")
+	f.Add("info")
+	f.Add("warn")
+	f.Add("error")
+	f.Add("verbose")
+	f.Add("trace")
+	f.Add("")
+	f.Add("INFO")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		dir := t.TempDir()
+		state := config.DefaultState()
+		state.DataDir = dir
+		if err := config.Save(state); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+
+		var buf bytes.Buffer
+		rootCmd.SetOut(&buf)
+		rootCmd.SetErr(&buf)
+		rootCmd.SetArgs([]string{"config", "set", "log_level", value, "--data-dir", dir})
+		err := rootCmd.Execute()
+
+		allowed := value == "debug" || value == "info" || value == "warn" || value == "error"
+		if allowed && err != nil {
+			t.Fatalf("unexpected error for %q: %v", value, err)
+		}
+		if !allowed && err == nil {
+			t.Fatalf("expected error for %q", value)
+		}
+	})
+}
+
 func TestConfigSetRejectsUnknownKey(t *testing.T) {
 	dir := t.TempDir()
 	state := config.DefaultState()

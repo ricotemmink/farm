@@ -84,15 +84,18 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	printInitSuccess(out, safeDir)
+	return nil
+}
+
+func printInitSuccess(out *ui.UI, dataDir string) {
 	out.Blank()
 	out.Success("SynthOrg initialized")
-	out.KeyValue("Data dir", safeDir)
-	out.KeyValue("Compose file", filepath.Join(safeDir, "compose.yml"))
-	out.KeyValue("Config", config.StatePath(safeDir))
+	out.KeyValue("Data dir", dataDir)
+	out.KeyValue("Compose file", filepath.Join(dataDir, "compose.yml"))
+	out.KeyValue("Config", config.StatePath(dataDir))
 	out.Warn("Keep compose.yml and config.json private -- they contain your secrets.")
 	out.Hint("Run 'synthorg start' to launch.")
-
-	return nil
 }
 
 // setupAnswers holds raw form input before validation.
@@ -134,14 +137,6 @@ func runSetupForm() (setupAnswers, error) {
 		huh.NewGroup(
 			huh.NewInput().Title("Docker socket path").Value(&a.dockerSock),
 		).WithHideFunc(func() bool { return !a.sandbox }),
-		huh.NewGroup(
-			huh.NewSelect[string]().Title("Log level").Options(
-				huh.NewOption("Debug", "debug"),
-				huh.NewOption("Info", "info"),
-				huh.NewOption("Warning", "warn"),
-				huh.NewOption("Error", "error"),
-			).Value(&a.logLevel),
-		),
 		huh.NewGroup(
 			huh.NewNote().Title("Backends").
 				Description(fmt.Sprintf(
