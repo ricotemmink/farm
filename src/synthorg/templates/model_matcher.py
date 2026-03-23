@@ -92,6 +92,53 @@ def match_model(
     return best, score
 
 
+def _resolve_agent_requirement(
+    agent: dict[str, Any],
+    idx: int,
+    model_requirement_cls: type,
+    parse_fn: Any,
+    resolve_fn: Any,
+) -> tuple[Any, ModelTier] | None:
+    """Resolve a single agent's model requirement.
+
+    Returns:
+        ``(requirement, tier)`` on success, or ``None`` if the agent
+        should be skipped (invalid requirement logged as warning).
+    """
+    model_req = agent.get("model_requirement")
+    if isinstance(model_req, model_requirement_cls):
+        return model_req, model_req.tier  # type: ignore[attr-defined]
+
+    if isinstance(model_req, dict):
+        try:
+            req = parse_fn(model_req)
+        except (ValidationError, ValueError) as exc:
+            logger.warning(
+                TEMPLATE_MODEL_MATCH_SKIPPED,
+                agent_index=idx,
+                reason="invalid_model_requirement_dict",
+                error=str(exc),
+            )
+            return None
+        return req, req.tier
+
+    tier: ModelTier = agent.get("tier", "medium")
+    preset = agent.get("personality_preset")
+    try:
+        req = resolve_fn(tier, preset)
+    except (ValidationError, ValueError) as exc:
+        logger.warning(
+            TEMPLATE_MODEL_MATCH_SKIPPED,
+            agent_index=idx,
+            tier=tier,
+            preset=preset,
+            reason="invalid_requirement",
+            error=str(exc),
+        )
+        return None
+    return req, tier
+
+
 def match_all_agents(
     agents: list[dict[str, Any]],
     providers: dict[str, Any],
@@ -107,8 +154,15 @@ def match_all_agents(
         **not** copied. This function only reads agent dicts.
 
     Args:
-        agents: List of expanded agent config dicts.  Each must have
-            ``tier`` (str) and optionally ``personality_preset`` (str).
+        agents: List of expanded agent config dicts.  Model requirement
+            resolution uses three paths (checked in order):
+
+            - ``model_requirement`` (``ModelRequirement``): used directly.
+            - ``model_requirement`` (dict): deserialized to
+              ``ModelRequirement`` via ``parse_model_requirement``.
+            - ``tier`` (str) + optional ``personality_preset`` (str):
+              resolved via ``resolve_model_requirement`` with
+              personality-based affinity defaults.
         providers: Provider name -> provider config mapping.  Each
             provider config must have a ``models`` attribute returning
             a tuple of ``ProviderModelConfig``.
@@ -121,6 +175,8 @@ def match_all_agents(
         first available provider/model as a fallback.
     """
     from synthorg.templates.model_requirements import (  # noqa: PLC0415
+        ModelRequirement,
+        parse_model_requirement,
         resolve_model_requirement,
     )
 
@@ -132,19 +188,16 @@ def match_all_agents(
     ]
 
     for idx, agent in enumerate(agents):
-        tier: ModelTier = agent.get("tier", "medium")
-        preset = agent.get("personality_preset")
-        try:
-            req = resolve_model_requirement(tier, preset)
-        except ValidationError, ValueError:
-            logger.warning(
-                TEMPLATE_MODEL_MATCH_SKIPPED,
-                agent_index=idx,
-                tier=tier,
-                preset=preset,
-                reason="invalid_requirement",
-            )
+        resolved = _resolve_agent_requirement(
+            agent,
+            idx,
+            ModelRequirement,
+            parse_model_requirement,
+            resolve_model_requirement,
+        )
+        if resolved is None:
             continue
+        req, tier = resolved
 
         best_provider: str | None = None
         best_model: ProviderModelConfig | None = None
