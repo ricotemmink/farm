@@ -43,11 +43,28 @@ const (
 	apiTimeout  = 30 * time.Second
 )
 
+// checkRedirectHost validates that each redirect hop stays within
+// AllowedDownloadHosts. This prevents a compromised redirect chain
+// from opening connections to internal hosts before the post-response
+// check in httpGetWithClient fires.
+func checkRedirectHost(req *http.Request, _ []*http.Request) error {
+	if req.URL.Scheme != "https" {
+		return fmt.Errorf("redirect to disallowed scheme %q", req.URL.Scheme)
+	}
+	if !AllowedDownloadHosts[req.URL.Hostname()] {
+		return fmt.Errorf("redirect to disallowed host %q", req.URL.Hostname())
+	}
+	return nil
+}
+
 // apiClient is a shared HTTP client for lightweight GitHub API requests
 // (release metadata). Reuses connections across calls within a single
 // CLI invocation. The download path uses its own client with a longer
 // timeout (httpTimeout).
-var apiClient = &http.Client{Timeout: apiTimeout}
+var apiClient = &http.Client{
+	Timeout:       apiTimeout,
+	CheckRedirect: checkRedirectHost,
+}
 
 // Release represents a GitHub release.
 type Release struct {
@@ -140,8 +157,9 @@ func CheckDevFromURL(ctx context.Context, url string) (CheckResult, error) {
 
 // selectBestRelease picks the best release from a list that may contain both
 // stable and dev pre-releases. Prefers stable if it is newer than or equal to
-// the latest dev release. Assumes releases are ordered newest-first (GitHub API
-// default for GET /repos/{owner}/{repo}/releases).
+// the latest dev release. Compares all candidates by version rather than
+// relying on API ordering, which is not guaranteed to be newest-first
+// (draft-then-publish releases may appear out of version order).
 func selectBestRelease(releases []devRelease) (*devRelease, error) {
 	var latestDev, latestStable *devRelease
 	for i := range releases {
@@ -149,12 +167,30 @@ func selectBestRelease(releases []devRelease) (*devRelease, error) {
 		if r.Draft {
 			continue
 		}
+		// Validate tag before using it as a baseline or candidate.
+		// Malformed tags (err != nil) are silently skipped -- tags
+		// come from the GitHub API and are expected to be well-formed.
+		if _, err := compareWithDev(r.TagName, r.TagName); err != nil {
+			continue
+		}
+		tag := strings.TrimPrefix(r.TagName, "v")
 		if r.Prerelease && strings.Contains(r.TagName, "-dev.") {
+			// Verify the dev suffix actually parsed to a number.
+			// splitDev returns devNum == -1 for malformed suffixes
+			// like "0.5.0-dev.NaN", which would be mis-ranked as
+			// stable by compareWithDev. Skip these.
+			if devNum, _ := splitDev(tag); devNum < 0 {
+				continue
+			}
 			if latestDev == nil {
+				latestDev = r
+			} else if cmp, err := compareWithDev(r.TagName, latestDev.TagName); err == nil && cmp > 0 {
 				latestDev = r
 			}
 		} else if !r.Prerelease {
 			if latestStable == nil {
+				latestStable = r
+			} else if cmp, err := compareWithDev(r.TagName, latestStable.TagName); err == nil && cmp > 0 {
 				latestStable = r
 			}
 		}
@@ -218,7 +254,7 @@ func fetchJSON[T any](ctx context.Context, url string) (T, error) {
 
 // compareWithDev compares two version strings that may contain .dev suffixes.
 // Returns >0 if a > b, 0 if equal, <0 if a < b.
-// v0.4.7 > v0.4.7.dev3 > v0.4.7.dev2 > v0.4.6.
+// v0.4.7 > v0.4.7-dev.3 > v0.4.7-dev.2 > v0.4.6.
 func compareWithDev(a, b string) (int, error) {
 	aDev, aBase := splitDev(strings.TrimPrefix(a, "v"))
 	bDev, bBase := splitDev(strings.TrimPrefix(b, "v"))
@@ -244,7 +280,11 @@ func compareWithDev(a, b string) (int, error) {
 	}
 }
 
-// splitDev splits "0.4.7-dev.3" into (3, "0.4.7") or (-1, "0.4.7") if no -dev. suffix.
+// splitDev splits "0.4.7-dev.3" into (3, "0.4.7") or (-1, "0.4.7") if no
+// -dev. suffix. When the suffix is present but non-numeric (e.g.
+// "0.4.7-dev.NaN" or "0.4.7-dev."), returns (-1, base) -- the tag is
+// treated as stable by compareWithDev. A devNum of -1 always means
+// "stable / no valid dev suffix".
 func splitDev(v string) (devNum int, base string) {
 	idx := strings.Index(v, "-dev.")
 	if idx < 0 {
@@ -254,7 +294,7 @@ func splitDev(v string) (devNum int, base string) {
 	numStr := v[idx+5:] // skip "-dev."
 	n, err := strconv.Atoi(numStr)
 	if err != nil {
-		return -1, v
+		return -1, base
 	}
 	return n, base
 }
@@ -382,7 +422,10 @@ func Download(ctx context.Context, assetURL, checksumURL, bundleURL string) ([]b
 		return nil, fmt.Errorf("no checksum file found in release assets -- refusing to install unverified binary")
 	}
 
-	client := &http.Client{Timeout: httpTimeout}
+	client := &http.Client{
+		Timeout:       httpTimeout,
+		CheckRedirect: checkRedirectHost,
+	}
 
 	// Download binary archive.
 	archiveData, err := httpGetWithClient(ctx, client, assetURL, maxBinaryBytes)
@@ -431,57 +474,24 @@ func ReplaceAt(binaryData []byte, execPath string) error {
 		return fmt.Errorf("resolving symlinks: %w", err)
 	}
 
-	// Write to a temp file in the same directory, then rename atomically.
 	dir := filepath.Dir(execPath)
-	tmpFile, err := os.CreateTemp(dir, binaryName+".*.tmp")
+	tmpPath, err := writeTempBinary(binaryData, dir)
 	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.Write(binaryData); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("writing new binary: %w", err)
-	}
-	if err := tmpFile.Chmod(0o755); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("setting permissions: %w", err)
-	}
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("syncing new binary: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("closing new binary: %w", err)
+		return err
 	}
 
-	// On Windows, we can't overwrite the running binary -- rename first.
-	// Use a random suffix to avoid predictable paths.
-	var oldPath string
-	if runtime.GOOS == "windows" {
-		oldFile, err := os.CreateTemp(dir, binaryName+".old.*.tmp")
-		if err != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("creating temp file for old binary: %w", err)
-		}
-		oldPath = oldFile.Name()
-		_ = oldFile.Close()
-		_ = os.Remove(oldPath) // Remove so Rename can use the path.
-
-		if err := os.Rename(execPath, oldPath); err != nil {
-			_ = os.Remove(tmpPath)
-			return fmt.Errorf("renaming current binary: %w", err)
-		}
+	oldPath, err := windowsPreReplace(dir, execPath, tmpPath)
+	if err != nil {
+		return err
 	}
 
 	if err := os.Rename(tmpPath, execPath); err != nil {
-		// Attempt rollback on Windows.
 		if runtime.GOOS == "windows" && oldPath != "" {
-			_ = os.Rename(oldPath, execPath)
+			if rollbackErr := os.Rename(oldPath, execPath); rollbackErr != nil {
+				// Rollback failed: leave tmpPath intact for manual recovery.
+				return fmt.Errorf("replacing binary (old binary left at %s): %w", oldPath,
+					errors.Join(err, fmt.Errorf("rollback: %w", rollbackErr)))
+			}
 		}
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("replacing binary: %w", err)
@@ -491,8 +501,61 @@ func ReplaceAt(binaryData []byte, execPath string) error {
 	if oldPath != "" {
 		_ = os.Remove(oldPath)
 	}
-
 	return nil
+}
+
+// writeTempBinary writes binary data to a temp file in dir and returns
+// the temp file path. The file is synced, closed, and set to 0755.
+func writeTempBinary(data []byte, dir string) (string, error) {
+	tmpFile, err := os.CreateTemp(dir, binaryName+".*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("creating temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("writing new binary: %w", err)
+	}
+	if err := tmpFile.Chmod(0o755); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("setting permissions: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("syncing new binary: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("closing new binary: %w", err)
+	}
+	return tmpPath, nil
+}
+
+// windowsPreReplace moves the current binary out of the way on Windows
+// (where the running binary cannot be overwritten). Returns the old
+// binary path for cleanup, or empty string on non-Windows.
+func windowsPreReplace(dir, execPath, tmpPath string) (string, error) {
+	if runtime.GOOS != "windows" {
+		return "", nil
+	}
+	oldFile, err := os.CreateTemp(dir, binaryName+".old.*.tmp")
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("creating temp file for old binary: %w", err)
+	}
+	oldPath := oldFile.Name()
+	_ = oldFile.Close()
+	_ = os.Remove(oldPath) // Remove so Rename can use the path.
+
+	if err := os.Rename(execPath, oldPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("renaming current binary: %w", err)
+	}
+	return oldPath, nil
 }
 
 func assetName() string {
