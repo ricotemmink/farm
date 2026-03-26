@@ -2,7 +2,7 @@
  * Framer Motion animation presets for the SynthOrg dashboard.
  *
  * Import these constants instead of hardcoding animation values in components.
- * See docs/design/ux-guidelines.md Section 4 for the full animation language.
+ * See docs/design/ux-guidelines.md (Animation Language section) for the full animation language.
  *
  * @example
  * ```tsx
@@ -148,9 +148,9 @@ export const pageEnter: Variants = {
  * Apply via CSS `@keyframes` or inline style -- not a Framer Motion variant,
  * because the flash triggers on data change, not mount/unmount.
  *
- * Recommended CSS implementation:
+ * Recommended CSS implementation (actual keyframe is `so-status-flash` in `design-tokens.css`):
  * ```css
- * \@keyframes status-flash {
+ * \@keyframes so-status-flash {
  *   0%   { background-color: var(--so-overlay-flash); }
  *   33%  { background-color: var(--so-overlay-flash); }  // hold
  *   50%  { background-color: var(--so-overlay-flash); }  // hold end
@@ -158,12 +158,95 @@ export const pageEnter: Variants = {
  * }
  * ```
  */
+const _FLASH_MS = 200;
+const _HOLD_MS = 100;
+const _FADE_MS = 300;
+
 export const STATUS_FLASH = {
-  flashMs: 200,
-  holdMs: 100,
-  fadeMs: 300,
-  totalMs: 600,
+  flashMs: _FLASH_MS,
+  holdMs: _HOLD_MS,
+  fadeMs: _FADE_MS,
+  totalMs: _FLASH_MS + _HOLD_MS + _FADE_MS,
 } as const;
+
+// ---------------------------------------------------------------------------
+// Toast animations
+// ---------------------------------------------------------------------------
+
+/** Toast entrance: slide up from 16px below with spring settle. */
+export const toastEntrance: Variants = {
+  initial: { opacity: 0, y: 16, scale: 0.95 },
+  animate: { opacity: 1, y: 0, scale: 1, transition: springDefault },
+  exit: { opacity: 0, x: 80, transition: tweenFast },
+};
+
+// ---------------------------------------------------------------------------
+// Modal / overlay animations
+// ---------------------------------------------------------------------------
+
+/** Overlay backdrop: simple opacity fade. */
+export const overlayBackdrop: Variants = {
+  initial: { opacity: 0 },
+  animate: { opacity: 1, transition: tweenDefault },
+  exit: { opacity: 0, transition: tweenFast },
+};
+
+/** Modal/dialog entrance: scale up with spring + fade. */
+export const modalEntrance: Variants = {
+  initial: { opacity: 0, scale: 0.95, y: 8 },
+  animate: { opacity: 1, scale: 1, y: 0, transition: springDefault },
+  exit: { opacity: 0, scale: 0.95, y: 8, transition: tweenFast },
+};
+
+// ---------------------------------------------------------------------------
+// List reorder
+// ---------------------------------------------------------------------------
+
+/** List item enter/exit for AnimatePresence + layout animations. */
+export const listItemLayout: Variants = {
+  initial: { opacity: 0, y: 8 },
+  animate: { opacity: 1, y: 0, transition: tweenDefault },
+  exit: { opacity: 0, y: -8, transition: tweenFast },
+};
+
+// ---------------------------------------------------------------------------
+// Inline edit
+// ---------------------------------------------------------------------------
+
+/** Inline edit field entrance: subtle fade-in. */
+export const inlineEditEntrance: Variants = {
+  initial: { opacity: 0 },
+  animate: { opacity: 1, transition: springGentle },
+  exit: { opacity: 0, transition: tweenFast },
+};
+
+// ---------------------------------------------------------------------------
+// Status color transition
+// ---------------------------------------------------------------------------
+
+/** Tween for animating between status colors (e.g. active -> error). */
+export const statusColorTransition: Transition = {
+  type: "tween",
+  duration: 0.3,
+  ease: [0.4, 0, 0.2, 1],
+};
+
+// ---------------------------------------------------------------------------
+// Reduced page variants
+// ---------------------------------------------------------------------------
+
+/** Page transition for reduced-motion: opacity-only fade, no slide. */
+export const reducedPageVariants: Variants = {
+  initial: { opacity: 0 },
+  animate: {
+    opacity: 1,
+    transition: { type: "tween", duration: 0.15, ease: "easeOut" },
+  },
+  exit: {
+    opacity: 0,
+    transition: { type: "tween", duration: 0.1, ease: "easeIn" },
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Badge bounce
