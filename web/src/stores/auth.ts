@@ -8,6 +8,7 @@
 import { create } from 'zustand'
 import * as authApi from '@/api/endpoints/auth'
 import { getErrorMessage, isAxiosError } from '@/utils/errors'
+import { IS_DEV_AUTH_BYPASS } from '@/utils/dev'
 import type { HumanRole, UserInfoResponse } from '@/api/types'
 
 // ── Module-scoped internals (not renderable state) ──────────
@@ -44,7 +45,17 @@ interface AuthState {
 
 // ── Initial state from localStorage ─────────────────────────
 
+// Dev-only fake user for bypassing auth when no backend is running.
+const DEV_USER: UserInfoResponse | null = IS_DEV_AUTH_BYPASS
+  ? { id: 'dev-user', username: 'developer', role: 'ceo', must_change_password: false }
+  : null
+
 function getInitialToken(): string | null {
+  if (IS_DEV_AUTH_BYPASS) {
+    // UI-only bypass: API calls will receive 401 and trigger logout
+    console.warn('[dev] Auth bypass active -- UI-only, no real backend session')
+    return 'dev-bypass-token'
+  }
   const storedToken = localStorage.getItem('auth_token')
   const expiresAt = Number(localStorage.getItem('auth_token_expires_at') ?? 0)
   if (storedToken && Date.now() < expiresAt) {
@@ -102,7 +113,7 @@ export const useAuthStore = create<AuthState>()((set, get) => {
 
   return {
     token: initialToken,
-    user: null,
+    user: DEV_USER,
     loading: false,
     _mustChangePasswordFallback: localStorage.getItem('auth_must_change_password') === 'true',
 

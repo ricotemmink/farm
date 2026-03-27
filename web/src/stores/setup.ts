@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { getSetupStatus } from '@/api/endpoints/setup'
+import { IS_DEV_AUTH_BYPASS } from '@/utils/dev'
 
 interface SetupState {
   /** Whether initial setup is complete. `null` means not yet fetched. */
@@ -11,7 +12,7 @@ interface SetupState {
 }
 
 export const useSetupStore = create<SetupState>()((set, get) => ({
-  setupComplete: null,
+  setupComplete: IS_DEV_AUTH_BYPASS ? true : null,
   loading: false,
   error: false,
 
