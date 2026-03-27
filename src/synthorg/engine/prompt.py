@@ -26,10 +26,16 @@ from jinja2 import TemplateSyntaxError
 from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel, ConfigDict, Field
 
+from synthorg.budget.currency import DEFAULT_CURRENCY, format_cost, get_currency_symbol
+from synthorg.engine._prompt_helpers import (
+    build_core_context as _build_core_context,
+)
+from synthorg.engine._prompt_helpers import (
+    build_metadata as _build_metadata,
+)
 from synthorg.engine.errors import PromptBuildError
 from synthorg.engine.policy_validation import validate_policy_quality
 from synthorg.engine.prompt_template import (
-    AUTONOMY_INSTRUCTIONS,
     DEFAULT_TEMPLATE,
     PROMPT_TEMPLATE_VERSION,
 )
@@ -136,6 +142,7 @@ def build_system_prompt(  # noqa: PLR0913
     token_estimator: PromptTokenEstimator | None = None,
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget_indicator: str | None = None,
+    currency: str = DEFAULT_CURRENCY,
 ) -> SystemPrompt:
     """Build a system prompt from agent identity and optional context.
 
@@ -158,6 +165,8 @@ def build_system_prompt(  # noqa: PLR0913
         effective_autonomy: Resolved autonomy for the current run.
         context_budget_indicator: Formatted context budget indicator
             string to inject into the prompt.
+        currency: ISO 4217 currency code for budget displays
+            (e.g. ``"USD"``, ``"EUR"``).
 
     Returns:
         Immutable :class:`SystemPrompt` with rendered content and metadata.
@@ -207,6 +216,7 @@ def build_system_prompt(  # noqa: PLR0913
             estimator=estimator,
             effective_autonomy=effective_autonomy,
             context_budget_indicator=context_budget_indicator,
+            currency=currency,
         )
     except PromptBuildError:
         raise  # Already logged by inner functions.
@@ -322,61 +332,6 @@ def _resolve_template(custom_template: str | None) -> str:
     return custom_template
 
 
-def _build_core_context(
-    agent: AgentIdentity,
-    role: Role | None,
-    effective_autonomy: EffectiveAutonomy | None = None,
-) -> dict[str, Any]:
-    """Build the core (always-present) template variables from agent identity.
-
-    Args:
-        agent: Agent identity.
-        role: Optional role with description.
-        effective_autonomy: Resolved autonomy for the current run.
-
-    Returns:
-        Dict of core template variables.
-    """
-    personality = agent.personality
-    authority = agent.authority
-
-    ctx: dict[str, Any] = {
-        "agent_name": agent.name,
-        "agent_role": agent.role,
-        "agent_department": agent.department,
-        "agent_level": agent.level.value,
-        "role_description": role.description if role else "",
-        "personality_description": personality.description,
-        "communication_style": personality.communication_style,
-        "risk_tolerance": personality.risk_tolerance.value,
-        "creativity": personality.creativity.value,
-        "verbosity": personality.verbosity.value,
-        "decision_making": personality.decision_making.value,
-        "collaboration": personality.collaboration.value,
-        "conflict_approach": personality.conflict_approach.value,
-        "personality_traits": personality.traits,
-        "primary_skills": agent.skills.primary,
-        "secondary_skills": agent.skills.secondary,
-        "can_approve": authority.can_approve,
-        "reports_to": authority.reports_to or "",
-        "can_delegate_to": authority.can_delegate_to,
-        "budget_limit": authority.budget_limit,
-        "autonomy_instructions": AUTONOMY_INSTRUCTIONS[agent.level],
-    }
-
-    if effective_autonomy is not None:
-        ctx["effective_autonomy"] = {
-            "level": effective_autonomy.level.value,
-            "auto_approve_actions": sorted(effective_autonomy.auto_approve_actions),
-            "human_approval_actions": sorted(effective_autonomy.human_approval_actions),
-            "security_agent": effective_autonomy.security_agent,
-        }
-    else:
-        ctx["effective_autonomy"] = None
-
-    return ctx
-
-
 def _build_template_context(  # noqa: PLR0913
     *,
     agent: AgentIdentity,
@@ -387,6 +342,7 @@ def _build_template_context(  # noqa: PLR0913
     org_policies: tuple[str, ...] = (),
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget: str | None = None,
+    currency: str = DEFAULT_CURRENCY,
 ) -> dict[str, Any]:
     """Assemble the full Jinja2 template context from agent and optional inputs.
 
@@ -399,17 +355,24 @@ def _build_template_context(  # noqa: PLR0913
         org_policies: Company-wide policy texts.
         effective_autonomy: Resolved autonomy for the current run.
         context_budget: Formatted context budget indicator string.
+        currency: ISO 4217 currency code for budget displays.
 
     Returns:
         Dict of template variables.
     """
     context = _build_core_context(agent, role, effective_autonomy)
 
+    context["currency_symbol"] = get_currency_symbol(currency)
+    context["currency"] = currency
+    budget_limit = agent.authority.budget_limit
+    context["formatted_budget_limit"] = (
+        format_cost(budget_limit, currency) if budget_limit > 0 else ""
+    )
     context["org_policies"] = org_policies
     context["context_budget"] = context_budget
 
-    context["task"] = (
-        {
+    if task is not None:
+        context["task"] = {
             "title": task.title,
             "description": task.description,
             "acceptance_criteria": tuple(
@@ -418,9 +381,12 @@ def _build_template_context(  # noqa: PLR0913
             "budget_limit": task.budget_limit,
             "deadline": task.deadline,
         }
-        if task is not None
-        else None
-    )
+        context["formatted_task_budget"] = (
+            format_cost(task.budget_limit, currency) if task.budget_limit > 0 else ""
+        )
+    else:
+        context["task"] = None
+        context["formatted_task_budget"] = ""
 
     context["tools"] = (
         tuple({"name": t.name, "description": t.description} for t in available_tools)
@@ -508,24 +474,6 @@ def _render_template(template_str: str, context: dict[str, Any]) -> str:
         raise PromptBuildError(msg) from exc
 
 
-def _build_metadata(agent: AgentIdentity) -> dict[str, str]:
-    """Build metadata dict from agent identity.
-
-    Args:
-        agent: The agent identity.
-
-    Returns:
-        Dict with agent_id, name, role, department, and level.
-    """
-    return {
-        "agent_id": str(agent.id),
-        "name": agent.name,
-        "role": agent.role,
-        "department": agent.department,
-        "level": agent.level.value,
-    }
-
-
 def _trim_sections(  # noqa: PLR0913
     *,
     template_str: str,
@@ -539,6 +487,7 @@ def _trim_sections(  # noqa: PLR0913
     estimator: PromptTokenEstimator,
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget: str | None = None,
+    currency: str = DEFAULT_CURRENCY,
 ) -> tuple[
     str,
     int,
@@ -565,6 +514,7 @@ def _trim_sections(  # noqa: PLR0913
             estimator,
             effective_autonomy=effective_autonomy,
             context_budget=context_budget,
+            currency=currency,
         )
         if estimated <= max_tokens:
             break
@@ -592,6 +542,7 @@ def _trim_sections(  # noqa: PLR0913
             estimator,
             effective_autonomy=effective_autonomy,
             context_budget=context_budget,
+            currency=currency,
         )
 
     _log_trim_results(agent, max_tokens, estimated, trimmed_sections)
@@ -636,6 +587,7 @@ def _render_with_trimming(  # noqa: PLR0913
     estimator: PromptTokenEstimator,
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget_indicator: str | None = None,
+    currency: str = DEFAULT_CURRENCY,
 ) -> SystemPrompt:
     """Render the prompt, trimming optional sections if over token budget."""
     content, estimated = _render_and_estimate(
@@ -649,6 +601,7 @@ def _render_with_trimming(  # noqa: PLR0913
         estimator,
         effective_autonomy=effective_autonomy,
         context_budget=context_budget_indicator,
+        currency=currency,
     )
 
     if max_tokens is not None and estimated > max_tokens:
@@ -664,6 +617,7 @@ def _render_with_trimming(  # noqa: PLR0913
             estimator=estimator,
             effective_autonomy=effective_autonomy,
             context_budget=context_budget_indicator,
+            currency=currency,
         )
 
     return _build_prompt_result(
@@ -721,6 +675,7 @@ def _render_and_estimate(  # noqa: PLR0913
     *,
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget: str | None = None,
+    currency: str = DEFAULT_CURRENCY,
 ) -> tuple[str, int]:
     """Render the template and estimate its token count.
 
@@ -735,6 +690,7 @@ def _render_and_estimate(  # noqa: PLR0913
         estimator: Token estimator.
         effective_autonomy: Resolved autonomy for the current run.
         context_budget: Formatted context budget indicator string.
+        currency: ISO 4217 currency code for budget displays.
 
     Returns:
         Tuple of (rendered content, estimated token count).
@@ -748,6 +704,7 @@ def _render_and_estimate(  # noqa: PLR0913
         org_policies=org_policies,
         effective_autonomy=effective_autonomy,
         context_budget=context_budget,
+        currency=currency,
     )
     content = _render_template(template_str, context)
     return content, estimator.estimate_tokens(content)
@@ -783,11 +740,16 @@ def build_error_prompt(
     )
 
 
-def format_task_instruction(task: Task) -> str:
+def format_task_instruction(
+    task: Task,
+    *,
+    currency: str = DEFAULT_CURRENCY,
+) -> str:
     """Format a task into a user message for the initial conversation.
 
     Args:
         task: Task to format.
+        currency: ISO 4217 currency code for budget display.
 
     Returns:
         Markdown-formatted task instruction string.
@@ -801,7 +763,7 @@ def format_task_instruction(task: Task) -> str:
 
     if task.budget_limit > 0:
         parts.append("")
-        parts.append(f"**Budget limit:** ${task.budget_limit:.2f} USD")
+        parts.append(f"**Budget limit:** {format_cost(task.budget_limit, currency)}")
 
     if task.deadline:
         parts.append("")

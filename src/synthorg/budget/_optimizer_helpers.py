@@ -10,6 +10,7 @@ import statistics
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
+from synthorg.budget.currency import DEFAULT_CURRENCY, format_cost
 from synthorg.budget.enums import BudgetAlertLevel
 from synthorg.budget.optimizer_models import (
     AgentEfficiency,
@@ -114,6 +115,8 @@ def _detect_spike_anomaly(  # noqa: PLR0913
     window_starts: tuple[datetime, ...],
     window_duration: timedelta,
     config: CostOptimizerConfig,
+    *,
+    currency: str = DEFAULT_CURRENCY,
 ) -> SpendingAnomaly | None:
     """Detect a spike anomaly for a single agent.
 
@@ -143,8 +146,10 @@ def _detect_spike_anomaly(  # noqa: PLR0913
             anomaly_type=AnomalyType.SPIKE,
             severity=AnomalySeverity.HIGH,
             description=(
-                f"Agent {agent_id!r} went from $0.00 baseline "
-                f"to ${current:.2f} in the latest window"
+                f"Agent {agent_id!r} went from "
+                f"{format_cost(0.0, currency)} baseline "
+                f"to {format_cost(current, currency)} "
+                f"in the latest window"
             ),
             current_value=current,
             baseline_value=0.0,
@@ -178,8 +183,10 @@ def _detect_spike_anomaly(  # noqa: PLR0913
         anomaly_type=AnomalyType.SPIKE,
         severity=severity,
         description=(
-            f"Agent {agent_id!r} spent ${current:.2f} vs "
-            f"${mean:.2f} baseline ({effective_deviation:.1f}x)"
+            f"Agent {agent_id!r} spent "
+            f"{format_cost(current, currency)} vs "
+            f"{format_cost(mean, currency)} baseline "
+            f"({effective_deviation:.1f}x)"
         ),
         current_value=current,
         baseline_value=round(mean, BUDGET_ROUNDING_PRECISION),
@@ -254,6 +261,7 @@ def _build_downgrade_recommendation(
     current_model: str,
     downgrade_map: dict[str, str],
     resolver: ModelResolver,
+    currency: str = DEFAULT_CURRENCY,
 ) -> DowngradeRecommendation | None:
     """Build a downgrade recommendation for a single agent."""
     current_resolved = resolver.resolve_safe(current_model)
@@ -327,9 +335,10 @@ def _build_downgrade_recommendation(
         estimated_savings_per_1k=savings,
         reason=(
             f"Switch from {current_model!r} "
-            f"(${current_resolved.total_cost_per_1k:.4f}/1k) to "
-            f"{target_resolved.model_id!r} "
-            f"(${target_resolved.total_cost_per_1k:.4f}/1k)"
+            f"({format_cost(current_resolved.total_cost_per_1k, currency, precision=4)}"
+            f"/1k) to {target_resolved.model_id!r} "
+            f"({format_cost(target_resolved.total_cost_per_1k, currency, precision=4)}"
+            f"/1k)"
         ),
     )
 

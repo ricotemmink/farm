@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from synthorg.api.errors import ErrorCategory, ErrorCode  # noqa: TC001
+from synthorg.budget.currency import DEFAULT_CURRENCY
 from synthorg.config.schema import ProviderConfig, ProviderModelConfig  # noqa: TC001
 from synthorg.core.enums import (
     ApprovalRiskLevel,
@@ -225,7 +226,7 @@ class CreateTaskRequest(BaseModel):
         created_by: Agent name of the creator.
         assigned_to: Optional assignee agent ID.
         estimated_complexity: Complexity estimate.
-        budget_limit: Maximum USD spend.
+        budget_limit: Maximum spend in USD (base currency).
     """
 
     model_config = ConfigDict(frozen=True)
@@ -475,6 +476,13 @@ class CoordinationResultResponse(BaseModel):
     topology: NotBlankStr
     total_duration_seconds: float = Field(ge=0.0)
     total_cost_usd: float = Field(ge=0.0)
+    currency: str = Field(
+        default=DEFAULT_CURRENCY,
+        min_length=3,
+        max_length=3,
+        pattern=r"^[A-Z]{3}$",
+        description="ISO 4217 currency code",
+    )
     phases: tuple[CoordinationPhaseResponse, ...] = Field(min_length=1)
     wave_count: int = Field(ge=0)
 

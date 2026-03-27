@@ -207,7 +207,29 @@ class TestMergeActivityTimeline:
         assert "failed" in timeline[0].description
         assert timeline[1].related_ids["task_id"] == "task-a"
         assert "succeeded" in timeline[1].description
-        assert "USD" in timeline[1].description
+        assert "\u20ac" in timeline[1].description
+
+    def test_currency_passed_to_task_metric_descriptions(self) -> None:
+        task = _make_task_metric(task_id="task-usd", cost_usd=1.5)
+        timeline = merge_activity_timeline(
+            lifecycle_events=(),
+            task_metrics=(task,),
+            currency="USD",
+        )
+        completed = [e for e in timeline if e.event_type == "task_completed"]
+        assert len(completed) == 1
+        assert "$" in completed[0].description
+
+    def test_currency_passed_to_cost_record_descriptions(self) -> None:
+        cost = _make_cost_record(cost_usd=0.05)
+        timeline = merge_activity_timeline(
+            lifecycle_events=(),
+            task_metrics=(),
+            cost_records=(cost,),
+            currency="GBP",
+        )
+        assert len(timeline) == 1
+        assert "\u00a3" in timeline[0].description
 
     def test_identical_timestamps_stable_sort(self) -> None:
         ts = _NOW - timedelta(days=1)
@@ -345,7 +367,7 @@ class TestCostIncurredEvents:
         assert evt.timestamp == _NOW
         assert "test-medium-001" in evt.description
         assert "500+100 tokens" in evt.description
-        assert "0.0025 USD" in evt.description
+        assert "\u20ac0.0025" in evt.description
         assert evt.related_ids["agent_id"] == "agent-001"
         assert evt.related_ids["task_id"] == "task-001"
 

@@ -16,6 +16,7 @@ from synthorg.budget.config import (
     BudgetAlertConfig,
     BudgetConfig,
 )
+from synthorg.budget.currency import DEFAULT_CURRENCY
 from synthorg.budget.enforcer import BudgetEnforcer
 from synthorg.budget.errors import BudgetExhaustedError, DailyLimitExceededError
 from synthorg.budget.tracker import CostTracker
@@ -150,6 +151,37 @@ def _patch_periods() -> Iterator[None]:
         yield
 
 
+# ── Currency property ────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+class TestCurrencyProperty:
+    """Tests for BudgetEnforcer.currency property."""
+
+    @pytest.mark.parametrize(
+        ("currency_override", "expected"),
+        [
+            (None, DEFAULT_CURRENCY),
+            ("GBP", "GBP"),
+        ],
+        ids=["default", "custom"],
+    )
+    def test_returns_configured_or_default(
+        self,
+        currency_override: str | None,
+        expected: str,
+    ) -> None:
+        if currency_override is None:
+            cfg = _make_budget_config(total_monthly=100.0)
+        else:
+            cfg = BudgetConfig(currency=currency_override)
+        enforcer = BudgetEnforcer(
+            budget_config=cfg,
+            cost_tracker=CostTracker(budget_config=cfg),
+        )
+        assert enforcer.currency == expected
+
+
 # ── Pre-flight checks ───────────────────────────────────────────────
 
 
@@ -199,6 +231,31 @@ class TestCheckCanExecute:
                 BudgetExhaustedError,
                 match="Monthly budget exhausted",
             ),
+        ):
+            await enforcer.check_can_execute("alice")
+
+    async def test_error_message_includes_currency_symbol(self) -> None:
+        """BudgetExhaustedError uses the configured currency symbol."""
+        cfg = BudgetConfig(
+            total_monthly=100.0,
+            per_task_limit=100.0,
+            per_agent_daily_limit=100.0,
+            currency="GBP",
+        )
+        tracker = CostTracker(budget_config=cfg)
+        await tracker.record(
+            make_cost_record(
+                cost_usd=100.0,
+                input_tokens=100,
+                output_tokens=50,
+                timestamp=_RECORD_TS,
+            ),
+        )
+        enforcer = BudgetEnforcer(budget_config=cfg, cost_tracker=tracker)
+
+        with (
+            _patch_periods(),
+            pytest.raises(BudgetExhaustedError, match="\u00a3"),
         ):
             await enforcer.check_can_execute("alice")
 
@@ -882,7 +939,7 @@ class TestMakeBudgetChecker:
 
         # First call at 75% → should emit WARNING
         with patch(
-            "synthorg.budget.enforcer.logger",
+            "synthorg.budget._enforcer_helpers.logger",
         ) as mock_logger:
             checker(ctx_warning)
             warn_calls = [
@@ -894,7 +951,7 @@ class TestMakeBudgetChecker:
 
         # Second call at same level → should NOT emit again
         with patch(
-            "synthorg.budget.enforcer.logger",
+            "synthorg.budget._enforcer_helpers.logger",
         ) as mock_logger2:
             checker(ctx_warning)
             warn_calls2 = [

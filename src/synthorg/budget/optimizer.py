@@ -25,6 +25,7 @@ from synthorg.budget._optimizer_helpers import (
     _group_records_by_agent,
 )
 from synthorg.budget.billing import billing_period_start
+from synthorg.budget.currency import format_cost
 from synthorg.budget.enums import BudgetAlertLevel
 from synthorg.budget.optimizer_models import (
     AnomalyDetectionResult,
@@ -189,6 +190,7 @@ class CostOptimizer:
                 window_starts,
                 window_duration,
                 self._config,
+                currency=self._budget_config.currency,
             )
             if anomaly is not None:
                 logger.warning(
@@ -572,6 +574,7 @@ class CostOptimizer:
                 current_model=most_used_model,
                 downgrade_map=downgrade_map,
                 resolver=self._model_resolver,
+                currency=self._budget_config.currency,
             )
             if recommendation is not None:
                 recommendations.append(recommendation)
@@ -593,6 +596,7 @@ class CostOptimizer:
         """Find routing suggestions for all agents."""
         assert self._model_resolver is not None  # noqa: S101
         suggestions: list[RoutingSuggestion] = []
+        cur = self._budget_config.currency
 
         for agent_id in sorted(by_agent):
             agent_records = by_agent[agent_id]
@@ -613,6 +617,16 @@ class CostOptimizer:
                 if candidate.max_context < current_resolved.max_context:
                     continue
 
+                cur_fmt = format_cost(
+                    current_resolved.total_cost_per_1k,
+                    cur,
+                    precision=4,
+                )
+                cand_fmt = format_cost(
+                    candidate.total_cost_per_1k,
+                    cur,
+                    precision=4,
+                )
                 suggestions.append(
                     RoutingSuggestion(
                         agent_id=agent_id,
@@ -628,9 +642,9 @@ class CostOptimizer:
                         ),
                         reason=(
                             f"Switch from {most_used!r} "
-                            f"(${current_resolved.total_cost_per_1k:.4f}/1k) "
-                            f"to {candidate.model_id!r} "
-                            f"(${candidate.total_cost_per_1k:.4f}/1k) "
+                            f"({cur_fmt}/1k) to "
+                            f"{candidate.model_id!r} "
+                            f"({cand_fmt}/1k) "
                             f"-- same context window, lower cost"
                         ),
                     ),
@@ -696,8 +710,10 @@ class CostOptimizer:
             return ApprovalDecision(
                 approved=False,
                 reason=(
-                    f"Denied: projected cost ${projected_cost:.2f} "
-                    f"would exceed hard stop ${hard_stop_limit:.2f}"
+                    f"Denied: projected cost "
+                    f"{format_cost(projected_cost, self._budget_config.currency)} "
+                    f"would exceed hard stop "
+                    f"{format_cost(hard_stop_limit, self._budget_config.currency)}"
                 ),
                 budget_remaining_usd=remaining,
                 budget_used_percent=used_pct,
@@ -719,8 +735,10 @@ class CostOptimizer:
         warn_threshold = self._config.approval_warn_threshold_usd
         if estimated_cost_usd >= warn_threshold:
             conditions.append(
-                f"High-cost operation: ${estimated_cost_usd:.2f} "
-                f"(threshold: ${warn_threshold:.2f})"
+                f"High-cost operation: "
+                f"{format_cost(estimated_cost_usd, self._budget_config.currency)} "
+                f"(threshold: "
+                f"{format_cost(warn_threshold, self._budget_config.currency)})"
             )
 
         if projected_alert in (BudgetAlertLevel.WARNING, BudgetAlertLevel.CRITICAL):

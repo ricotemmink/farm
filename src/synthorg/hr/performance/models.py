@@ -34,7 +34,7 @@ class TaskMetricRecord(BaseModel):
         completed_at: When the task was completed.
         is_success: Whether the task completed successfully.
         duration_seconds: Wall-clock execution time.
-        cost_usd: Cost of the task in USD.
+        cost_usd: Cost of the task in USD (base currency).
         turns_used: Number of LLM turns used.
         tokens_used: Total tokens consumed.
         quality_score: Quality score (0.0-10.0), None if not scored.
@@ -60,7 +60,10 @@ class TaskMetricRecord(BaseModel):
         ge=0.0,
         description="Wall-clock execution time",
     )
-    cost_usd: float = Field(ge=0.0, description="Cost of the task in USD")
+    cost_usd: float = Field(
+        ge=0.0,
+        description="Cost of the task in USD (base currency)",
+    )
     turns_used: int = Field(ge=0, description="Number of LLM turns used")
     tokens_used: int = Field(ge=0, description="Total tokens consumed")
     quality_score: float | None = Field(
@@ -215,7 +218,7 @@ class LlmCalibrationRecord(BaseModel):
         drift: Absolute difference between LLM and behavioral scores (computed).
         rationale: LLM's explanation for the score.
         model_used: Which LLM model was used for evaluation.
-        cost_usd: Cost of the LLM call.
+        cost_usd: Cost of the LLM call in USD (base currency).
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -257,7 +260,7 @@ class LlmCalibrationRecord(BaseModel):
     )
     cost_usd: float = Field(
         ge=0.0,
-        description="Cost of the LLM call",
+        description="Cost of the LLM call in USD (base currency)",
     )
 
 
@@ -366,7 +369,7 @@ class WindowMetrics(BaseModel):
     avg_cost_per_task: float | None = Field(
         default=None,
         ge=0.0,
-        description="Average cost per task",
+        description="Average cost per task in USD (base currency)",
     )
     avg_completion_time_seconds: float | None = Field(
         default=None,

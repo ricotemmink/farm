@@ -15,6 +15,7 @@ from synthorg.api.errors import ServiceUnavailableError
 from synthorg.api.guards import require_read_access
 from synthorg.api.state import AppState  # noqa: TC001
 from synthorg.budget.billing import billing_period_start
+from synthorg.budget.currency import DEFAULT_CURRENCY
 from synthorg.budget.trends import (
     BucketSize,
     ForecastPoint,
@@ -65,6 +66,7 @@ class OverviewMetrics(BaseModel):
         cost_7d_trend: Daily spend sparkline for the last 7 days.
         active_agents_count: Number of active agents.
         idle_agents_count: Number of non-active agents.
+        currency: ISO 4217 currency code.
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -74,10 +76,19 @@ class OverviewMetrics(BaseModel):
         description="Task counts by status (keys are TaskStatus values)",
     )
     total_agents: int = Field(ge=0, description="Number of configured agents")
-    total_cost_usd: float = Field(ge=0.0, description="Total cost in USD")
+    total_cost_usd: float = Field(
+        ge=0.0, description="Total cost in USD (base currency)"
+    )
     budget_remaining_usd: float = Field(
         ge=0.0,
-        description="Remaining budget for the current billing period",
+        description="Remaining budget in USD (base currency)",
+    )
+    currency: str = Field(
+        default=DEFAULT_CURRENCY,
+        min_length=3,
+        max_length=3,
+        pattern=r"^[A-Z]{3}$",
+        description="ISO 4217 currency code",
     )
     budget_used_percent: float = Field(
         ge=0.0,
@@ -151,6 +162,13 @@ class ForecastResponse(BaseModel):
     avg_daily_spend_usd: float = Field(
         ge=0.0,
         description="Average daily spend used for projection",
+    )
+    currency: str = Field(
+        default=DEFAULT_CURRENCY,
+        min_length=3,
+        max_length=3,
+        pattern=r"^[A-Z]{3}$",
+        description="ISO 4217 currency code",
     )
 
 
@@ -363,6 +381,7 @@ async def _assemble_overview(  # noqa: PLR0913
     counts = Counter(t.status.value for t in all_tasks)
     by_status = {s.value: counts.get(s.value, 0) for s in TaskStatus}
 
+    budget_cfg = await app_state.config_resolver.get_budget_config()
     budget = await _resolve_budget_context(app_state, total_cost, now=now)
     # Overview sparkline uses daily buckets intentionally (not hourly
     # like /trends?period=7d) to produce a compact 7-point sparkline.
@@ -398,6 +417,7 @@ async def _assemble_overview(  # noqa: PLR0913
         cost_7d_trend=cost_7d,
         active_agents_count=active,
         idle_agents_count=idle,
+        currency=budget_cfg.currency,
     )
 
 
@@ -572,6 +592,7 @@ class AnalyticsController(Controller):
             days_until_exhausted=forecast.days_until_exhausted,
         )
 
+        budget_cfg = await app_state.config_resolver.get_budget_config()
         return ApiResponse(
             data=ForecastResponse(
                 horizon_days=horizon_days,
@@ -580,5 +601,6 @@ class AnalyticsController(Controller):
                 days_until_exhausted=forecast.days_until_exhausted,
                 confidence=forecast.confidence,
                 avg_daily_spend_usd=forecast.avg_daily_spend_usd,
+                currency=budget_cfg.currency,
             ),
         )
