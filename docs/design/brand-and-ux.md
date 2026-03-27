@@ -207,6 +207,7 @@ The following shared components live in `web/src/components/ui/` and form the bu
 | `Button` | `button.tsx` | shadcn standard | Standard button component (shadcn/ui). |
 | `TaskStatusIndicator` | `task-status-indicator.tsx` | `status: TaskStatus`, `label?: boolean`, `pulse?: boolean`, `className?: string` | Task status dot with optional label and pulse animation. |
 | `PriorityBadge` | `task-status-indicator.tsx` | `priority: Priority`, `className?: string` | Task priority colored pill badge. |
+| `ProviderHealthBadge` | `provider-health-badge.tsx` | `status: ProviderHealthStatus`, `label?: boolean`, `pulse?: boolean`, `className?: string` | Provider health status dot (up/degraded/down) with optional label. |
 
 ### Interaction Components
 
@@ -239,6 +240,7 @@ The following shared components live in `web/src/components/ui/` and form the bu
 | `getPriorityColor()` | `utils/tasks.ts` | Maps `Priority` to `SemanticColor`. |
 | `getPriorityLabel()` | `utils/tasks.ts` | Maps `Priority` to display label. |
 | `getTaskTypeLabel()` | `utils/tasks.ts` | Maps `TaskType` to display label. |
+| `getProviderHealthColor()` | `utils/providers.ts` | Maps `ProviderHealthStatus` to `SemanticColor`. |
 
 ### Animation Hooks
 
@@ -256,6 +258,7 @@ The following shared components live in `web/src/components/ui/` and form the bu
 | `SemanticColor` | `lib/utils.ts` | `"success"`, `"accent"`, `"warning"`, `"danger"` |
 | `TaskStatus` | `api/types` | `"created"`, `"assigned"`, `"in_progress"`, `"in_review"`, `"completed"`, `"blocked"`, `"failed"`, `"interrupted"`, `"cancelled"` |
 | `Priority` | `api/types` | `"critical"`, `"high"`, `"medium"`, `"low"` |
+| `ProviderHealthStatus` | `api/types` | `"up"`, `"degraded"`, `"down"` |
 
 ### When to Create a New Shared Component
 

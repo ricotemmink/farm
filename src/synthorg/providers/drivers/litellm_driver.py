@@ -108,9 +108,10 @@ class LiteLLMDriver(BaseCompletionProvider):
     """Completion driver backed by LiteLLM.
 
     Uses ``litellm.acompletion`` for both streaming and non-streaming
-    calls.  Model identifiers are prefixed with the provider name
-    (e.g. ``example-provider/example-medium-001``) so LiteLLM routes to
-    the correct backend.
+    calls.  Model identifiers are prefixed with the LiteLLM routing key
+    (``litellm_provider`` if set, otherwise the provider name -- e.g.
+    ``example-provider/example-medium-001``) so LiteLLM routes to the
+    correct backend.
 
     Args:
         provider_name: Provider key from config (e.g. ``"example-provider"``).
@@ -143,6 +144,7 @@ class LiteLLMDriver(BaseCompletionProvider):
         self._model_lookup: MappingProxyType[str, ProviderModelConfig] = (
             MappingProxyType(self._build_model_lookup(config.models))
         )
+        self._routing_key = config.litellm_provider or provider_name
 
     # ── Hook implementations ─────────────────────────────────────
 
@@ -156,7 +158,7 @@ class LiteLLMDriver(BaseCompletionProvider):
     ) -> CompletionResponse:
         """Call ``litellm.acompletion`` and map the response."""
         model_config = self._resolve_model(model)
-        litellm_model = f"{self._provider_name}/{model_config.id}"
+        litellm_model = f"{self._routing_key}/{model_config.id}"
         kwargs = self._build_kwargs(
             messages,
             litellm_model,
@@ -188,7 +190,7 @@ class LiteLLMDriver(BaseCompletionProvider):
         obtain the iterator.
         """
         model_config = self._resolve_model(model)
-        litellm_model = f"{self._provider_name}/{model_config.id}"
+        litellm_model = f"{self._routing_key}/{model_config.id}"
         kwargs = self._build_kwargs(
             messages,
             litellm_model,
@@ -217,7 +219,7 @@ class LiteLLMDriver(BaseCompletionProvider):
         is capped at the model's configured ``max_context``.
         """
         model_config = self._resolve_model(model)
-        litellm_model = f"{self._provider_name}/{model_config.id}"
+        litellm_model = f"{self._routing_key}/{model_config.id}"
         info = self._get_litellm_model_info(litellm_model)
 
         max_output = int(
@@ -347,6 +349,11 @@ class LiteLLMDriver(BaseCompletionProvider):
                         self._config.custom_header_name: (
                             self._config.custom_header_value
                         ),
+                    }
+            case AuthType.SUBSCRIPTION:
+                if self._config.subscription_token is not None:
+                    kwargs["extra_headers"] = {
+                        "Authorization": f"Bearer {self._config.subscription_token}",
                     }
             case AuthType.NONE:
                 pass
