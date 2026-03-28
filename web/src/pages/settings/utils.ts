@@ -1,0 +1,96 @@
+import type { SettingEntry, SettingNamespace } from '@/api/types'
+import { SETTING_DEPENDENCIES } from '@/utils/constants'
+
+/**
+ * Fuzzy subsequence match: returns true if every character of `needle`
+ * appears in `haystack` in order. E.g. "prt" matches "server_port".
+ */
+function normalize(s: string): string {
+  return s.toLowerCase().replace(/[_-]/g, ' ')
+}
+
+function fuzzyMatch(haystack: string, needle: string): boolean {
+  const h = normalize(haystack)
+  let j = 0
+  for (let i = 0; i < h.length && j < needle.length; i++) {
+    if (h[i] === needle[j]) j++
+  }
+  return j === needle.length
+}
+
+/** Fuzzy match across setting key, description, namespace, and group. */
+export function matchesSetting(entry: SettingEntry, query: string): boolean {
+  const q = normalize(query.trim())
+  if (!q) return true
+  const def = entry.definition
+  return (
+    fuzzyMatch(def.key, q) ||
+    fuzzyMatch(def.description, q) ||
+    fuzzyMatch(def.namespace, q) ||
+    fuzzyMatch(def.group, q)
+  )
+}
+
+/**
+ * Returns true when the controller setting's effective value is not
+ * "true" or "1". Dirty (unsaved) values take precedence over persisted entries.
+ */
+export function isControllerDisabled(
+  controllerKey: string,
+  entries: SettingEntry[],
+  dirtyValues: ReadonlyMap<string, string>,
+): boolean {
+  const dirtyVal = dirtyValues.get(controllerKey)
+  if (dirtyVal !== undefined) {
+    return dirtyVal.toLowerCase() !== 'true' && dirtyVal !== '1'
+  }
+  const entry = entries.find(
+    (e) => `${e.definition.namespace}/${e.definition.key}` === controllerKey,
+  )
+  if (!entry) return false
+  return entry.value.toLowerCase() !== 'true' && entry.value !== '1'
+}
+
+/** Build a map of composite key -> whether its controller is disabled. */
+export function buildControllerDisabledMap(
+  entries: SettingEntry[],
+  dirtyValues: ReadonlyMap<string, string>,
+): Map<string, boolean> {
+  const map = new Map<string, boolean>()
+  for (const [controller, deps] of Object.entries(SETTING_DEPENDENCIES)) {
+    const disabled = isControllerDisabled(controller, entries, dirtyValues)
+    for (const dep of deps) {
+      map.set(dep, disabled)
+    }
+  }
+  return map
+}
+
+/** Save a batch of dirty settings via parallel PUTs. Returns the set of failed composite keys. */
+export async function saveSettingsBatch(
+  dirtyValues: ReadonlyMap<string, string>,
+  updateSetting: (ns: SettingNamespace, key: string, value: string) => Promise<unknown>,
+): Promise<Set<string>> {
+  const keys = [...dirtyValues.keys()]
+  const promises = keys.map((compositeKey) => {
+    const slashIdx = compositeKey.indexOf('/')
+    if (slashIdx < 1) {
+      console.error(`[settings] Malformed composite key: "${compositeKey}"`)
+      return Promise.reject(new Error(`Malformed key: ${compositeKey}`))
+    }
+    const ns = compositeKey.slice(0, slashIdx) as SettingNamespace
+    const key = compositeKey.slice(slashIdx + 1)
+    return updateSetting(ns, key, dirtyValues.get(compositeKey)!).then(() => undefined)
+  })
+  const results = await Promise.allSettled(promises)
+  const failedKeys = new Set<string>()
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i]!
+    const compositeKey = keys[i]!
+    if (result.status === 'rejected') {
+      failedKeys.add(compositeKey)
+      console.error(`[settings] Failed to save "${compositeKey}":`, result.reason)
+    }
+  }
+  return failedKeys
+}
