@@ -83,6 +83,7 @@ All commands accept these persistent flags (precedence: flag > env var > config 
 | `--plain` | | | ASCII-only output (no Unicode, no spinners) |
 | `--json` | | | Machine-readable JSON output |
 | `--yes` | `-y` | `SYNTHORG_YES` | Auto-accept all prompts (non-interactive) |
+| `--help-all` | | | Show help for all commands (recursive) |
 
 Config-driven overrides (set via `synthorg config set`): `color never` implies `--no-color`, `color always` forces color on non-TTYs, `output json` implies `--json`, `hints` mode is config-only (always/auto/never).
 
@@ -135,6 +136,15 @@ Settable keys: `auto_apply_compose`, `auto_cleanup`, `auto_pull`, `auto_restart`
 | `stop` | `--timeout`/`-t`, `--volumes` |
 | `status` | `--watch`/`-w`, `--interval`, `--wide`, `--no-trunc`, `--services`, `--check` |
 | `logs` | `--follow`/`-f`, `--tail`, `--since`, `--until`, `--timestamps`/`-t`, `--no-log-prefix` |
+| `update` | `--dry-run`, `--no-restart`, `--timeout`, `--cli-only`, `--images-only`, `--check` |
+| `cleanup` | `--dry-run`, `--all`, `--keep N` |
+| `backup create` | `--output`/`-o`, `--timeout` |
+| `backup list` | `--limit`/`-n`, `--sort` |
+| `backup restore` | `--confirm`, `--dry-run`, `--no-restart`, `--timeout` |
+| `wipe` | `--dry-run`, `--no-backup`, `--keep-images` |
+| `doctor` | `--checks`, `--fix` |
+| `version` | `--short` |
+| `uninstall` | `--keep-data`, `--keep-images` |
 
 ## Documentation
 

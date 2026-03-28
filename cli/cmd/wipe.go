@@ -10,11 +10,8 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
-	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -42,6 +39,12 @@ type wipeContext struct {
 	errOut  *ui.UI
 }
 
+var (
+	wipeDryRun     bool
+	wipeNoBackup   bool
+	wipeKeepImages bool
+)
+
 var wipeCmd = &cobra.Command{
 	Use:   "wipe",
 	Short: "Factory-reset: wipe all data with optional backup and restart",
@@ -56,16 +59,24 @@ with a clean slate. You are prompted at each step:
   6. Whether to start containers after the wipe (default: yes)
 
 Requires an interactive terminal.`,
+	Example: `  synthorg wipe                # interactive factory reset with backup
+  synthorg wipe --yes          # non-interactive wipe with backup
+  synthorg wipe --no-backup    # skip the backup step
+  synthorg wipe --dry-run      # preview what would happen`,
 	RunE: runWipe,
 }
 
 func init() {
+	wipeCmd.Flags().BoolVar(&wipeDryRun, "dry-run", false, "show what would happen without wiping")
+	wipeCmd.Flags().BoolVar(&wipeNoBackup, "no-backup", false, "skip the backup prompt entirely")
+	wipeCmd.Flags().BoolVar(&wipeKeepImages, "keep-images", false, "do not remove container images during wipe")
+	wipeCmd.GroupID = "lifecycle"
 	rootCmd.AddCommand(wipeCmd)
 }
 
 func runWipe(cmd *cobra.Command, _ []string) error {
 	opts := GetGlobalOpts(cmd.Context())
-	if !isInteractive() && !opts.Yes {
+	if !wipeDryRun && !isInteractive() && !opts.Yes {
 		return fmt.Errorf("wipe requires an interactive terminal or --yes flag (destructive operation)")
 	}
 
@@ -90,6 +101,10 @@ func runWipe(cmd *cobra.Command, _ []string) error {
 	out := ui.NewUIWithOptions(cmd.OutOrStdout(), opts.UIOptions())
 	errOut := ui.NewUIWithOptions(cmd.ErrOrStderr(), opts.UIOptions())
 
+	if wipeDryRun {
+		return wipeDryRunPreview(out, safeDir, composePath)
+	}
+
 	info, err := docker.Detect(ctx)
 	if err != nil {
 		return err
@@ -105,14 +120,28 @@ func runWipe(cmd *cobra.Command, _ []string) error {
 		errOut:  errOut,
 	}
 
-	if err := wc.offerBackup(); err != nil {
-		if errors.Is(err, errWipeCancelled) {
-			return nil
+	// --no-backup: skip the entire backup workflow.
+	if !wipeNoBackup {
+		if err := wc.offerBackup(); err != nil {
+			if errors.Is(err, errWipeCancelled) {
+				return nil
+			}
+			return err
 		}
-		return err
 	}
 
 	return wc.confirmAndWipe()
+}
+
+// wipeDryRunPreview shows what a wipe would do without executing.
+func wipeDryRunPreview(out *ui.UI, safeDir, composePath string) error {
+	out.Section("Dry run: wipe preview")
+	out.KeyValue("Data directory", safeDir)
+	out.KeyValue("Compose file", composePath)
+	out.KeyValue("Backup", boolToYesNo(!wipeNoBackup))
+	out.KeyValue("Remove images", boolToYesNo(!wipeKeepImages))
+	out.HintNextStep("Remove --dry-run to execute the wipe")
+	return nil
 }
 
 // confirmAndWipe asks for final confirmation, stops containers, removes
@@ -128,12 +157,21 @@ func (wc *wipeContext) confirmAndWipe() error {
 		return nil
 	}
 
+	downArgs := []string{"down", "-v"}
+	if !wipeKeepImages {
+		downArgs = append(downArgs, "--rmi", "all")
+	}
+
 	sp := wc.out.StartSpinner("Stopping containers and removing volumes...")
-	if err := composeRunQuiet(wc.ctx, wc.info, wc.safeDir, "down", "-v"); err != nil {
+	if err := composeRunQuiet(wc.ctx, wc.info, wc.safeDir, downArgs...); err != nil {
 		sp.Error("Failed to stop containers")
 		return fmt.Errorf("stopping containers: %w", err)
 	}
-	sp.Success("Containers stopped and volumes removed")
+	if wipeKeepImages {
+		sp.Success("Containers stopped and volumes removed (images preserved)")
+	} else {
+		sp.Success("Containers stopped, volumes and images removed")
+	}
 
 	startAfter, err := wc.promptStartAfterWipe()
 	if err != nil {
@@ -613,9 +651,13 @@ func (wc *wipeContext) askContinueWithoutBackup(title string) error {
 
 // promptStartAfterWipe asks whether to start containers after the wipe.
 // Ctrl-C is treated as "No" because the wipe has already completed.
+// Respects auto_start_after_wipe config key.
 func (wc *wipeContext) promptStartAfterWipe() (bool, error) {
 	if !wc.shouldPrompt() {
-		return true, nil // default: yes, start after wipe
+		return true, nil // --yes or non-interactive: default yes
+	}
+	if wc.state.AutoStartAfterWipe {
+		return true, nil // config auto-accept
 	}
 	startAfter := true
 	err := wc.runForm(huh.NewForm(huh.NewGroup(
@@ -653,41 +695,6 @@ func isEmptyPS(output string) (bool, error) {
 	}
 	// NDJSON: any non-empty line means at least one container.
 	return false, nil
-}
-
-// openBrowser opens a URL in the default browser. Only localhost HTTP(S)
-// URLs are permitted to prevent arbitrary command execution.
-func openBrowser(ctx context.Context, rawURL string) error {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return fmt.Errorf("invalid URL %q: %w", rawURL, err)
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return fmt.Errorf("refusing to open URL with scheme %q -- only http and https are allowed", parsed.Scheme)
-	}
-	host := parsed.Hostname()
-	if host != "localhost" && host != "127.0.0.1" {
-		return fmt.Errorf("refusing to open URL with host %q -- only localhost and 127.0.0.1 are allowed", host)
-	}
-
-	// Use the re-serialized URL, not the raw input string, to ensure
-	// only the normalized, validated URL is passed to the OS launcher.
-	normalizedURL := parsed.String()
-
-	var c *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		c = exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", normalizedURL)
-	case "darwin":
-		c = exec.CommandContext(ctx, "open", normalizedURL)
-	default:
-		c = exec.CommandContext(ctx, "xdg-open", normalizedURL)
-	}
-	if err := c.Start(); err != nil {
-		return fmt.Errorf("starting browser: %w", err)
-	}
-	go func() { _ = c.Wait() }() // reap child, prevent zombie
-	return nil
 }
 
 // createTarGz writes a gzip-compressed tar archive of srcDir's contents to w.
