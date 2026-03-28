@@ -5,11 +5,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"github.com/Aureliolo/synthorg/cli/internal/config"
 	"github.com/Aureliolo/synthorg/cli/internal/docker"
 	"github.com/Aureliolo/synthorg/cli/internal/ui"
 	"github.com/spf13/cobra"
+)
+
+var (
+	stopTimeout string
+	stopVolumes bool
 )
 
 var stopCmd = &cobra.Command{
@@ -19,6 +26,8 @@ var stopCmd = &cobra.Command{
 }
 
 func init() {
+	stopCmd.Flags().StringVarP(&stopTimeout, "timeout", "t", "", "graceful shutdown timeout (e.g. 30s, 1m)")
+	stopCmd.Flags().BoolVar(&stopVolumes, "volumes", false, "also remove named volumes")
 	rootCmd.AddCommand(stopCmd)
 }
 
@@ -46,12 +55,38 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	downArgs, err := buildDownArgs()
+	if err != nil {
+		return err
+	}
+
 	sp := out.StartSpinner("Stopping containers...")
-	if err := composeRunQuiet(ctx, info, safeDir, "down"); err != nil {
+	if err := composeRunQuiet(ctx, info, safeDir, downArgs...); err != nil {
 		sp.Error("Failed to stop containers")
 		return fmt.Errorf("stopping containers: %w", err)
 	}
 	sp.Success("SynthOrg stopped")
 
 	return nil
+}
+
+func buildDownArgs() ([]string, error) {
+	args := []string{"down"}
+	if stopTimeout != "" {
+		dur, parseErr := time.ParseDuration(stopTimeout)
+		if parseErr != nil {
+			return nil, fmt.Errorf("invalid --timeout %q: %w", stopTimeout, parseErr)
+		}
+		if dur < 0 {
+			return nil, fmt.Errorf("invalid --timeout %q: must be non-negative", stopTimeout)
+		}
+		if dur%time.Second != 0 {
+			return nil, fmt.Errorf("invalid --timeout %q: must be a whole number of seconds", stopTimeout)
+		}
+		args = append(args, "--timeout", strconv.Itoa(int(dur.Seconds())))
+	}
+	if stopVolumes {
+		args = append(args, "--volumes")
+	}
+	return args, nil
 }

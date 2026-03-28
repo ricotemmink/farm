@@ -19,6 +19,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	statusWatch    bool
+	statusInterval string
+	statusWide     bool
+	statusNoTrunc  bool
+	statusServices string
+	statusCheck    bool
+)
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show container states, health, and versions",
@@ -26,6 +35,12 @@ var statusCmd = &cobra.Command{
 }
 
 func init() {
+	statusCmd.Flags().BoolVarP(&statusWatch, "watch", "w", false, "continuously poll status")
+	statusCmd.Flags().StringVar(&statusInterval, "interval", "2s", "watch polling interval (e.g. 2s, 5s)")
+	statusCmd.Flags().BoolVar(&statusWide, "wide", false, "show extra columns (ports)")
+	statusCmd.Flags().BoolVar(&statusNoTrunc, "no-trunc", false, "show full image names")
+	statusCmd.Flags().StringVar(&statusServices, "services", "", "filter by service names (comma-separated)")
+	statusCmd.Flags().BoolVar(&statusCheck, "check", false, "exit code only: 0=healthy, 3=unhealthy, 4=unreachable")
 	rootCmd.AddCommand(statusCmd)
 }
 
@@ -37,6 +52,67 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+
+	// --check: silent exit code mode (validates response body, not just HTTP status).
+	if statusCheck {
+		body, statusCode, fetchErr := fetchHealth(ctx, state.BackendPort)
+		if fetchErr != nil {
+			return NewExitError(ExitUnreachable, fetchErr)
+		}
+		if statusCode < 200 || statusCode >= 300 {
+			return NewExitError(ExitUnhealthy, nil)
+		}
+		var envelope struct {
+			Data healthResponse `json:"data"`
+		}
+		if json.Unmarshal(body, &envelope) != nil || envelope.Data.Status != "ok" {
+			return NewExitError(ExitUnhealthy, nil)
+		}
+		return nil // exit 0
+	}
+
+	// Parse --interval early (even without --watch, catch invalid values).
+	interval, parseErr := time.ParseDuration(statusInterval)
+	if parseErr != nil {
+		return fmt.Errorf("invalid --interval %q: %w", statusInterval, parseErr)
+	}
+
+	if statusWatch {
+		if interval <= 0 {
+			return fmt.Errorf("invalid --interval %q: must be > 0", statusInterval)
+		}
+		return runStatusWatch(cmd, state, opts, interval)
+	}
+
+	return runStatusOnce(cmd, state, opts)
+}
+
+func runStatusWatch(cmd *cobra.Command, state config.State, opts *GlobalOpts, interval time.Duration) error {
+	ctx := cmd.Context()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		// Clear screen (best-effort: ANSI escape for TTY, separator for non-TTY).
+		if isInteractive() && !opts.Plain {
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), "\033[H\033[2J")
+		} else {
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "---")
+		}
+		if err := runStatusOnce(cmd, state, opts); err != nil {
+			return err
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func runStatusOnce(cmd *cobra.Command, state config.State, opts *GlobalOpts) error {
+	ctx := cmd.Context()
 	jsonOut := opts.JSON
 	out := ui.NewUIWithOptions(cmd.OutOrStdout(), opts.UIOptions())
 	printVersionInfo(out, state)
@@ -144,8 +220,11 @@ func parseContainerJSON(psOut string) ([]containerInfo, int) {
 }
 
 // renderContainerTable formats containers as a table.
-func renderContainerTable(out *ui.UI, containers []containerInfo) {
+func renderContainerTable(out *ui.UI, containers []containerInfo, wide, noTrunc bool) {
 	headers := []string{"SERVICE", "STATE", "HEALTH", "IMAGE", "STATUS"}
+	if wide {
+		headers = append(headers, "PORTS")
+	}
 	rows := make([][]string, 0, len(containers))
 	for _, c := range containers {
 		icon := healthIcon(c.State, c.Health)
@@ -153,10 +232,18 @@ func renderContainerTable(out *ui.UI, containers []containerInfo) {
 		if healthLabel == "" {
 			healthLabel = "-"
 		}
-		rows = append(rows, []string{
+		imageDisplay := imageTag(c.Image)
+		if noTrunc {
+			imageDisplay = c.Image
+		}
+		row := []string{
 			c.Service, icon + " " + c.State, healthLabel,
-			imageTag(c.Image), c.Status,
-		})
+			imageDisplay, c.Status,
+		}
+		if wide {
+			row = append(row, c.Ports)
+		}
+		rows = append(rows, row)
 	}
 	out.Table(headers, rows)
 }
@@ -169,6 +256,11 @@ func printContainerStates(ctx context.Context, out *ui.UI, info docker.Info, dat
 	}
 	w := out.Writer()
 	containers, failures := parseContainerJSON(psOut)
+
+	if statusServices != "" {
+		containers = filterByServices(out, containers, statusServices)
+	}
+
 	if jsonOut {
 		b, err := json.MarshalIndent(containers, "", "  ")
 		if err != nil {
@@ -182,12 +274,40 @@ func printContainerStates(ctx context.Context, out *ui.UI, info docker.Info, dat
 		out.Warn(fmt.Sprintf("%d container lines could not be parsed", failures))
 	}
 	if len(containers) == 0 {
-		out.Warn("No containers running")
+		if statusServices != "" {
+			out.Warn("No containers match requested services")
+		} else {
+			out.Warn("No containers running")
+		}
 		return
 	}
 	_, _ = fmt.Fprintln(w, "Containers:")
-	renderContainerTable(out, containers)
+	renderContainerTable(out, containers, statusWide, statusNoTrunc)
 	_, _ = fmt.Fprintln(w)
+}
+
+// filterByServices filters containers to only those matching the comma-separated
+// service names, warning about invalid names.
+func filterByServices(out *ui.UI, containers []containerInfo, services string) []containerInfo {
+	filter := make(map[string]bool)
+	for _, s := range strings.Split(services, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if !serviceNamePattern.MatchString(s) {
+			out.Warn(fmt.Sprintf("invalid service name %q in --services: must be alphanumeric, hyphens, or underscores", s))
+			continue
+		}
+		filter[s] = true
+	}
+	filtered := containers[:0]
+	for _, c := range containers {
+		if filter[c.Service] {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
 }
 
 func printResourceUsage(ctx context.Context, out *ui.UI, info docker.Info, dataDir string) {
@@ -197,7 +317,7 @@ func printResourceUsage(ctx context.Context, out *ui.UI, info docker.Info, dataD
 	}
 	ids := strings.Fields(strings.TrimSpace(psOut))
 	statsArgs := append([]string{"stats", "--no-stream", "--format",
-		"table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"}, ids...)
+		"table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}", "--"}, ids...)
 	statsOut, err := docker.RunCmd(ctx, info.DockerPath, statsArgs...)
 	if err != nil {
 		out.Warn(fmt.Sprintf("Could not get resource usage: %v", err))

@@ -62,32 +62,8 @@ func init() {
 // setupGlobalOpts resolves the effective configuration from flags, env vars,
 // and config file, then stores GlobalOpts in the command context.
 func setupGlobalOpts(cmd *cobra.Command) error {
-	// Resolve env var overrides for flags that were NOT explicitly passed.
-	// Use flag variables directly (already populated by Cobra) rather than
-	// cmd.Flags().Changed() which only sees local flags on subcommands,
-	// not persistent flags inherited from the root command.
-	noColor := flagNoColor
-	if !flagNoColor && noColorFromEnv() {
-		noColor = true
-	}
+	noColor, quiet, yes, skipVerify := resolveEnvOverrides()
 
-	quiet := flagQuiet
-	if !flagQuiet && envBool(EnvQuiet) {
-		quiet = true
-	}
-
-	yes := flagYes
-	if !flagYes && envBool(EnvYes) {
-		yes = true
-	}
-
-	skipVerify := flagSkipVerify
-	if !flagSkipVerify && (envBool(EnvNoVerify) || envBool(EnvSkipVerify)) {
-		skipVerify = true
-	}
-
-	// Validate mutual exclusivity on RESOLVED values (after env var override)
-	// so that conflicts like SYNTHORG_QUIET=1 + --verbose are caught.
 	if quiet && flagVerbose > 0 {
 		return fmt.Errorf("--quiet and --verbose are mutually exclusive")
 	}
@@ -104,18 +80,70 @@ func setupGlobalOpts(cmd *cobra.Command) error {
 		Plain:      flagPlain,
 		JSON:       flagJSON,
 		Yes:        yes,
-		Hints:      "auto", // default; will be overridden by config in PR 2
+		Hints:      "auto",
 	}
 
-	// Defensive: validHintsMode check will become reachable when PR 2 adds
-	// the --hints flag and config file override. Currently Hints is hardcoded
-	// to "auto" above, so this cannot fail.
+	applyConfigOverrides(opts)
+
 	if !validHintsMode(opts.Hints) {
 		return fmt.Errorf("invalid hints mode %q: must be always, auto, or never", opts.Hints)
 	}
 
 	cmd.SetContext(SetGlobalOpts(cmd.Context(), opts))
 	return nil
+}
+
+// resolveEnvOverrides merges environment variable overrides with flag values.
+// Use flag variables directly (already populated by Cobra) rather than
+// cmd.Flags().Changed() which only sees local flags on subcommands.
+func resolveEnvOverrides() (noColor, quiet, yes, skipVerify bool) {
+	noColor = flagNoColor
+	if !flagNoColor && noColorFromEnv() {
+		noColor = true
+	}
+	quiet = flagQuiet
+	if !flagQuiet && envBool(EnvQuiet) {
+		quiet = true
+	}
+	yes = flagYes
+	if !flagYes && envBool(EnvYes) {
+		yes = true
+	}
+	skipVerify = flagSkipVerify
+	if !flagSkipVerify && (envBool(EnvNoVerify) || envBool(EnvSkipVerify)) {
+		skipVerify = true
+	}
+	return
+}
+
+// applyConfigOverrides loads persisted config and applies display preferences.
+// Only applies when neither a flag nor an env var already set the value,
+// preserving flag > env > config > default precedence.
+func applyConfigOverrides(opts *GlobalOpts) {
+	state, loadErr := config.Load(opts.DataDir)
+	if loadErr != nil {
+		return
+	}
+	if state.Hints != "" {
+		opts.Hints = state.Hints
+	}
+	// Only apply color config when no flag AND no env var overrode it.
+	// Check opts.NoColor (which reflects env) rather than flagNoColor alone.
+	if !flagNoColor && !opts.NoColor {
+		if state.Color == "never" {
+			opts.NoColor = true
+		}
+	}
+	if flagNoColor || opts.NoColor {
+		// Flag or env already forced no-color; config "always" must not override.
+	} else if state.Color == "always" {
+		opts.NoColor = false
+	}
+	if !flagJSON && !opts.JSON {
+		if state.Output == "json" {
+			opts.JSON = true
+		}
+	}
 }
 
 // resolveDataDir returns the effective data directory, using the flag value,

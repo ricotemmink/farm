@@ -18,29 +18,64 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	initBackendPort int
+	initWebPort     int
+	initSandbox     string
+	initImageTag    string
+	initChannel     string
+	initLogLevel    string
+)
+
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Interactive setup wizard for SynthOrg",
-	Long:  "Creates a data directory, generates a Docker Compose file, and optionally pulls images.",
-	RunE:  runInit,
+	Long: `Creates a data directory, generates a Docker Compose file, and optionally pulls images.
+
+When all required flags are provided, the interactive wizard is skipped
+(useful for CI/automation).`,
+	RunE: runInit,
 }
 
 func init() {
+	initCmd.Flags().IntVar(&initBackendPort, "backend-port", 0, "backend API port (1-65535)")
+	initCmd.Flags().IntVar(&initWebPort, "web-port", 0, "web dashboard port (1-65535)")
+	initCmd.Flags().StringVar(&initSandbox, "sandbox", "", "enable agent sandbox (\"true\" or \"false\")")
+	initCmd.Flags().StringVar(&initImageTag, "image-tag", "", "container image tag")
+	initCmd.Flags().StringVar(&initChannel, "channel", "", "update channel (\"stable\" or \"dev\")")
+	initCmd.Flags().StringVar(&initLogLevel, "log-level", "", "log level (\"debug\", \"info\", \"warn\", \"error\")")
 	rootCmd.AddCommand(initCmd)
 }
 
-func runInit(cmd *cobra.Command, _ []string) error {
-	if !isInteractive() {
-		return fmt.Errorf("synthorg init requires an interactive terminal")
-	}
+// initAllFlagsSet returns true when all required init flags are provided,
+// enabling fully non-interactive setup. The --image-tag and --channel flags
+// are optional (default to CLI version and "stable" respectively).
+func initAllFlagsSet() bool {
+	return initBackendPort > 0 && initWebPort > 0 && initSandbox != "" &&
+		initLogLevel != ""
+}
 
+func runInit(cmd *cobra.Command, _ []string) error {
 	opts := GetGlobalOpts(cmd.Context())
 	out := ui.NewUIWithOptions(cmd.OutOrStdout(), opts.UIOptions())
-	out.Logo(version.Version)
 
-	answers, err := runSetupForm()
-	if err != nil {
+	if err := validateInitFlags(); err != nil {
 		return err
+	}
+	var answers setupAnswers
+	switch {
+	case initAllFlagsSet():
+		// Non-interactive: all required flags provided.
+		answers = buildAnswersFromFlags(opts.DataDir)
+	case isInteractive():
+		out.Logo(version.Version)
+		var err error
+		answers, err = runSetupFormWithOverrides(opts.DataDir)
+		if err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("synthorg init requires an interactive terminal (or provide all flags: --backend-port, --web-port, --sandbox, --log-level)")
 	}
 
 	state, err := buildState(answers)
@@ -48,35 +83,14 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Warn if re-initializing over existing config (secrets will change).
-	// isInteractive() is already checked at function entry, so prompt is safe.
-	// Preserve the existing SettingsKey to avoid making encrypted settings
-	// in the database undecryptable after re-init.
-	var existingSettingsKey string
+	// Handle re-init over existing config (secrets change, needs confirmation).
 	if existing := config.StatePath(state.DataDir); fileExists(existing) {
-		oldState, loadErr := config.Load(state.DataDir)
-		if loadErr != nil {
-			return fmt.Errorf("existing config at %s is unreadable: %w (delete it manually to force a fresh init)", existing, loadErr)
-		}
-		existingSettingsKey = oldState.SettingsKey
-		errOut := ui.NewUIWithOptions(cmd.ErrOrStderr(), opts.UIOptions())
-		errOut.Warn("Existing config at " + existing + " will be overwritten.")
-		errOut.Warn("A new JWT secret will be generated -- running containers will need a restart.")
-		if existingSettingsKey == "" {
-			errOut.Warn("A new settings encryption key will also be generated.")
-		}
-		var proceed bool
-		form := huh.NewForm(huh.NewGroup(
-			huh.NewConfirm().Title("Overwrite existing configuration?").Value(&proceed),
-		))
-		if err := form.Run(); err != nil {
+		proceed, err := handleReinit(cmd, &state, opts)
+		if err != nil {
 			return err
 		}
 		if !proceed {
 			return nil
-		}
-		if existingSettingsKey != "" {
-			state.SettingsKey = existingSettingsKey
 		}
 	}
 
@@ -87,6 +101,61 @@ func runInit(cmd *cobra.Command, _ []string) error {
 
 	printInitSuccess(out, safeDir)
 	return nil
+}
+
+// handleReinit loads the existing config, confirms overwrite (interactive or
+// --yes), and preserves the settings key in state. Returns false if declined.
+func handleReinit(cmd *cobra.Command, state *config.State, opts *GlobalOpts) (bool, error) {
+	oldState, loadErr := config.Load(state.DataDir)
+	if loadErr != nil {
+		return false, fmt.Errorf("existing config at %s is unreadable: %w (delete it manually to force a fresh init)",
+			config.StatePath(state.DataDir), loadErr)
+	}
+	if opts.Yes {
+		if oldState.SettingsKey != "" {
+			state.SettingsKey = oldState.SettingsKey
+		}
+		return true, nil
+	}
+	if !isInteractive() {
+		return false, fmt.Errorf("existing config found at %s; pass --yes to overwrite",
+			config.StatePath(state.DataDir))
+	}
+	kept, err := confirmReinit(cmd, oldState, opts)
+	if err != nil {
+		return false, err
+	}
+	if kept == nil {
+		return false, nil
+	}
+	if *kept != "" {
+		state.SettingsKey = *kept
+	}
+	return true, nil
+}
+
+// confirmReinit prompts the user to confirm overwriting existing config.
+// Returns a pointer to the existing settings key to preserve, or nil if the
+// user declined. An empty string means no key existed to preserve.
+func confirmReinit(cmd *cobra.Command, oldState config.State, opts *GlobalOpts) (*string, error) {
+	errOut := ui.NewUIWithOptions(cmd.ErrOrStderr(), opts.UIOptions())
+	errOut.Warn("Existing config at " + config.StatePath(oldState.DataDir) + " will be overwritten.")
+	errOut.Warn("A new JWT secret will be generated -- running containers will need a restart.")
+	if oldState.SettingsKey == "" {
+		errOut.Warn("A new settings encryption key will also be generated.")
+	}
+	var proceed bool
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewConfirm().Title("Overwrite existing configuration?").Value(&proceed),
+	))
+	if err := form.Run(); err != nil {
+		return nil, err
+	}
+	if !proceed {
+		return nil, nil
+	}
+	key := oldState.SettingsKey
+	return &key, nil
 }
 
 func printInitSuccess(out *ui.UI, dataDir string) {
@@ -109,12 +178,87 @@ type setupAnswers struct {
 	logLevel           string
 	persistenceBackend string
 	memoryBackend      string
+	channel            string // optional override (empty = default "stable")
+	imageTag           string // optional override (empty = use CLI version)
 }
 
-func runSetupForm() (setupAnswers, error) {
+// validateInitFlags checks that provided CLI flag values are valid before
+// the interactive/non-interactive branch. Only validates flags that were set.
+func validateInitFlags() error {
+	if initBackendPort != 0 && (initBackendPort < 1 || initBackendPort > 65535) {
+		return fmt.Errorf("invalid --backend-port %d: must be 1-65535", initBackendPort)
+	}
+	if initWebPort != 0 && (initWebPort < 1 || initWebPort > 65535) {
+		return fmt.Errorf("invalid --web-port %d: must be 1-65535", initWebPort)
+	}
+	if initBackendPort != 0 && initWebPort != 0 && initBackendPort == initWebPort {
+		return fmt.Errorf("--backend-port and --web-port must differ, both are %d", initBackendPort)
+	}
+	if initSandbox != "" && !config.IsValidBool(initSandbox) {
+		return fmt.Errorf("invalid --sandbox %q: must be \"true\" or \"false\"", initSandbox)
+	}
+	if initLogLevel != "" && !config.IsValidLogLevel(initLogLevel) {
+		return fmt.Errorf("invalid --log-level %q: must be one of %s", initLogLevel, config.LogLevelNames())
+	}
+	if initImageTag != "" && !config.IsValidImageTag(initImageTag) {
+		return fmt.Errorf("invalid --image-tag %q: must match [a-zA-Z0-9][a-zA-Z0-9._-]*", initImageTag)
+	}
+	if initChannel != "" && !config.IsValidChannel(initChannel) {
+		return fmt.Errorf("invalid --channel %q: must be one of %s", initChannel, config.ChannelNames())
+	}
+	return nil
+}
+
+// applyFlagOverrides pre-fills the setup answers with any CLI flag values that were set.
+func applyFlagOverrides(a *setupAnswers) {
+	if initBackendPort > 0 {
+		a.backendPortStr = strconv.Itoa(initBackendPort)
+	}
+	if initWebPort > 0 {
+		a.webPortStr = strconv.Itoa(initWebPort)
+	}
+	if initSandbox != "" {
+		a.sandbox = initSandbox == "true"
+	}
+	if initLogLevel != "" {
+		a.logLevel = initLogLevel
+	}
+	if initChannel != "" {
+		a.channel = initChannel
+	}
+	if initImageTag != "" {
+		a.imageTag = initImageTag
+	}
+}
+
+// buildAnswersFromFlags constructs setupAnswers from CLI flags for non-interactive mode.
+func buildAnswersFromFlags(dataDir string) setupAnswers {
 	defaults := config.DefaultState()
 	a := setupAnswers{
-		dir:                defaults.DataDir,
+		dir:                dataDir,
+		backendPortStr:     strconv.Itoa(initBackendPort),
+		webPortStr:         strconv.Itoa(initWebPort),
+		sandbox:            initSandbox == "true",
+		dockerSock:         defaultDockerSock(),
+		logLevel:           initLogLevel,
+		persistenceBackend: defaults.PersistenceBackend,
+		memoryBackend:      defaults.MemoryBackend,
+		channel:            initChannel,
+		imageTag:           initImageTag,
+	}
+	return a
+}
+
+// runSetupFormWithOverrides runs the interactive form with any CLI flag values
+// pre-filled as defaults.
+func runSetupFormWithOverrides(resolvedDataDir string) (setupAnswers, error) {
+	defaults := config.DefaultState()
+	dir := defaults.DataDir
+	if resolvedDataDir != "" {
+		dir = resolvedDataDir
+	}
+	a := setupAnswers{
+		dir:                dir,
 		backendPortStr:     fmt.Sprintf("%d", defaults.BackendPort),
 		webPortStr:         fmt.Sprintf("%d", defaults.WebPort),
 		sandbox:            defaults.Sandbox,
@@ -123,6 +267,8 @@ func runSetupForm() (setupAnswers, error) {
 		persistenceBackend: defaults.PersistenceBackend,
 		memoryBackend:      defaults.MemoryBackend,
 	}
+
+	applyFlagOverrides(&a)
 
 	form := huh.NewForm(
 		huh.NewGroup(
@@ -175,29 +321,21 @@ func buildState(a setupAnswers) (config.State, error) {
 		}
 	}
 
-	jwtSecret, err := generateSecret(48)
+	jwtSecret, settingsKey, err := generateInitSecrets()
 	if err != nil {
-		return config.State{}, fmt.Errorf("generating JWT secret: %w", err)
+		return config.State{}, err
 	}
 
-	// 32 bytes produces a 44-char URL-safe base64 string, which is the
-	// exact format required by Python cryptography.fernet.Fernet (equivalent
-	// to Fernet.generate_key()). Do NOT change the byte count.
-	settingsKey, err := generateSecret(32)
-	if err != nil {
-		return config.State{}, fmt.Errorf("generating settings encryption key: %w", err)
-	}
-
-	// Use the CLI's build version as the default image tag.
-	// Fall back to "latest" for dev builds.
-	imageTag := version.Version
-	if imageTag == "" || imageTag == "dev" {
-		imageTag = "latest"
+	imageTag := resolveImageTag(a.imageTag)
+	channel := "stable"
+	if a.channel != "" {
+		channel = a.channel
 	}
 
 	return config.State{
 		DataDir:            dir,
 		ImageTag:           imageTag,
+		Channel:            channel,
 		BackendPort:        backendPort,
 		WebPort:            webPort,
 		Sandbox:            a.sandbox,
@@ -237,6 +375,33 @@ func writeInitFiles(state config.State) (string, error) {
 		return "", fmt.Errorf("saving config: %w", err)
 	}
 	return safeDir, nil
+}
+
+// resolveImageTag returns the image tag to use: the override if set,
+// the CLI version, or "latest" for dev builds.
+func resolveImageTag(override string) string {
+	if override != "" {
+		return override
+	}
+	if v := version.Version; v != "" && v != "dev" {
+		return v
+	}
+	return "latest"
+}
+
+// generateInitSecrets creates the JWT and settings encryption secrets.
+// The settings key is 32 bytes (44-char URL-safe base64), matching the format
+// required by Python cryptography.fernet.Fernet. Do NOT change byte counts.
+func generateInitSecrets() (jwtSecret, settingsKey string, err error) {
+	jwtSecret, err = generateSecret(48)
+	if err != nil {
+		return "", "", fmt.Errorf("generating JWT secret: %w", err)
+	}
+	settingsKey, err = generateSecret(32)
+	if err != nil {
+		return "", "", fmt.Errorf("generating settings encryption key: %w", err)
+	}
+	return jwtSecret, settingsKey, nil
 }
 
 func validateDockerSock(path string) error {

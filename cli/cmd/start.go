@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	startNoWait   bool
+	startTimeout  string
+	startNoPull   bool
+	startDryRun   bool
+	startNoDetach bool
+	startNoVerify bool
+)
+
 var startCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Pull images and start the SynthOrg stack",
@@ -29,18 +39,39 @@ var startCmd = &cobra.Command{
 }
 
 func init() {
+	startCmd.Flags().BoolVar(&startNoWait, "no-wait", false, "skip health check after start")
+	startCmd.Flags().StringVar(&startTimeout, "timeout", "90s", "health check timeout (e.g. 90s, 2m)")
+	startCmd.Flags().BoolVar(&startNoPull, "no-pull", false, "skip image verification and pull")
+	startCmd.Flags().BoolVar(&startDryRun, "dry-run", false, "show what would happen without executing")
+	startCmd.Flags().BoolVar(&startNoDetach, "no-detach", false, "run in foreground (stream logs, Ctrl+C to stop)")
+	startCmd.Flags().BoolVar(&startNoVerify, "no-verify", false, "skip image signature verification (alias for --skip-verify)")
 	rootCmd.AddCommand(startCmd)
 }
 
 func runStart(cmd *cobra.Command, _ []string) error {
+	if err := validateStartFlags(cmd); err != nil {
+		return err
+	}
+	healthTimeout, parseErr := time.ParseDuration(startTimeout)
+	if parseErr != nil {
+		return fmt.Errorf("invalid --timeout %q: %w", startTimeout, parseErr)
+	}
+	if !startNoWait && healthTimeout <= 0 {
+		return fmt.Errorf("invalid --timeout %q: must be > 0", startTimeout)
+	}
+
 	ctx := cmd.Context()
 	opts := GetGlobalOpts(ctx)
+	if startNoVerify {
+		opts.SkipVerify = true
+		cmd.SetContext(SetGlobalOpts(ctx, opts))
+		ctx = cmd.Context()
+	}
 
 	state, err := config.Load(opts.DataDir)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-
 	safeDir, err := safeStateDir(state)
 	if err != nil {
 		return err
@@ -52,9 +83,40 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		}
 		return fmt.Errorf("checking compose.yml: %w", err)
 	}
+
 	out := ui.NewUIWithOptions(cmd.OutOrStdout(), opts.UIOptions())
 	errOut := ui.NewUIWithOptions(cmd.ErrOrStderr(), opts.UIOptions())
 
+	if startDryRun {
+		return printStartDryRun(out, state, opts)
+	}
+	return startContainers(cmd, ctx, state, safeDir, out, errOut, healthTimeout)
+}
+
+func validateStartFlags(cmd *cobra.Command) error {
+	if startNoDetach && startNoWait {
+		return fmt.Errorf("--no-detach and --no-wait are incompatible (foreground mode has no health check to skip)")
+	}
+	if startNoDetach && cmd.Flags().Changed("timeout") {
+		return fmt.Errorf("--no-detach and --timeout are incompatible")
+	}
+	return nil
+}
+
+func printStartDryRun(out *ui.UI, state config.State, opts *GlobalOpts) error {
+	out.KeyValue("Image tag", state.ImageTag)
+	out.KeyValue("Backend port", strconv.Itoa(state.BackendPort))
+	out.KeyValue("Web port", strconv.Itoa(state.WebPort))
+	out.KeyValue("Sandbox", strconv.FormatBool(state.Sandbox))
+	out.KeyValue("Skip verify", strconv.FormatBool(opts.SkipVerify || startNoPull))
+	out.KeyValue("Skip pull", strconv.FormatBool(startNoPull))
+	out.KeyValue("Detached", strconv.FormatBool(!startNoDetach))
+	out.KeyValue("Health check", strconv.FormatBool(!startNoWait && !startNoDetach))
+	out.Step("Dry run -- no changes made")
+	return nil
+}
+
+func startContainers(cmd *cobra.Command, ctx context.Context, state config.State, safeDir string, out, errOut *ui.UI, healthTimeout time.Duration) error {
 	out.Logo(version.Version)
 
 	info, err := docker.Detect(ctx)
@@ -71,13 +133,43 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		errOut.Warn(w)
 	}
 
-	if err := verifyAndPinImages(ctx, cmd, state, safeDir, out, errOut); err != nil {
-		return err
+	if !startNoPull {
+		if err := verifyAndPinImages(ctx, cmd, state, safeDir, out, errOut); err != nil {
+			return err
+		}
+		out.Blank()
+		if err := pullServicesLive(ctx, info, safeDir, state, out); err != nil {
+			return err
+		}
 	}
-	out.Blank()
 
-	if err := pullStartAndWait(ctx, info, safeDir, state, out, errOut); err != nil {
-		return err
+	if startNoDetach {
+		out.Step("Starting in foreground mode (Ctrl+C to stop)...")
+		return composeRun(ctx, cmd, info, safeDir, "up")
+	}
+
+	return startDetached(ctx, info, safeDir, state, out, errOut, healthTimeout)
+}
+
+func startDetached(ctx context.Context, info docker.Info, safeDir string, state config.State, out, errOut *ui.UI, healthTimeout time.Duration) error {
+	sp := out.StartSpinner("Starting containers...")
+	if err := composeRunQuiet(ctx, info, safeDir, "up", "-d"); err != nil {
+		sp.Error("Failed to start containers")
+		return fmt.Errorf("starting containers: %w", err)
+	}
+	sp.Success("Containers started")
+
+	if !startNoWait {
+		sp = out.StartSpinner("Waiting for backend to become healthy...")
+		healthURL := fmt.Sprintf("http://localhost:%d/api/v1/health", state.BackendPort)
+		if err := health.WaitForHealthy(ctx, healthURL, healthTimeout, 2*time.Second, 5*time.Second); err != nil {
+			sp.Error("Health check failed")
+			errOut.HintError("Run 'synthorg doctor' for diagnostics.")
+			return fmt.Errorf("health check did not pass: %w", err)
+		}
+		sp.Success("Backend healthy")
+	} else {
+		out.Step("Health check skipped (--no-wait)")
 	}
 
 	out.Blank()
