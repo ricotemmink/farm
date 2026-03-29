@@ -351,8 +351,12 @@ class LiteLLMDriver(BaseCompletionProvider):
                         ),
                     }
             case AuthType.SUBSCRIPTION:
+                # Pass as api_key -- the correct kwarg for LiteLLM
+                # authentication.  Do NOT use "auth_token" -- it is
+                # not a litellm.completion() parameter and is silently
+                # discarded.
                 if self._config.subscription_token is not None:
-                    kwargs["auth_token"] = self._config.subscription_token
+                    kwargs["api_key"] = self._config.subscription_token
             case AuthType.NONE:
                 pass
 

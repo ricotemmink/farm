@@ -27,14 +27,18 @@ class ProviderPreset(BaseModel):
         auth_type: Default authentication type.
         supported_auth_types: All auth types this preset supports.
             Shown in the UI so users can choose (e.g. API key or
-            subscription for Anthropic).
+            subscription).
         default_base_url: Default API base URL.
+        requires_base_url: Whether the user must supply a base URL.
+            ``False`` for cloud providers (the routing library knows
+            the URL), ``True`` for self-hosted and deployment-specific
+            backends (per-deployment).
         candidate_urls: URLs to probe during auto-detection, in priority
             order.  The first reachable URL becomes the base URL.
         default_models: Pre-configured model definitions.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
     name: NotBlankStr
     display_name: NotBlankStr
@@ -47,6 +51,7 @@ class ProviderPreset(BaseModel):
         min_length=1,
     )
     default_base_url: NotBlankStr | None = None
+    requires_base_url: bool = False
     candidate_urls: tuple[NotBlankStr, ...] = ()
     default_models: tuple[ProviderModelConfig, ...] = ()
 
@@ -192,6 +197,7 @@ _AZURE_OPENAI = ProviderPreset(
     supported_auth_types=(AuthType.API_KEY,),
     # Azure requires a per-deployment base_url
     default_base_url=None,
+    requires_base_url=True,
     default_models=(),
 )
 
@@ -206,6 +212,7 @@ _OLLAMA = ProviderPreset(
     auth_type=AuthType.NONE,
     supported_auth_types=(AuthType.NONE,),
     default_base_url="http://localhost:11434",
+    requires_base_url=True,
     candidate_urls=(
         "http://host.docker.internal:11434",
         "http://172.17.0.1:11434",
@@ -223,6 +230,7 @@ _LM_STUDIO = ProviderPreset(
     auth_type=AuthType.NONE,
     supported_auth_types=(AuthType.NONE,),
     default_base_url="http://localhost:1234/v1",
+    requires_base_url=True,
     candidate_urls=(
         "http://host.docker.internal:1234/v1",
         "http://172.17.0.1:1234/v1",
@@ -240,6 +248,7 @@ _VLLM = ProviderPreset(
     auth_type=AuthType.NONE,
     supported_auth_types=(AuthType.NONE,),
     default_base_url="http://localhost:8000/v1",
+    requires_base_url=True,
     # candidate_urls intentionally empty: vLLM's default port (8000)
     # is a common collision risk (the SynthOrg backend formerly used
     # 8000).  Users must specify the vLLM URL explicitly or remap

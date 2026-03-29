@@ -135,7 +135,8 @@ export function ProviderFormModal({
   // Derived hints
   const baseUrlHint =
     isCustom || mode === 'edit' ? undefined
-    : preset && !preset.default_base_url ? 'Required for this provider'
+    : preset?.requires_base_url ? 'Required for this provider'
+    : preset ? 'Optional -- override the default endpoint'
     : undefined
 
   // Available auth types based on selected preset
@@ -177,6 +178,7 @@ export function ProviderFormModal({
     setSubmitting(true)
 
     try {
+      const trimmedBaseUrl = baseUrl.trim() || undefined
       if (mode === 'create') {
         if (preset && selectedPreset !== '__custom__') {
           const data: CreateFromPresetRequest = {
@@ -186,7 +188,7 @@ export function ProviderFormModal({
             api_key: authType === 'api_key' && apiKey ? apiKey : undefined,
             subscription_token: authType === 'subscription' && subscriptionToken ? subscriptionToken : undefined,
             tos_accepted: authType === 'subscription' && tosAccepted,
-            base_url: baseUrl || undefined,
+            base_url: trimmedBaseUrl,
           }
           const result = overrides
             ? await overrides.onCreateFromPreset(data)
@@ -200,7 +202,7 @@ export function ProviderFormModal({
             api_key: authType === 'api_key' && apiKey ? apiKey : undefined,
             subscription_token: authType === 'subscription' && subscriptionToken ? subscriptionToken : undefined,
             tos_accepted: authType === 'subscription' && tosAccepted,
-            base_url: baseUrl || undefined,
+            base_url: trimmedBaseUrl,
           }
           const createFn = overrides?.onCreateProvider ?? useProvidersStore.getState().createProvider
           const result = await createFn(data)
@@ -215,14 +217,15 @@ export function ProviderFormModal({
           subscription_token: authType === 'subscription' && subscriptionToken ? subscriptionToken : undefined,
           clear_subscription_token: authType !== 'subscription',
           tos_accepted: authType === 'subscription' && tosAccepted,
-          base_url: baseUrl || undefined,
+          base_url: trimmedBaseUrl,
         }
         const updateFn = overrides?.onUpdateProvider ?? useProvidersStore.getState().updateProvider
         const result = await updateFn(provider.name, data)
         if (result) handleClose()
       }
     } catch (err) {
-      console.error('ProviderFormModal: submit failed:', err)
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      console.error('ProviderFormModal: submit failed:', msg)
     } finally {
       setSubmitting(false)
     }
@@ -367,7 +370,7 @@ export function ProviderFormModal({
                         label="LiteLLM Provider"
                         value={litellmProvider}
                         onChange={(e) => setLitellmProvider(e.target.value)}
-                        placeholder="anthropic, openai, ollama..."
+                        placeholder="e.g. my-cloud, my-local..."
                         hint="LiteLLM routing identifier for model name prefixing"
                       />
                     )}
@@ -381,7 +384,7 @@ export function ProviderFormModal({
                       </Dialog.Close>
                       <Button
                         onClick={handleSubmit}
-                        disabled={submitting || !name.trim() || (authType === 'subscription' && !tosAccepted)}
+                        disabled={submitting || !name.trim() || (authType === 'subscription' && !tosAccepted) || (preset?.requires_base_url && !baseUrl.trim())}
                       >
                         {submitting ? 'Saving...' : mode === 'create' ? 'Create Provider' : 'Save Changes'}
                       </Button>
