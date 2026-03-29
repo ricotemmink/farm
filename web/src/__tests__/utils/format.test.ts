@@ -2,6 +2,7 @@ import {
   formatDate,
   formatRelativeTime,
   formatCurrency,
+  formatCurrencyCompact,
   formatNumber,
   formatUptime,
   formatLabel,
@@ -179,5 +180,48 @@ describe('formatLabel', () => {
 
   it('handles empty string', () => {
     expect(formatLabel('')).toBe('')
+  })
+})
+
+describe('formatCurrencyCompact', () => {
+  it('formats a small value with default EUR currency', () => {
+    const result = formatCurrencyCompact(5)
+    expect(result).toMatch(/5/)
+    expect(result).toMatch(/€|EUR/)
+  })
+
+  it('formats large values with compact notation', () => {
+    const result = formatCurrencyCompact(1500, 'USD')
+    // Compact notation should include currency marker and abbreviation
+    expect(result).toMatch(/\$.*K/i)
+  })
+
+  it('returns -- for NaN', () => {
+    expect(formatCurrencyCompact(NaN)).toBe('--')
+  })
+
+  it('returns -- for Infinity', () => {
+    expect(formatCurrencyCompact(Infinity)).toBe('--')
+  })
+
+  it('returns -- for -Infinity', () => {
+    expect(formatCurrencyCompact(-Infinity)).toBe('--')
+  })
+
+  it('normalizes invalid currency code to EUR', () => {
+    const result = formatCurrencyCompact(100, 'INVALID')
+    const expected = formatCurrencyCompact(100, 'EUR')
+    expect(result).toBe(expected)
+  })
+
+  it('trims whitespace and uppercases currency code', () => {
+    const result = formatCurrencyCompact(100, ' usd ')
+    const expected = formatCurrencyCompact(100, 'USD')
+    expect(result).toBe(expected)
+  })
+
+  it('formats zero correctly', () => {
+    const result = formatCurrencyCompact(0)
+    expect(result).toMatch(/0/)
   })
 })

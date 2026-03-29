@@ -1,17 +1,27 @@
 """Private helpers for ProviderManagementService."""
 
+import re
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, Final
 from urllib.parse import urlparse
 
 from synthorg.api.dto import CreateProviderRequest, UpdateProviderRequest  # noqa: TC001
-from synthorg.config.schema import ProviderConfig
+from synthorg.config.schema import ProviderConfig, ProviderModelConfig
 from synthorg.observability import get_logger
-from synthorg.observability.events.provider import PROVIDER_DISCOVERY_FAILED
+from synthorg.observability.events.provider import (
+    PROVIDER_DISCOVERY_FAILED,
+    PROVIDER_LITELLM_LOOKUP_SKIPPED,
+    PROVIDER_LITELLM_MODELS_EMPTY,
+    PROVIDER_LITELLM_MODELS_LOADED,
+)
 from synthorg.providers.enums import AuthType
 
 logger = get_logger(__name__)
+
+# Date suffix pattern for model names (e.g. "-YYYYMMDD" like "-20250514")
+_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
+_DEFAULT_MAX_CONTEXT: Final[int] = 200_000
 
 
 def build_provider_config(
@@ -221,7 +231,135 @@ def infer_preset_hint(base_url: str) -> str | None:
     try:
         port = urlparse(base_url).port
     except ValueError:
+        logger.debug(
+            PROVIDER_DISCOVERY_FAILED,
+            reason="invalid_port_in_url",
+            base_url=base_url,
+        )
         return None
     if port is None:
         return None
     return PORT_TO_PRESET.get(port)
+
+
+def _parse_litellm_entry(
+    model_name: str,
+    info: dict[str, Any],
+    litellm_provider: str,
+    version_filter: re.Pattern[str] | None,
+) -> tuple[str, ProviderModelConfig] | None:
+    """Parse a single litellm.model_cost entry into a model config.
+
+    Args:
+        model_name: Raw model key from litellm.model_cost.
+        info: Model metadata dict.
+        litellm_provider: Provider identifier for prefix stripping.
+        version_filter: Optional regex; entry is skipped when it
+            does not match.
+
+    Returns:
+        ``(base_name, config)`` tuple, or ``None`` if the entry
+        should be skipped (wrong provider, filtered, malformed).
+    """
+    if info.get("litellm_provider") != litellm_provider:
+        return None
+
+    # Strip provider prefix if present (e.g. "provider/model-name")
+    model_id = model_name.removeprefix(f"{litellm_provider}/")
+
+    if version_filter and not version_filter.search(model_id):
+        return None
+
+    base_name = _DATE_SUFFIX_RE.sub("", model_id)
+    input_cost = info.get("input_cost_per_token") or 0
+    output_cost = info.get("output_cost_per_token") or 0
+    max_input = info.get("max_input_tokens", _DEFAULT_MAX_CONTEXT)
+
+    try:
+        config = ProviderModelConfig(
+            id=model_id,
+            cost_per_1k_input=round(input_cost * 1000, 6),
+            cost_per_1k_output=round(output_cost * 1000, 6),
+            max_context=(
+                max_input if isinstance(max_input, int) else _DEFAULT_MAX_CONTEXT
+            ),
+        )
+    except (TypeError, ValueError) as exc:
+        logger.debug(
+            PROVIDER_LITELLM_LOOKUP_SKIPPED,
+            reason="malformed_model_entry",
+            model=model_name,
+            error=str(exc),
+        )
+        return None
+
+    return (base_name, config)
+
+
+def models_from_litellm(
+    litellm_provider: str,
+) -> tuple[ProviderModelConfig, ...]:
+    """Query litellm.model_cost for all models of a given provider.
+
+    Returns model configs populated with pricing and context data
+    from LiteLLM's built-in model database. Prefers shorter model
+    identifiers over dated variants (e.g. ``example-large-001``
+    over ``example-large-001-20260205``).
+
+    Provider-specific model generation filters (defined in
+    ``presets.MODEL_VERSION_FILTERS``) exclude older models.
+
+    Args:
+        litellm_provider: LiteLLM provider identifier
+            (e.g. ``"example-provider"``).
+
+    Returns:
+        Tuple of model configs, or empty tuple if litellm is not
+        installed or no models match.
+    """
+    try:
+        import litellm  # noqa: PLC0415
+    except ImportError:
+        logger.warning(
+            PROVIDER_LITELLM_LOOKUP_SKIPPED,
+            reason="litellm_not_installed",
+            provider=litellm_provider,
+        )
+        return ()
+
+    from synthorg.providers.presets import MODEL_VERSION_FILTERS  # noqa: PLC0415
+
+    version_filter = MODEL_VERSION_FILTERS.get(litellm_provider)
+    seen: dict[str, ProviderModelConfig] = {}
+
+    for model_name, info in litellm.model_cost.items():
+        if not isinstance(info, dict):
+            continue
+        parsed = _parse_litellm_entry(
+            model_name,
+            info,
+            litellm_provider,
+            version_filter,
+        )
+        if parsed is None:
+            continue
+        base_name, config = parsed
+        existing = seen.get(base_name)
+        if existing is not None and len(existing.id) <= len(config.id):
+            continue
+        seen[base_name] = config
+
+    result = tuple(sorted(seen.values(), key=lambda m: m.id))
+    if result:
+        logger.info(
+            PROVIDER_LITELLM_MODELS_LOADED,
+            provider=litellm_provider,
+            count=len(result),
+        )
+    else:
+        logger.info(
+            PROVIDER_LITELLM_MODELS_EMPTY,
+            provider=litellm_provider,
+            version_filter_applied=version_filter is not None,
+        )
+    return result

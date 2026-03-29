@@ -59,6 +59,28 @@ export function formatCurrency(value: number, currencyCode: string = 'EUR'): str
 }
 
 /**
+ * Format a currency value compactly for chart axes (e.g. "$5", "$10K").
+ * Exact format depends on locale and currency. Falls back to "CODE N" on error.
+ */
+export function formatCurrencyCompact(value: number, currencyCode: string = 'EUR'): string {
+  if (!Number.isFinite(value)) return '--'
+  // Normalize to 3-letter uppercase ISO 4217 code; fall back to EUR
+  const trimmed = currencyCode.trim()
+  const code = /^[A-Za-z]{3}$/.test(trimmed) ? trimmed.toUpperCase() : 'EUR'
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: code,
+      maximumFractionDigits: 0,
+      notation: 'compact',
+    }).format(value)
+  } catch (error) {
+    console.error(`[format] Intl.NumberFormat compact failed for currency "${code}":`, error)
+    return `${code} ${Math.round(value)}`
+  }
+}
+
+/**
  * Format a number with locale-appropriate separators.
  */
 export function formatNumber(value: number): string {
