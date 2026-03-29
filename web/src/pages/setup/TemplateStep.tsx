@@ -1,13 +1,20 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState } from '@/components/ui/empty-state'
+import { InputField } from '@/components/ui/input-field'
+import { SelectField } from '@/components/ui/select-field'
 import { StaggerGroup, StaggerItem } from '@/components/ui/stagger-group'
 import { useSetupWizardStore } from '@/stores/setup-wizard'
 import { useToastStore } from '@/stores/toast'
 import { TemplateCard } from './TemplateCard'
 import { TemplateCompareDrawer } from './TemplateCompareDrawer'
-import { LayoutGrid } from 'lucide-react'
+import { LayoutGrid, Search, X } from 'lucide-react'
 import type { TemplateInfoResponse } from '@/api/types'
+import {
+  CATEGORY_ORDER,
+  deriveCategoryFromTags,
+  getCategoryLabel,
+} from '@/utils/template-categories'
 
 const MAX_COMPARE = 3
 
@@ -16,6 +23,24 @@ const TAG_SOLO = 'solo'
 const TAG_SMALL_TEAM = 'small-team'
 const TAG_ENTERPRISE = 'enterprise'
 const TAG_FULL_COMPANY = 'full-company'
+
+/** Agent-count filter buckets. */
+type SizeFilter = 'all' | 'small' | 'medium' | 'large'
+
+const SIZE_OPTIONS: readonly { value: SizeFilter; label: string }[] = [
+  { value: 'all', label: 'Any size' },
+  { value: 'small', label: '1-3 agents' },
+  { value: 'medium', label: '4-8 agents' },
+  { value: 'large', label: '9+ agents' },
+]
+
+function matchesSize(template: TemplateInfoResponse, size: SizeFilter): boolean {
+  if (size === 'all') return true
+  const count = template.agent_count
+  if (size === 'small') return count >= 1 && count <= 3
+  if (size === 'medium') return count >= 4 && count <= 8
+  return count >= 9
+}
 
 interface TemplateGridItemProps {
   template: TemplateInfoResponse
@@ -43,6 +68,39 @@ function TemplateGridItem({ template, selected, compared, recommended, onSelect,
   )
 }
 
+function TemplateGrid({
+  templates,
+  selectedTemplate,
+  comparedTemplates,
+  recommendedTemplates,
+  onSelect,
+  onToggleCompare,
+}: {
+  templates: readonly TemplateInfoResponse[]
+  selectedTemplate: string | null
+  comparedTemplates: readonly string[]
+  recommendedTemplates: ReadonlySet<string>
+  onSelect: (name: string) => void
+  onToggleCompare: (name: string) => void
+}) {
+  return (
+    <StaggerGroup className="grid grid-cols-3 gap-grid-gap max-[1023px]:grid-cols-2 max-[639px]:grid-cols-1">
+      {templates.map((template) => (
+        <TemplateGridItem
+          key={template.name}
+          template={template}
+          selected={selectedTemplate === template.name}
+          compared={comparedTemplates.includes(template.name)}
+          recommended={recommendedTemplates.has(template.name)}
+          onSelect={() => onSelect(template.name)}
+          onToggleCompare={() => onToggleCompare(template.name)}
+          compareDisabled={comparedTemplates.length >= MAX_COMPARE}
+        />
+      ))}
+    </StaggerGroup>
+  )
+}
+
 export function TemplateStep() {
   const templates = useSetupWizardStore((s) => s.templates)
   const templatesLoading = useSetupWizardStore((s) => s.templatesLoading)
@@ -56,20 +114,18 @@ export function TemplateStep() {
   const markStepComplete = useSetupWizardStore((s) => s.markStepComplete)
   const markStepIncomplete = useSetupWizardStore((s) => s.markStepIncomplete)
 
+  // Filter state
+  const [searchQuery, setSearchQuery] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState('all')
+  const [sizeFilter, setSizeFilter] = useState<SizeFilter>('all')
+
+  const hasFetchedRef = useRef(false)
   useEffect(() => {
-    if (templates.length === 0 && !templatesLoading && !templatesError) {
+    if (!hasFetchedRef.current && !templatesLoading && !templatesError) {
+      hasFetchedRef.current = true
       void fetchTemplates()
     }
-  }, [templates.length, templatesLoading, templatesError, fetchTemplates])
-
-  // Track step completion
-  useEffect(() => {
-    if (selectedTemplate) {
-      markStepComplete('template')
-    } else {
-      markStepIncomplete('template')
-    }
-  }, [selectedTemplate, markStepComplete, markStepIncomplete])
+  }, [templatesLoading, templatesError, fetchTemplates])
 
   const providers = useSetupWizardStore((s) => s.providers)
 
@@ -93,6 +149,66 @@ export function TemplateStep() {
     }
     return recommended
   }, [templates, providers])
+
+  // Available categories (only those present in templates)
+  const availableCategories = useMemo(() => {
+    const seen = new Set<string>()
+    for (const t of templates) {
+      seen.add(deriveCategoryFromTags(t.tags))
+    }
+    const ordered: { value: string; label: string }[] = [{ value: 'all', label: 'All categories' }]
+    for (const key of CATEGORY_ORDER) {
+      if (seen.has(key)) {
+        ordered.push({ value: key, label: getCategoryLabel(key) })
+      }
+    }
+    return ordered
+  }, [templates])
+
+  // Filtered templates
+  const filteredTemplates = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase()
+    return templates.filter((t) => {
+      if (categoryFilter !== 'all' && deriveCategoryFromTags(t.tags) !== categoryFilter) {
+        return false
+      }
+      if (!matchesSize(t, sizeFilter)) return false
+      if (query) {
+        const keywords = query.split(' ').filter(Boolean)
+        if (keywords.length > 0) {
+          const haystack = `${t.display_name} ${t.description} ${t.tags.join(' ')} ${t.workflow} ${t.autonomy_level}`.toLowerCase()
+          if (!keywords.every((kw) => haystack.includes(kw))) return false
+        }
+      }
+      return true
+    })
+  }, [templates, searchQuery, categoryFilter, sizeFilter])
+
+  // Track step completion -- validates against the full template list (not
+  // filtered) so UI filters don't invalidate the selection. Skip while
+  // loading to avoid false negatives from an empty templates array.
+  useEffect(() => {
+    if (templatesLoading) return
+    if (selectedTemplate && templates.some((t) => t.name === selectedTemplate)) {
+      markStepComplete('template')
+    } else {
+      markStepIncomplete('template')
+    }
+  }, [selectedTemplate, templates, templatesLoading, markStepComplete, markStepIncomplete])
+
+  // Split into recommended and others
+  const { recommended, others } = useMemo(() => {
+    const rec: TemplateInfoResponse[] = []
+    const oth: TemplateInfoResponse[] = []
+    for (const t of filteredTemplates) {
+      if (recommendedTemplates.has(t.name)) {
+        rec.push(t)
+      } else {
+        oth.push(t)
+      }
+    }
+    return { recommended: rec, others: oth }
+  }, [filteredTemplates, recommendedTemplates])
 
   const handleSelect = useCallback(
     (name: string) => {
@@ -126,6 +242,8 @@ export function TemplateStep() {
     () => templates.filter((t) => comparedTemplates.includes(t.name)),
     [templates, comparedTemplates],
   )
+
+  const hasActiveFilters = searchQuery.trim() !== '' || categoryFilter !== 'all' || sizeFilter !== 'all'
 
   if (templatesLoading) {
     return (
@@ -169,20 +287,115 @@ export function TemplateStep() {
         </p>
       </div>
 
-      <StaggerGroup className="grid grid-cols-3 gap-grid-gap max-[1023px]:grid-cols-2 max-[639px]:grid-cols-1">
-        {templates.map((template) => (
-          <TemplateGridItem
-            key={template.name}
-            template={template}
-            selected={selectedTemplate === template.name}
-            compared={comparedTemplates.includes(template.name)}
-            recommended={recommendedTemplates.has(template.name)}
-            onSelect={() => handleSelect(template.name)}
-            onToggleCompare={() => handleToggleCompare(template.name)}
-            compareDisabled={comparedTemplates.length >= MAX_COMPARE}
+      {/* Filter bar */}
+      <div className="flex flex-wrap items-end gap-3">
+        {/* Search -- custom wrapper for leading icon + clear button (InputField does not support icons) */}
+        <div className="relative flex-1 min-w-52 max-w-xs">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+          <InputField
+            label="Search"
+            value={searchQuery}
+            onValueChange={setSearchQuery}
+            placeholder="Search templates..."
+            className="pl-8 pr-8"
           />
-        ))}
-      </StaggerGroup>
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label="Clear search"
+            >
+              <X className="size-3.5" aria-hidden="true" />
+            </button>
+          )}
+        </div>
+
+        {/* Category filter */}
+        <SelectField
+          label="Category"
+          options={availableCategories}
+          value={categoryFilter}
+          onChange={setCategoryFilter}
+        />
+
+        {/* Size filter */}
+        <SelectField
+          label="Size"
+          options={SIZE_OPTIONS}
+          value={sizeFilter}
+          onChange={(v) => setSizeFilter(v as SizeFilter)}
+        />
+
+        {/* Clear filters */}
+        {hasActiveFilters && (
+          <button
+            type="button"
+            onClick={() => {
+              setSearchQuery('')
+              setCategoryFilter('all')
+              setSizeFilter('all')
+            }}
+            className="self-end pb-1 text-xs text-accent hover:underline"
+          >
+            Clear filters
+          </button>
+        )}
+      </div>
+
+      {/* No results after filtering */}
+      {filteredTemplates.length === 0 && (
+        <EmptyState
+          icon={LayoutGrid}
+          title="No templates match"
+          description="Try adjusting your filters or search query."
+          action={{
+            label: 'Clear filters',
+            onClick: () => {
+              setSearchQuery('')
+              setCategoryFilter('all')
+              setSizeFilter('all')
+            },
+          }}
+        />
+      )}
+
+      {/* Recommended section */}
+      {recommended.length > 0 && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold text-foreground">Recommended</h3>
+            <span className="rounded-full bg-accent/10 px-2 py-0.5 text-compact font-medium text-accent">
+              {recommended.length}
+            </span>
+          </div>
+          <TemplateGrid
+            templates={recommended}
+            selectedTemplate={selectedTemplate}
+            comparedTemplates={comparedTemplates}
+            recommendedTemplates={recommendedTemplates}
+            onSelect={handleSelect}
+            onToggleCompare={handleToggleCompare}
+          />
+        </div>
+      )}
+
+      {/* Others section */}
+      {others.length > 0 && (
+        <div className="space-y-4">
+          {recommended.length > 0 && (
+            <h3 className="text-sm font-semibold text-muted-foreground">Other Templates</h3>
+          )}
+          <TemplateGrid
+            templates={others}
+            selectedTemplate={selectedTemplate}
+            comparedTemplates={comparedTemplates}
+            recommendedTemplates={recommendedTemplates}
+            onSelect={handleSelect}
+            onToggleCompare={handleToggleCompare}
+          />
+        </div>
+      )}
 
       <TemplateCompareDrawer
         open={comparedTemplates.length >= 2}

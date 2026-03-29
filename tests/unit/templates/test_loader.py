@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from synthorg.core.enums import AutonomyLevel
 from synthorg.templates.errors import (
     TemplateNotFoundError,
     TemplateRenderError,
@@ -120,6 +121,26 @@ class TestListTemplates:
         for t in templates:
             if t.name in BUILTIN_TEMPLATES:
                 assert t.source == "builtin"
+
+    def test_structural_metadata_populated(self) -> None:
+        """Structural fields match the underlying template data."""
+        templates = list_templates()
+        for t in templates:
+            loaded = load_template(t.name)
+            tmpl = loaded.template
+            assert t.agent_count == len(tmpl.agents)
+            assert t.department_count == len(tmpl.departments)
+            assert isinstance(t.autonomy_level, AutonomyLevel)
+            raw_level = str(tmpl.autonomy.get("level", "semi"))
+            expected_level = (
+                AutonomyLevel(raw_level)
+                if raw_level in set(AutonomyLevel)
+                else AutonomyLevel.SEMI
+            )
+            assert t.autonomy_level == expected_level
+            assert isinstance(t.workflow, str)
+            assert t.workflow.strip() != ""
+            assert t.workflow == tmpl.workflow
 
     def test_user_template_overrides_builtin(
         self,

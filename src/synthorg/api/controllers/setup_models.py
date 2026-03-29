@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
-from synthorg.core.enums import SeniorityLevel, SkillPattern
+from synthorg.core.enums import AutonomyLevel, SeniorityLevel, SkillPattern
 from synthorg.core.types import NotBlankStr  # noqa: TC001
 from synthorg.templates.model_requirements import ModelTier  # noqa: TC001
 
@@ -100,6 +100,10 @@ class TemplateInfoResponse(BaseModel):
         skill_patterns: Skill design pattern identifiers describing how the
             template's agents interact (e.g. ``"tool_wrapper"``, ``"pipeline"``).
         variables: Template variables the user can configure.
+        agent_count: Number of agents defined in the template.
+        department_count: Number of departments defined in the template.
+        autonomy_level: Autonomy level (e.g. ``"full"``, ``"semi"``).
+        workflow: Workflow type (e.g. ``"agile_kanban"``, ``"kanban"``).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -119,6 +123,24 @@ class TemplateInfoResponse(BaseModel):
     variables: tuple[TemplateVariableResponse, ...] = Field(
         default=(),
         description="User-configurable template variables",
+    )
+    agent_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of agents defined in the template",
+    )
+    department_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of departments defined in the template",
+    )
+    autonomy_level: AutonomyLevel = Field(
+        default=AutonomyLevel.SEMI,
+        description="Autonomy level (full, semi, supervised, locked)",
+    )
+    workflow: NotBlankStr = Field(
+        default="agile_kanban",
+        description="Workflow type (agile_kanban, kanban, etc.)",
     )
 
 
@@ -145,9 +167,9 @@ class SetupAgentSummary(BaseModel):
         name: Agent display name.
         role: Agent role.
         department: Assigned department.
-        level: Seniority level string.
-        model_provider: LLM provider name (empty if unassigned).
-        model_id: Model identifier (empty if unassigned).
+        level: Seniority level (``None`` if not specified).
+        model_provider: LLM provider name (``None`` if unassigned).
+        model_id: Model identifier (``None`` if unassigned).
         tier: Original tier requirement from the template.
         personality_preset: Personality preset name, if any.
     """
@@ -157,9 +179,9 @@ class SetupAgentSummary(BaseModel):
     name: NotBlankStr
     role: NotBlankStr
     department: NotBlankStr
-    level: str = ""
-    model_provider: str = ""
-    model_id: str = ""
+    level: SeniorityLevel | None = None
+    model_provider: NotBlankStr | None = None
+    model_id: NotBlankStr | None = None
     tier: ModelTier = "medium"
     personality_preset: NotBlankStr | None = None
 

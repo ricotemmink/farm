@@ -21,6 +21,7 @@ vi.mock('@/api/endpoints/providers', () => ({
   listProviders: vi.fn(),
   listPresets: vi.fn(),
   createFromPreset: vi.fn(),
+  createProvider: vi.fn(),
   testConnection: vi.fn(),
   probePreset: vi.fn(),
   discoverModels: vi.fn(),
@@ -208,6 +209,10 @@ describe('setup wizard store', () => {
           tags: ['startup'],
           skill_patterns: [],
           variables: [],
+          agent_count: 5,
+          department_count: 3,
+          autonomy_level: 'semi',
+          workflow: 'agile_kanban',
         },
       ])
 
@@ -216,6 +221,10 @@ describe('setup wizard store', () => {
       const state = useSetupWizardStore.getState()
       expect(state.templates).toHaveLength(1)
       expect(state.templates[0]?.name).toBe('startup')
+      expect(state.templates[0]?.agent_count).toBe(5)
+      expect(state.templates[0]?.department_count).toBe(3)
+      expect(state.templates[0]?.autonomy_level).toBe('semi')
+      expect(state.templates[0]?.workflow).toBe('agile_kanban')
       expect(state.templatesLoading).toBe(false)
       expect(state.templatesError).toBeNull()
     })
@@ -338,6 +347,132 @@ describe('setup wizard store', () => {
       expect(state.selectedTemplate).toBeNull()
       expect(state.companyName).toBe('')
       expect(state.currency).toBe('EUR')
+    })
+  })
+
+  describe('provider actions (full)', () => {
+    it('createProviderFromPresetFull stores provider on success', async () => {
+      const { createFromPreset } = await import('@/api/endpoints/providers')
+      const mockProvider = {
+        driver: 'litellm',
+        litellm_provider: 'test-provider',
+        auth_type: 'api_key' as const,
+        has_api_key: true,
+        has_oauth_credentials: false,
+        has_custom_header: false,
+        has_subscription_token: false,
+        tos_accepted_at: null,
+        oauth_token_url: null,
+        oauth_client_id: null,
+        oauth_scope: null,
+        custom_header_name: null,
+        base_url: 'https://api.example.com',
+        models: [{ id: 'test-model-001', alias: null, cost_per_1k_input: 0, cost_per_1k_output: 0, max_context: 128000, estimated_latency_ms: null }],
+      }
+      vi.mocked(createFromPreset).mockResolvedValue(mockProvider)
+
+      const result = await useSetupWizardStore.getState().createProviderFromPresetFull({
+        preset_name: 'test-preset',
+        name: 'my-provider',
+        api_key: 'sk-test',
+      })
+
+      expect(result).toBe(mockProvider)
+      expect(useSetupWizardStore.getState().providers['my-provider']).toBe(mockProvider)
+      expect(useSetupWizardStore.getState().providersError).toBeNull()
+    })
+
+    it('createProviderFromPresetFull triggers discovery for zero-model providers', async () => {
+      const { createFromPreset, discoverModels, getProvider } = await import('@/api/endpoints/providers')
+      const emptyProvider = {
+        driver: 'litellm',
+        litellm_provider: 'test-local',
+        auth_type: 'none' as const,
+        has_api_key: false,
+        has_oauth_credentials: false,
+        has_custom_header: false,
+        has_subscription_token: false,
+        tos_accepted_at: null,
+        oauth_token_url: null,
+        oauth_client_id: null,
+        oauth_scope: null,
+        custom_header_name: null,
+        base_url: 'http://localhost:11434',
+        models: [],
+      }
+      const refreshedProvider = {
+        ...emptyProvider,
+        models: [{ id: 'test-model-001', alias: null, cost_per_1k_input: 0, cost_per_1k_output: 0, max_context: 128000, estimated_latency_ms: null }],
+      }
+      vi.mocked(createFromPreset).mockResolvedValue(emptyProvider)
+      vi.mocked(discoverModels).mockResolvedValue({ discovered_models: [], provider_name: 'local-provider' })
+      vi.mocked(getProvider).mockResolvedValue(refreshedProvider)
+
+      const result = await useSetupWizardStore.getState().createProviderFromPresetFull({
+        preset_name: 'test-local',
+        name: 'local-provider',
+      })
+
+      expect(discoverModels).toHaveBeenCalledWith('local-provider', 'test-local')
+      expect(getProvider).toHaveBeenCalledWith('local-provider')
+      expect(result).toBe(refreshedProvider)
+      expect(useSetupWizardStore.getState().providers['local-provider']).toBe(refreshedProvider)
+    })
+
+    it('createProviderFromPresetFull returns null and sets error on failure', async () => {
+      const { createFromPreset } = await import('@/api/endpoints/providers')
+      vi.mocked(createFromPreset).mockRejectedValue(new Error('Auth failed'))
+
+      const result = await useSetupWizardStore.getState().createProviderFromPresetFull({
+        preset_name: 'test-preset',
+        name: 'my-provider',
+      })
+
+      expect(result).toBeNull()
+      expect(useSetupWizardStore.getState().providersError).toBe('Auth failed')
+    })
+
+    it('createProviderCustom stores provider on success', async () => {
+      const { createProvider } = await import('@/api/endpoints/providers')
+      const mockProvider = {
+        driver: 'custom',
+        litellm_provider: 'custom',
+        auth_type: 'none' as const,
+        has_api_key: false,
+        has_oauth_credentials: false,
+        has_custom_header: false,
+        has_subscription_token: false,
+        tos_accepted_at: null,
+        oauth_token_url: null,
+        oauth_client_id: null,
+        oauth_scope: null,
+        custom_header_name: null,
+        base_url: 'http://localhost:8000',
+        models: [],
+      }
+      vi.mocked(createProvider).mockResolvedValue(mockProvider)
+
+      const result = await useSetupWizardStore.getState().createProviderCustom({
+        name: 'custom-provider',
+        auth_type: 'none',
+        base_url: 'http://localhost:8000',
+      })
+
+      expect(result).toBe(mockProvider)
+      expect(useSetupWizardStore.getState().providers['custom-provider']).toBe(mockProvider)
+    })
+
+    it('createProviderCustom returns null and sets error on failure', async () => {
+      const { createProvider } = await import('@/api/endpoints/providers')
+      vi.mocked(createProvider).mockRejectedValue(new Error('Connection refused'))
+
+      const result = await useSetupWizardStore.getState().createProviderCustom({
+        name: 'bad-provider',
+        auth_type: 'none',
+      })
+
+      expect(result).toBeNull()
+      expect(useSetupWizardStore.getState().providersError).toBe('Connection refused')
     })
   })
 })

@@ -3,6 +3,28 @@ import { Button } from '@/components/ui/button'
 import { StatPill } from '@/components/ui/stat-pill'
 import type { TemplateInfoResponse } from '@/api/types'
 import { deriveCategoryFromTags, getCategoryLabel } from '@/utils/template-categories'
+import { Users, Building2, Shield, GitBranch } from 'lucide-react'
+
+const AUTONOMY_LABELS: Record<string, string> = {
+  full: 'Full autonomy',
+  semi: 'Semi-autonomous',
+  supervised: 'Supervised',
+  locked: 'Locked',
+}
+
+const WORKFLOW_LABELS: Record<string, string> = {
+  agile_kanban: 'Agile',
+  kanban: 'Kanban',
+  event_driven: 'Event-driven',
+  waterfall: 'Waterfall',
+}
+
+function humanizeWorkflow(raw: string): string {
+  return raw
+    .replace(/[_-]/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+}
 
 export interface TemplateCardProps {
   template: TemplateInfoResponse
@@ -60,6 +82,26 @@ export function TemplateCard({
           <StatPill value={category} className="text-compact" />
         </div>
         <p className="line-clamp-2 text-xs text-muted-foreground">{template.description}</p>
+      </div>
+
+      {/* Structural metadata */}
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        <div className="flex items-center gap-1.5" title="Agents">
+          <Users className="size-3.5 text-accent" aria-hidden="true" />
+          <span>{template.agent_count} agent{template.agent_count !== 1 ? 's' : ''}</span>
+        </div>
+        <div className="flex items-center gap-1.5" title="Departments">
+          <Building2 className="size-3.5 text-accent" aria-hidden="true" />
+          <span>{template.department_count} dept{template.department_count !== 1 ? 's' : ''}</span>
+        </div>
+        <div className="flex items-center gap-1.5" title="Autonomy level">
+          <Shield className="size-3.5 text-accent" aria-hidden="true" />
+          <span>{AUTONOMY_LABELS[template.autonomy_level] ?? template.autonomy_level}</span>
+        </div>
+        <div className="flex items-center gap-1.5" title="Workflow">
+          <GitBranch className="size-3.5 text-accent" aria-hidden="true" />
+          <span>{WORKFLOW_LABELS[template.workflow] ?? humanizeWorkflow(template.workflow)}</span>
+        </div>
       </div>
 
       {/* Tags */}

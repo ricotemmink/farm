@@ -213,6 +213,10 @@ class SetupController(Controller):
                     )
                     for v in t.variables
                 ),
+                agent_count=t.agent_count,
+                department_count=t.department_count,
+                autonomy_level=t.autonomy_level,
+                workflow=t.workflow,
             )
             for t in templates
         )
@@ -250,30 +254,27 @@ class SetupController(Controller):
         settings_svc = app_state.settings_service
         await _check_setup_not_complete(settings_svc)
 
-        template_result = _resolve_template(data.template_name)
-        departments_json = template_result.departments_json
-        department_count = template_result.department_count
-        template_applied = template_result.template_applied
+        tmpl_res = _resolve_template(data.template_name)
         description = normalize_description(data.description)
 
         await _persist_company_settings(
             settings_svc,
             data.company_name,
             description,
-            departments_json,
+            tmpl_res.departments_json,
         )
 
         agent_summaries: tuple[SetupAgentSummary, ...] = ()
-        if template_result.template is not None:
+        if tmpl_res.template is not None:
             agent_summaries = await _auto_create_template_agents(
-                template_result.template,
+                tmpl_res.template,
                 app_state,
                 settings_svc,
             )
             logger.info(
                 SETUP_AGENTS_AUTO_CREATED,
                 count=len(agent_summaries),
-                template=template_applied,
+                template=tmpl_res.template_applied,
             )
         else:
             # Blank path: clear any agents persisted by a previous
@@ -284,18 +285,16 @@ class SetupController(Controller):
             SETUP_COMPANY_CREATED,
             company_name=data.company_name,
             description_present=description is not None,
-            description_length=len(description) if description else 0,
-            template=template_applied,
-            department_count=department_count,
+            template=tmpl_res.template_applied,
+            department_count=tmpl_res.department_count,
             agent_count=len(agent_summaries),
         )
-
         return ApiResponse(
             data=SetupCompanyResponse(
                 company_name=data.company_name,
                 description=description,
-                template_applied=template_applied,
-                department_count=department_count,
+                template_applied=tmpl_res.template_applied,
+                department_count=tmpl_res.department_count,
                 agents=agent_summaries,
             ),
         )

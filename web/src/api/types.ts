@@ -1223,6 +1223,10 @@ export interface TemplateInfoResponse {
   tags: readonly string[]
   skill_patterns: readonly SkillPattern[]
   variables: readonly TemplateVariable[]
+  agent_count: number
+  department_count: number
+  autonomy_level: string
+  workflow: string
 }
 
 export interface SetupCompanyRequest {
@@ -1246,9 +1250,9 @@ export interface SetupAgentSummary {
   name: string
   role: string
   department: string
-  level: SeniorityLevel
-  model_provider: string
-  model_id: string
+  level: SeniorityLevel | null
+  model_provider: string | null
+  model_id: string | null
   tier: string
   personality_preset: string | null
 }
