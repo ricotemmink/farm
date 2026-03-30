@@ -1,9 +1,40 @@
-import { screen } from '@testing-library/react'
+import { act, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import fc from 'fast-check'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
 import { Sidebar } from '@/components/layout/Sidebar'
+import { ROUTES } from '@/router/routes'
 import { renderWithRouter } from '../../test-utils'
+
+// Mock components defined at module level for ESLint compliance
+function MockAnimatePresence({ children }: { children: React.ReactNode }) {
+  return <>{children}</>
+}
+
+// React 19: ref is a regular prop, no forwardRef needed
+function MockMotionDiv({ children, ref, ...allProps }: React.ComponentProps<'div'> & { ref?: React.Ref<HTMLDivElement> } & Record<string, unknown>) {
+  const domProps = Object.fromEntries(
+    Object.entries(allProps).filter(([key]) => !['variants', 'initial', 'animate', 'exit', 'transition'].includes(key)),
+  ) as React.HTMLAttributes<HTMLDivElement>
+  return <div ref={ref} {...domProps}>{children as React.ReactNode}</div>
+}
+
+vi.mock('framer-motion', async () => {
+  const actual = await vi.importActual<typeof import('framer-motion')>('framer-motion')
+  return {
+    ...actual,
+    AnimatePresence: MockAnimatePresence,
+    motion: { div: MockMotionDiv },
+  }
+})
+
+// Mock useBreakpoint so we can control breakpoint per-test
+const getBreakpoint = vi.fn()
+vi.mock('@/hooks/useBreakpoint', () => ({
+  // eslint-disable-next-line @eslint-react/component-hook-factories -- test mock, not a real hook factory
+  useBreakpoint: () => getBreakpoint(),
+}))
 
 // Prevent window.location side effects from auth store
 const originalLocation = window.location
@@ -45,6 +76,12 @@ describe('Sidebar', () => {
     useThemeStore.getState().setSidebarMode('collapsible')
     localStorage.clear()
     vi.clearAllMocks()
+    getBreakpoint.mockReturnValue({
+      breakpoint: 'desktop',
+      isDesktop: true,
+      isTablet: false,
+      isMobile: false,
+    })
   })
 
   it('renders all primary navigation items', () => {
@@ -186,6 +223,129 @@ describe('Sidebar', () => {
       setup()
 
       expect(screen.getByTitle('Collapse sidebar')).toBeInTheDocument()
+    })
+  })
+
+  it('returns null at mobile breakpoint', () => {
+    getBreakpoint.mockReturnValue({
+      breakpoint: 'mobile',
+      isDesktop: false,
+      isTablet: false,
+      isMobile: true,
+    })
+    setup()
+    expect(screen.queryByLabelText('Main navigation')).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('forces collapsed at desktop-sm breakpoint regardless of user preference', () => {
+    getBreakpoint.mockReturnValue({
+      breakpoint: 'desktop-sm',
+      isDesktop: true,
+      isTablet: false,
+      isMobile: false,
+    })
+    localStorage.setItem('sidebar_collapsed', 'false')
+    setup()
+    // Collapsed shows brand mark "S" instead of "SynthOrg"
+    expect(screen.getByText('S')).toBeInTheDocument()
+    expect(screen.queryByText('SynthOrg')).not.toBeInTheDocument()
+  })
+
+  describe('tablet overlay', () => {
+    function setupTablet(overlayOpen: boolean, onOverlayClose = vi.fn()) {
+      getBreakpoint.mockReturnValue({
+        breakpoint: 'tablet',
+        isDesktop: false,
+        isTablet: true,
+        isMobile: false,
+      })
+      useAuthStore.setState({
+        token: 'test-token',
+        user: { id: '1', username: 'admin', role: 'ceo', must_change_password: false },
+        loading: false,
+        _mustChangePasswordFallback: false,
+      })
+      return {
+        onOverlayClose,
+        ...renderWithRouter(
+          <Sidebar overlayOpen={overlayOpen} onOverlayClose={onOverlayClose} />,
+          { initialEntries: ['/'] },
+        ),
+      }
+    }
+
+    it('renders nothing when overlayOpen is false', () => {
+      setupTablet(false)
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+
+    it('renders dialog when overlayOpen is true', () => {
+      setupTablet(true)
+      expect(screen.getByRole('dialog')).toBeInTheDocument()
+    })
+
+    it('has aria-label "Navigation menu"', () => {
+      setupTablet(true)
+      expect(screen.getByRole('dialog')).toHaveAttribute('aria-label', 'Navigation menu')
+    })
+
+    it('shows SynthOrg branding', () => {
+      setupTablet(true)
+      expect(screen.getByText('SynthOrg')).toBeInTheDocument()
+    })
+
+    it('renders navigation items', () => {
+      setupTablet(true)
+      expect(screen.getByText('Dashboard')).toBeInTheDocument()
+      expect(screen.getByText('Settings')).toBeInTheDocument()
+    })
+
+    it('does not call onOverlayClose on mount', () => {
+      const { onOverlayClose } = setupTablet(true)
+      expect(onOverlayClose).not.toHaveBeenCalled()
+    })
+
+    it('calls onOverlayClose when close button is clicked', async () => {
+      const user = userEvent.setup()
+      const { onOverlayClose } = setupTablet(true)
+      await user.click(screen.getByLabelText('Close navigation menu'))
+      expect(onOverlayClose).toHaveBeenCalledOnce()
+    })
+
+    it('calls onOverlayClose when Escape is pressed', async () => {
+      const user = userEvent.setup()
+      const { onOverlayClose } = setupTablet(true)
+      await user.keyboard('{Escape}')
+      expect(onOverlayClose).toHaveBeenCalledOnce()
+    })
+
+    it('calls onOverlayClose when overlay backdrop is clicked', async () => {
+      const user = userEvent.setup()
+      const { onOverlayClose } = setupTablet(true)
+      await user.click(screen.getByTestId('drawer-overlay'))
+      expect(onOverlayClose).toHaveBeenCalledOnce()
+    })
+
+    it('calls onOverlayClose on route navigation', async () => {
+      const onOverlayClose = vi.fn()
+      const { router } = setupTablet(true, onOverlayClose)
+      await act(() => router.navigate('/settings'))
+      expect(onOverlayClose).toHaveBeenCalledOnce()
+    })
+
+    // Property: navigating to any different static route while overlay is open triggers exactly one close
+    const staticRoutes = Object.values(ROUTES).filter((r) => !r.includes(':') && r !== '/')
+    it('close-on-navigate fires exactly once for any static route (property)', async () => {
+      await fc.assert(
+        fc.asyncProperty(fc.constantFrom(...staticRoutes), async (route) => {
+          const onOverlayClose = vi.fn()
+          const { router, unmount } = setupTablet(true, onOverlayClose)
+          await act(() => router.navigate(route))
+          expect(onOverlayClose).toHaveBeenCalledOnce()
+          unmount()
+        }),
+      )
     })
   })
 })

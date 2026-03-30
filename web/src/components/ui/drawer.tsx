@@ -1,31 +1,60 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { springDefault } from '@/lib/motion'
 
-export interface DrawerProps {
+interface DrawerPropsBase {
   open: boolean
   onClose: () => void
-  title: string
+  /** Which edge the drawer slides in from. @default 'right' */
+  side?: 'left' | 'right'
+  /** Additional class names merged into the content wrapper (e.g. `"p-0"` to remove default padding). */
+  contentClassName?: string
   children: React.ReactNode
   className?: string
 }
+
+/**
+ * At least one of `title` or `ariaLabel` must be provided so the dialog
+ * always has an accessible name (WAI-ARIA dialog pattern). When `title` is
+ * provided the Drawer renders a built-in header; when omitted, the header is
+ * skipped and `ariaLabel` supplies the accessible name instead.
+ */
+export type DrawerProps = DrawerPropsBase & (
+  | { /** Visible header title. */ title: string; /** Explicit aria-label; when omitted, `title` is used as the accessible name. */ ariaLabel?: string }
+  | { title?: undefined; /** Explicit aria-label (required when title is omitted). */ ariaLabel: string }
+)
 
 const overlayVariants = {
   hidden: { opacity: 0 },
   visible: { opacity: 1 },
 }
 
-const panelVariants = {
-  hidden: { x: '100%' },
-  visible: { x: 0, transition: { type: 'spring' as const, stiffness: 300, damping: 30 } },
-  exit: { x: '100%', transition: { duration: 0.2, ease: 'easeIn' as const } },
+function getPanelVariants(side: 'left' | 'right') {
+  const offscreen = side === 'left' ? '-100%' : '100%'
+  return {
+    hidden: { x: offscreen },
+    visible: { x: 0, transition: springDefault },
+    exit: { x: offscreen, transition: { duration: 0.2, ease: 'easeIn' as const } },
+  }
 }
 
-export function Drawer({ open, onClose, title, children, className }: DrawerProps) {
+export function Drawer({ open, onClose, title, ariaLabel, side = 'right', contentClassName, children, className }: DrawerProps) {
   const panelRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
+  const panelVariants = useMemo(() => getPanelVariants(side), [side])
+
+  // Trim once, reuse for accessible name and header rendering
+  const trimmedTitle = title?.trim() || undefined
+  const accessibleName = ariaLabel?.trim() || trimmedTitle || undefined
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== 'production' && !accessibleName) {
+      console.warn('Drawer: either `title` or `ariaLabel` must be a non-empty string for accessible dialog naming.')
+    }
+  }, [accessibleName])
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -50,9 +79,15 @@ export function Drawer({ open, onClose, title, children, className }: DrawerProp
     const handleTab = (e: KeyboardEvent) => {
       if (e.key !== 'Tab') return
       const focusable = panel.querySelectorAll<HTMLElement>(
-        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable]:not([contenteditable="false"])',
       )
-      if (focusable.length === 0) return
+      if (focusable.length === 0) {
+        // No focusable children (e.g. headerless drawer with text-only content) --
+        // keep focus on the panel itself so Tab cannot escape the modal.
+        e.preventDefault()
+        panel.focus()
+        return
+      }
       const first = focusable[0]!
       const last = focusable[focusable.length - 1]!
       const active = document.activeElement
@@ -90,6 +125,7 @@ export function Drawer({ open, onClose, title, children, className }: DrawerProp
             className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm"
             onClick={onClose}
             aria-hidden="true"
+            data-testid="drawer-overlay"
           />
           {/* Panel */}
           <motion.div
@@ -100,32 +136,35 @@ export function Drawer({ open, onClose, title, children, className }: DrawerProp
             exit="exit"
             role="dialog"
             aria-modal="true"
-            aria-label={title}
+            aria-label={accessibleName}
             tabIndex={-1}
             className={cn(
-              'fixed inset-y-0 right-0 z-50 flex w-[40vw] min-w-80 max-w-xl flex-col',
-              'border-l border-border bg-card shadow-[var(--so-shadow-card-hover)]',
+              'fixed inset-y-0 z-50 flex w-[40vw] min-w-80 max-w-xl flex-col',
+              side === 'left' ? 'left-0 border-r' : 'right-0 border-l',
+              'border-border bg-card shadow-[var(--so-shadow-card-hover)]',
               className,
             )}
           >
-            {/* Header */}
-            <div className="flex items-center justify-between border-b border-border px-4 py-3">
-              <h2 className="text-sm font-semibold text-foreground">{title}</h2>
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="Close"
-                className={cn(
-                  'rounded-md p-1 text-muted-foreground transition-colors',
-                  'hover:bg-card-hover hover:text-foreground',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
-                )}
-              >
-                <X className="size-4" />
-              </button>
-            </div>
+            {/* Header (omitted when title is absent or whitespace-only) */}
+            {trimmedTitle && (
+              <div className="flex items-center justify-between border-b border-border px-4 py-3">
+                <h2 className="text-sm font-semibold text-foreground">{trimmedTitle}</h2>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  aria-label="Close"
+                  className={cn(
+                    'rounded-md p-1 text-muted-foreground transition-colors',
+                    'hover:bg-card-hover hover:text-foreground',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent',
+                  )}
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+            )}
             {/* Content */}
-            <div className="flex-1 overflow-y-auto p-4">
+            <div data-testid="drawer-content" className={cn('flex-1 overflow-y-auto p-4', contentClassName)}>
               {children}
             </div>
           </motion.div>
