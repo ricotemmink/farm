@@ -65,7 +65,7 @@ class TestProviderHealthRecord:
 class TestProviderHealthSummary:
     def test_defaults(self) -> None:
         summary = ProviderHealthSummary()
-        assert summary.health_status == ProviderHealthStatus.UP
+        assert summary.health_status == ProviderHealthStatus.UNKNOWN
         assert summary.last_check_timestamp is None
         assert summary.avg_response_time_ms is None
         assert summary.error_rate_percent_24h == 0.0
@@ -76,6 +76,39 @@ class TestProviderHealthSummary:
         with pytest.raises(ValidationError):
             summary.error_rate_percent_24h = 99.0  # type: ignore[misc]
 
+    def test_default_tokens_and_cost(self) -> None:
+        summary = ProviderHealthSummary()
+        assert summary.total_tokens_24h == 0
+        assert summary.total_cost_24h == 0.0
+
+    def test_with_tokens_and_cost(self) -> None:
+        summary = ProviderHealthSummary(
+            total_tokens_24h=50000,
+            total_cost_24h=1.25,
+        )
+        assert summary.total_tokens_24h == 50000
+        assert summary.total_cost_24h == 1.25
+
+    def test_model_copy_enrichment(self) -> None:
+        """model_copy(update=...) works on frozen model for enrichment."""
+        base = ProviderHealthSummary(calls_last_24h=100)
+        enriched = base.model_copy(
+            update={"total_tokens_24h": 5000, "total_cost_24h": 0.75},
+        )
+        assert enriched.calls_last_24h == 100
+        assert enriched.total_tokens_24h == 5000
+        assert enriched.total_cost_24h == 0.75
+        # Original unchanged
+        assert base.total_tokens_24h == 0
+
+    def test_tokens_non_negative(self) -> None:
+        with pytest.raises(ValueError, match="greater than or equal to 0"):
+            ProviderHealthSummary(total_tokens_24h=-1)
+
+    def test_cost_non_negative(self) -> None:
+        with pytest.raises(ValueError, match="greater than or equal to 0"):
+            ProviderHealthSummary(total_cost_24h=-0.01)
+
 
 # ── Tracker tests ─────────────────────────────────────────────
 
@@ -85,7 +118,7 @@ class TestProviderHealthTracker:
     async def test_empty_summary(self) -> None:
         tracker = ProviderHealthTracker()
         summary = await tracker.get_summary("test-provider")
-        assert summary.health_status == ProviderHealthStatus.UP
+        assert summary.health_status == ProviderHealthStatus.UNKNOWN
         assert summary.last_check_timestamp is None
         assert summary.avg_response_time_ms is None
         assert summary.error_rate_percent_24h == 0.0
@@ -363,15 +396,29 @@ class TestGetAllSummaries:
 @pytest.mark.unit
 class TestHealthStatusComputed:
     def test_health_status_derived_from_error_rate(self) -> None:
-        summary = ProviderHealthSummary(error_rate_percent_24h=15.0)
+        summary = ProviderHealthSummary(
+            error_rate_percent_24h=15.0,
+            calls_last_24h=100,
+        )
         assert summary.health_status == ProviderHealthStatus.DEGRADED
 
-    def test_default_is_up(self) -> None:
+    def test_default_is_unknown(self) -> None:
         summary = ProviderHealthSummary()
+        assert summary.health_status == ProviderHealthStatus.UNKNOWN
+
+    def test_zero_calls_is_unknown(self) -> None:
+        summary = ProviderHealthSummary(calls_last_24h=0)
+        assert summary.health_status == ProviderHealthStatus.UNKNOWN
+
+    def test_up_with_calls(self) -> None:
+        summary = ProviderHealthSummary(calls_last_24h=10)
         assert summary.health_status == ProviderHealthStatus.UP
 
     def test_down_at_50_percent(self) -> None:
-        summary = ProviderHealthSummary(error_rate_percent_24h=50.0)
+        summary = ProviderHealthSummary(
+            error_rate_percent_24h=50.0,
+            calls_last_24h=100,
+        )
         assert summary.health_status == ProviderHealthStatus.DOWN
 
 

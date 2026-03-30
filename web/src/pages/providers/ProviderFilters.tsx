@@ -9,6 +9,7 @@ const HEALTH_OPTIONS: { value: string; label: string }[] = [
   { value: 'up', label: 'Up' },
   { value: 'degraded', label: 'Degraded' },
   { value: 'down', label: 'Down' },
+  { value: 'unknown', label: 'Unknown' },
 ]
 
 const SORT_OPTIONS: { value: string; label: string }[] = [
@@ -17,7 +18,7 @@ const SORT_OPTIONS: { value: string; label: string }[] = [
   { value: 'model_count', label: 'Models' },
 ]
 
-const VALID_HEALTH: ReadonlySet<string> = new Set(['up', 'degraded', 'down'])
+const VALID_HEALTH: ReadonlySet<string> = new Set(['up', 'degraded', 'down', 'unknown'])
 const VALID_SORT: ReadonlySet<string> = new Set(['name', 'health', 'model_count'])
 
 export function ProviderFilters() {

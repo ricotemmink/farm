@@ -3,6 +3,7 @@ import { ProviderHealthBadge } from '@/components/ui/provider-health-badge'
 import { cn } from '@/lib/utils'
 import type { ProviderHealthSummary } from '@/api/types'
 import type { ProviderWithName } from '@/utils/providers'
+import { formatTokenCount, formatCost } from '@/utils/providers'
 
 interface ProviderCardProps {
   provider: ProviderWithName
@@ -52,9 +53,19 @@ export function ProviderCard({ provider, health, className }: ProviderCardProps)
           <span className="rounded-md bg-bg-surface px-1.5 py-0.5 text-xs font-mono text-text-secondary">
             {provider.models.length} model{provider.models.length !== 1 ? 's' : ''}
           </span>
-          {health && health.calls_last_24h > 0 && (
+          {health && (
             <span className="text-xs text-text-muted">
               {health.calls_last_24h} calls/24h
+            </span>
+          )}
+          {health && (
+            <span className="text-xs text-text-muted">
+              {formatTokenCount(health.total_tokens_24h)} tok
+            </span>
+          )}
+          {health && (
+            <span className="text-xs text-text-muted">
+              {formatCost(health.total_cost_24h)}
             </span>
           )}
         </div>

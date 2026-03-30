@@ -6,6 +6,7 @@ import type {
   ProviderHealthSummary,
 } from '@/api/types'
 import type { SemanticColor } from '@/lib/utils'
+import { formatCurrency } from '@/utils/format'
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -69,7 +70,8 @@ export function filterProviders(
 const HEALTH_ORDER: Record<ProviderHealthStatus, number> = {
   down: 0,
   degraded: 1,
-  up: 2,
+  unknown: 2,
+  up: 3,
 }
 
 /** Client-side sort providers. */
@@ -104,16 +106,17 @@ export function sortProviders(
 
 // ── Health colors ─────────────────────────────────────────────
 
-const HEALTH_COLOR_MAP: Record<ProviderHealthStatus, SemanticColor> = {
+const HEALTH_COLOR_MAP: Record<ProviderHealthStatus, SemanticColor | 'muted'> = {
   up: 'success',
   degraded: 'warning',
   down: 'danger',
+  unknown: 'muted',
 }
 
 /** Map provider health status to semantic color. */
 export function getProviderHealthColor(
   status: ProviderHealthStatus,
-): SemanticColor {
+): SemanticColor | 'muted' {
   return HEALTH_COLOR_MAP[status]
 }
 
@@ -131,4 +134,25 @@ export function formatErrorRate(rate: number): string {
   if (rate === 0) return '0%'
   if (rate < 0.1) return '<0.1%'
   return `${rate.toFixed(1)}%`
+}
+
+/** Format a token count with K/M suffixes. */
+export function formatTokenCount(n: number): string {
+  if (n === 0) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
+  return n.toLocaleString()
+}
+
+/** Format a cost value using the project currency (defaults to EUR). */
+export function formatCost(
+  cost: number,
+  currencyCode: string = 'EUR',
+): string {
+  if (cost === 0) return formatCurrency(0, currencyCode)
+  if (cost > 0 && cost < 0.01) {
+    const symbol = formatCurrency(0.01, currencyCode).replace(/[\d.,\s]+/, '').trim()
+    return `<${symbol}0.01`
+  }
+  return formatCurrency(cost, currencyCode)
 }

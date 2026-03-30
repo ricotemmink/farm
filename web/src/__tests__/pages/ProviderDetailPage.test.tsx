@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { UseProviderDetailDataReturn } from '@/hooks/useProviderDetailData'
+import type { ProviderModelResponse } from '@/api/types'
 import type { ProviderWithName } from '@/utils/providers'
 
 let hookReturn: UseProviderDetailDataReturn
@@ -18,7 +19,7 @@ function makeProvider(name: string): ProviderWithName {
   return {
     name,
     driver: 'litellm',
-    litellm_provider: 'anthropic',
+    litellm_provider: 'test-provider',
     auth_type: 'api_key',
     base_url: null,
     models: [
@@ -36,6 +37,10 @@ function makeProvider(name: string): ProviderWithName {
   }
 }
 
+const testModels: ProviderModelResponse[] = [
+  { id: 'test-model', alias: 'test', cost_per_1k_input: 0.003, cost_per_1k_output: 0.015, max_context: 200000, estimated_latency_ms: null, supports_tools: true, supports_vision: false, supports_streaming: true },
+]
+
 const defaultReturn: UseProviderDetailDataReturn = {
   provider: null,
   models: [],
@@ -46,7 +51,7 @@ const defaultReturn: UseProviderDetailDataReturn = {
   testingConnection: false,
 }
 
-function renderDetail(name = 'anthropic') {
+function renderDetail(name = 'test-provider') {
   return render(
     <MemoryRouter initialEntries={[`/providers/${name}`]}>
       <Routes>
@@ -75,29 +80,31 @@ describe('ProviderDetailPage', () => {
   })
 
   it('renders provider name when data loaded', () => {
-    const provider = makeProvider('anthropic')
+    const provider = makeProvider('test-provider')
     hookReturn = {
       ...defaultReturn,
       provider,
-      models: [...provider.models],
+      models: testModels,
     }
     renderDetail()
-    expect(screen.getByRole('heading', { name: 'anthropic' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'test-provider' })).toBeInTheDocument()
   })
 
   it('renders model list when models present', () => {
-    const provider = makeProvider('anthropic')
+    const provider = makeProvider('test-provider')
     hookReturn = {
       ...defaultReturn,
       provider,
-      models: [...provider.models],
+      models: testModels,
     }
     renderDetail()
     expect(screen.getByText('test-model')).toBeInTheDocument()
+    expect(screen.getByText('tools')).toBeInTheDocument()
+    expect(screen.getByText('stream')).toBeInTheDocument()
   })
 
   it('renders health metrics when health available', () => {
-    const provider = makeProvider('anthropic')
+    const provider = makeProvider('test-provider')
     hookReturn = {
       ...defaultReturn,
       provider,
@@ -108,15 +115,39 @@ describe('ProviderDetailPage', () => {
         error_rate_percent_24h: 1.5,
         calls_last_24h: 500,
         health_status: 'up',
+        total_tokens_24h: 50000,
+        total_cost_24h: 1.25,
       },
     }
     renderDetail()
     expect(screen.getByText('500')).toBeInTheDocument()
     expect(screen.getByText('250ms')).toBeInTheDocument()
+    expect(screen.getByText('50.0K')).toBeInTheDocument()
+    expect(screen.getByText(/1\.25/)).toBeInTheDocument()
+  })
+
+  it('renders unknown health status indicator', () => {
+    const provider = makeProvider('test-provider')
+    hookReturn = {
+      ...defaultReturn,
+      provider,
+      models: [],
+      health: {
+        last_check_timestamp: null,
+        avg_response_time_ms: null,
+        error_rate_percent_24h: 0,
+        calls_last_24h: 0,
+        health_status: 'unknown',
+        total_tokens_24h: 0,
+        total_cost_24h: 0,
+      },
+    }
+    renderDetail()
+    expect(screen.getByText(/unknown/i)).toBeInTheDocument()
   })
 
   it('renders test connection result when present', () => {
-    const provider = makeProvider('anthropic')
+    const provider = makeProvider('test-provider')
     hookReturn = {
       ...defaultReturn,
       provider,

@@ -5,6 +5,8 @@ import {
   getProviderHealthColor,
   formatLatency,
   formatErrorRate,
+  formatTokenCount,
+  formatCost,
 } from '@/utils/providers'
 import type { ProviderConfig, ProviderHealthSummary } from '@/api/types'
 import type { ProviderWithName } from '@/utils/providers'
@@ -42,6 +44,8 @@ function makeHealth(overrides: Partial<ProviderHealthSummary> = {}): ProviderHea
     error_rate_percent_24h: 0,
     calls_last_24h: 100,
     health_status: 'up',
+    total_tokens_24h: 0,
+    total_cost_24h: 0,
     ...overrides,
   }
 }
@@ -168,6 +172,10 @@ describe('getProviderHealthColor', () => {
   it('maps down to danger', () => {
     expect(getProviderHealthColor('down')).toBe('danger')
   })
+
+  it('maps unknown to muted', () => {
+    expect(getProviderHealthColor('unknown')).toBe('muted')
+  })
 })
 
 // ── formatLatency ─────────────────────────────────────────
@@ -203,5 +211,47 @@ describe('formatErrorRate', () => {
 
   it('formats with one decimal', () => {
     expect(formatErrorRate(12.34)).toBe('12.3%')
+  })
+})
+
+// ── formatTokenCount ─────────────────────────────────────
+
+describe('formatTokenCount', () => {
+  it('returns 0 for zero', () => {
+    expect(formatTokenCount(0)).toBe('0')
+  })
+
+  it('formats thousands with K suffix', () => {
+    expect(formatTokenCount(50_000)).toBe('50.0K')
+  })
+
+  it('formats millions with M suffix', () => {
+    expect(formatTokenCount(1_234_567)).toBe('1.2M')
+  })
+
+  it('formats small numbers with locale string', () => {
+    expect(formatTokenCount(500)).toBe('500')
+  })
+})
+
+// ── formatCost ───────────────────────────────────────────
+
+describe('formatCost', () => {
+  it('returns EUR 0.00 for zero', () => {
+    expect(formatCost(0)).toContain('0.00')
+  })
+
+  it('returns sub-cent indicator for tiny costs', () => {
+    expect(formatCost(0.005)).toMatch(/^<.*0\.01$/)
+  })
+
+  it('formats with currency symbol', () => {
+    const result = formatCost(1.25)
+    expect(result).toContain('1.25')
+  })
+
+  it('formats larger amounts', () => {
+    const result = formatCost(99.99)
+    expect(result).toContain('99.99')
   })
 })

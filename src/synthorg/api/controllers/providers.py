@@ -1,5 +1,6 @@
 """Provider controller -- CRUD, connection testing, and presets."""
 
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from litestar import Controller, delete, get, post, put
@@ -27,14 +28,19 @@ from synthorg.api.dto_discovery import (
     DiscoveryPolicyResponse,
     RemoveAllowlistEntryRequest,
 )
+from synthorg.api.dto_providers import (
+    ProviderModelResponse,
+    to_provider_model_response,
+)
 from synthorg.api.errors import ApiValidationError, ConflictError, NotFoundError
 from synthorg.api.guards import require_ceo_or_manager, require_read_access
 from synthorg.api.path_params import PathName  # noqa: TC001
 from synthorg.api.state import AppState  # noqa: TC001
-from synthorg.config.schema import ProviderModelConfig  # noqa: TC001
 from synthorg.observability import get_logger
 from synthorg.observability.events.api import (
+    API_MODEL_CAPABILITIES_LOOKUP_FAILED,
     API_PROVIDER_HEALTH_QUERIED,
+    API_PROVIDER_USAGE_ENRICHMENT_FAILED,
     API_RESOURCE_CONFLICT,
     API_RESOURCE_NOT_FOUND,
     API_VALIDATION_FAILED,
@@ -49,6 +55,48 @@ from synthorg.providers.presets import ProviderPreset, get_preset, list_presets
 from synthorg.providers.probing import probe_preset_urls
 
 logger = get_logger(__name__)
+
+
+async def _enrich_with_usage(
+    summary: ProviderHealthSummary,
+    app_state: AppState,
+    name: str,
+) -> ProviderHealthSummary:
+    """Enrich a health summary with token/cost data from CostTracker.
+
+    Args:
+        summary: Base health summary from the health tracker.
+        app_state: Application state.
+        name: Provider name.
+
+    Returns:
+        Enriched summary (or unchanged if enrichment is unavailable).
+    """
+    if not app_state.has_cost_tracker:
+        return summary
+    try:
+        now = datetime.now(UTC)
+        usage = await app_state.cost_tracker.get_provider_usage(
+            name,
+            start=now - timedelta(hours=24),
+            end=now,
+        )
+        return summary.model_copy(
+            update={
+                "total_tokens_24h": usage.total_tokens,
+                "total_cost_24h": usage.total_cost,
+            },
+        )
+    except MemoryError, RecursionError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            API_PROVIDER_USAGE_ENRICHMENT_FAILED,
+            provider=name,
+            error=str(exc),
+            error_type=type(exc).__qualname__,
+        )
+        return summary
 
 
 class ProviderController(Controller):
@@ -183,15 +231,15 @@ class ProviderController(Controller):
         self,
         state: State,
         name: PathName,
-    ) -> ApiResponse[tuple[ProviderModelConfig, ...]]:
-        """List models for a provider.
+    ) -> ApiResponse[tuple[ProviderModelResponse, ...]]:
+        """List models for a provider with runtime capabilities.
 
         Args:
             state: Application state.
             name: Provider name.
 
         Returns:
-            Provider models envelope.
+            Provider models enriched with capability flags.
 
         Raises:
             NotFoundError: If the provider is not found.
@@ -203,7 +251,29 @@ class ProviderController(Controller):
             msg = f"Provider {name!r} not found"
             logger.warning(API_RESOURCE_NOT_FOUND, resource="provider", name=name)
             raise NotFoundError(msg)
-        return ApiResponse(data=provider.models)
+
+        driver = None
+        if app_state.has_provider_registry and name in app_state.provider_registry:
+            driver = app_state.provider_registry.get(name)
+
+        results: list[ProviderModelResponse] = []
+        for model_config in provider.models:
+            caps = None
+            if driver is not None:
+                try:
+                    caps = await driver.get_model_capabilities(model_config.id)
+                except MemoryError, RecursionError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        API_MODEL_CAPABILITIES_LOOKUP_FAILED,
+                        provider=name,
+                        model=model_config.id,
+                        error=str(exc),
+                        error_type=type(exc).__qualname__,
+                    )
+            results.append(to_provider_model_response(model_config, caps))
+        return ApiResponse(data=tuple(results))
 
     @get(
         "/{name:str}/health",
@@ -217,7 +287,9 @@ class ProviderController(Controller):
         """Get provider health summary.
 
         Returns health status, error rate, average response time,
-        and call count for the last 24 hours.
+        call count, total tokens, and total cost for the last 24
+        hours.  Token and cost totals are enriched from the cost
+        tracker when available.
 
         Args:
             state: Application state.
@@ -236,6 +308,7 @@ class ProviderController(Controller):
             logger.warning(API_RESOURCE_NOT_FOUND, resource="provider", name=name)
             raise NotFoundError(msg)
         summary = await app_state.provider_health_tracker.get_summary(name)
+        summary = await _enrich_with_usage(summary, app_state, name)
         logger.debug(
             API_PROVIDER_HEALTH_QUERIED,
             provider=name,
