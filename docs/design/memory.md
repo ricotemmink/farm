@@ -322,7 +322,7 @@ models in `memory/consolidation/config.py`:
 | Config | Purpose |
 |--------|---------|
 | `ConsolidationConfig` | Top-level: `max_memories_per_agent` limit, nested `retention` and `archival` sub-configs |
-| `RetentionConfig` | Per-category `RetentionRule` tuples (category + retention_days), optional `default_retention_days` fallback |
+| `RetentionConfig` | Company-level per-category `RetentionRule` tuples (category + retention_days), optional `default_retention_days` fallback; agents can override via `MemoryConfig.retention_overrides` |
 | `ArchivalConfig` | Enables/disables archival of consolidated entries to `ArchivalStore`, nested `DualModeConfig` |
 | `DualModeConfig` | Density-aware dual-mode archival: threshold, summarization model, anchor/fact limits |
 
@@ -354,10 +354,19 @@ call `ArchivalStore.restore(agent_id, entry_id)` directly by ID, bypassing seman
 | `ArchivalModeAssignment` | Maps a removed entry ID to its archival mode (set by strategy) |
 | `ArchivalIndexEntry` | Maps original entry ID to archival store ID (built by service) |
 
-!!! abstract "Scope Note"
+#### Per-Agent Retention Overrides
 
-    Retention is currently per-category, not per-agent. Per-agent retention overrides are a
-    scope gap to be addressed in a future iteration.
+Individual agents can override company-level retention rules via
+`MemoryConfig.retention_overrides` (per-category) and
+`MemoryConfig.retention_days` (agent-level default).
+
+Resolution order per category:
+
+1. Agent per-category rule
+2. Company per-category rule
+3. Agent global default
+4. Company global default
+5. Keep forever (no expiry)
 
 ---
 
