@@ -1,12 +1,13 @@
-"""Project controller -- CRUD endpoints for project management."""
+"""Project controller -- endpoints for project listing and creation."""
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
-from litestar import Controller, Response, get, post
+from litestar import Controller, Request, Response, get, post
 from litestar.datastructures import State  # noqa: TC002
 from litestar.params import Parameter
 
+from synthorg.api.channels import CHANNEL_PROJECTS, publish_ws_event
 from synthorg.api.dto import (
     ApiResponse,
     CreateProjectRequest,
@@ -15,15 +16,18 @@ from synthorg.api.dto import (
 from synthorg.api.guards import require_read_access, require_write_access
 from synthorg.api.pagination import PaginationLimit, PaginationOffset, paginate
 from synthorg.api.path_params import QUERY_MAX_LENGTH, PathId
+from synthorg.api.ws_models import WsEventType
 from synthorg.core.enums import ProjectStatus
 from synthorg.core.project import Project
 from synthorg.core.types import NotBlankStr
 from synthorg.observability import get_logger
+from synthorg.observability.events.persistence import PERSISTENCE_PROJECT_SAVED
 
 logger = get_logger(__name__)
 
+
 ProjectStatusFilter = Annotated[
-    str | None,
+    NotBlankStr | None,
     Parameter(
         required=False,
         max_length=QUERY_MAX_LENGTH,
@@ -42,7 +46,7 @@ LeadFilter = Annotated[
 
 
 class ProjectController(Controller):
-    """CRUD controller for project management."""
+    """Controller for project listing and creation."""
 
     path = "/projects"
     tags = ("projects",)
@@ -123,12 +127,14 @@ class ProjectController(Controller):
     @post(guards=[require_write_access])
     async def create_project(
         self,
+        request: Request[Any, Any, Any],
         state: State,
         data: CreateProjectRequest,
     ) -> Response[ApiResponse[Project]]:
         """Create a new project.
 
         Args:
+            request: The incoming request.
             state: Application state.
             data: Project creation payload.
 
@@ -146,6 +152,18 @@ class ProjectController(Controller):
         )
         repo = state.app_state.persistence.projects
         await repo.save(project)
+        logger.info(PERSISTENCE_PROJECT_SAVED, project_id=project.id)
+        publish_ws_event(
+            request,
+            WsEventType.PROJECT_CREATED,
+            CHANNEL_PROJECTS,
+            {
+                "project_id": project.id,
+                "name": project.name,
+                "status": project.status.value,
+                "lead": project.lead,
+            },
+        )
         return Response(
             content=ApiResponse[Project](data=project),
             status_code=201,

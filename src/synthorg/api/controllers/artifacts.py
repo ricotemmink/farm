@@ -1,18 +1,20 @@
-"""Artifact controller -- CRUD endpoints for artifact management."""
+"""Artifact controller -- endpoints for artifact management, storage, and retrieval."""
 
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
-from litestar import Controller, Response, delete, get, post, put
+from litestar import Controller, Request, Response, delete, get, post, put
 from litestar.datastructures import State  # noqa: TC002
 from litestar.enums import RequestEncodingType
 from litestar.params import Body, Parameter
 
+from synthorg.api.channels import CHANNEL_ARTIFACTS, publish_ws_event
 from synthorg.api.dto import ApiResponse, CreateArtifactRequest, PaginatedResponse
 from synthorg.api.guards import require_read_access, require_write_access
 from synthorg.api.pagination import PaginationLimit, PaginationOffset, paginate
 from synthorg.api.path_params import QUERY_MAX_LENGTH, PathId
+from synthorg.api.ws_models import WsEventType
 from synthorg.core.artifact import Artifact
 from synthorg.core.enums import ArtifactType
 from synthorg.core.types import NotBlankStr
@@ -35,6 +37,7 @@ from synthorg.persistence.errors import (
 
 logger = get_logger(__name__)
 
+
 _SAFE_CONTENT_TYPES = frozenset(
     {
         "application/octet-stream",
@@ -47,7 +50,8 @@ _SAFE_CONTENT_TYPES = frozenset(
         "image/png",
         "image/jpeg",
         "image/gif",
-        "image/svg+xml",
+        # image/svg+xml intentionally excluded -- SVG is an XML document
+        # with full JavaScript execution capability (XSS risk).
         "image/webp",
         "text/plain",
         "text/csv",
@@ -85,8 +89,45 @@ TypeFilter = Annotated[
 ]
 
 
+async def _save_metadata_with_rollback(
+    repo: Any,
+    storage: Any,
+    artifact_id: str,
+    updated: Artifact,
+) -> None:
+    """Save updated artifact metadata, rolling back storage on failure.
+
+    Args:
+        repo: Artifact persistence repository.
+        storage: Artifact content storage backend.
+        artifact_id: Artifact identifier.
+        updated: Updated artifact model.
+
+    Raises:
+        PersistenceError: If the metadata save fails (after rollback attempt).
+    """
+    try:
+        await repo.save(updated)
+    except PersistenceError as exc:
+        logger.warning(
+            PERSISTENCE_ARTIFACT_SAVE_FAILED,
+            artifact_id=artifact_id,
+            error=str(exc),
+            note="metadata save failed, rolling back content",
+        )
+        try:
+            await storage.delete(artifact_id)
+        except Exception as cleanup_exc:
+            logger.warning(
+                PERSISTENCE_ARTIFACT_STORAGE_ROLLBACK_FAILED,
+                artifact_id=artifact_id,
+                error=str(cleanup_exc),
+            )
+        raise
+
+
 class ArtifactController(Controller):
-    """CRUD controller for artifact management."""
+    """Controller for artifact listing, creation, deletion, and content storage."""
 
     path = "/artifacts"
     tags = ("artifacts",)
@@ -170,12 +211,14 @@ class ArtifactController(Controller):
     @post(guards=[require_write_access])
     async def create_artifact(
         self,
+        request: Request[Any, Any, Any],
         state: State,
         data: CreateArtifactRequest,
     ) -> Response[ApiResponse[Artifact]]:
         """Create a new artifact.
 
         Args:
+            request: The incoming request.
             state: Application state.
             data: Artifact creation payload.
 
@@ -190,11 +233,23 @@ class ArtifactController(Controller):
             created_by=data.created_by,
             description=data.description,
             content_type=data.content_type,
+            project_id=data.project_id,
             created_at=datetime.now(UTC),
         )
         repo = state.app_state.persistence.artifacts
         await repo.save(artifact)
         logger.info(PERSISTENCE_ARTIFACT_SAVED, artifact_id=artifact.id)
+        publish_ws_event(
+            request,
+            WsEventType.ARTIFACT_CREATED,
+            CHANNEL_ARTIFACTS,
+            {
+                "artifact_id": artifact.id,
+                "task_id": artifact.task_id,
+                "created_by": artifact.created_by,
+                "type": artifact.type.value,
+            },
+        )
         return Response(
             content=ApiResponse[Artifact](data=artifact),
             status_code=201,
@@ -207,12 +262,14 @@ class ArtifactController(Controller):
     )
     async def delete_artifact(
         self,
+        request: Request[Any, Any, Any],
         state: State,
         artifact_id: PathId,
     ) -> Response[ApiResponse[None]]:
         """Delete an artifact and its stored content.
 
         Args:
+            request: The incoming request.
             state: Application state.
             artifact_id: Artifact identifier.
 
@@ -242,6 +299,12 @@ class ArtifactController(Controller):
             )
         await repo.delete(artifact_id)
         logger.info(PERSISTENCE_ARTIFACT_DELETED, artifact_id=artifact_id)
+        publish_ws_event(
+            request,
+            WsEventType.ARTIFACT_DELETED,
+            CHANNEL_ARTIFACTS,
+            {"artifact_id": artifact_id, "task_id": artifact.task_id},
+        )
         return Response(
             content=ApiResponse[None](data=None),
             status_code=200,
@@ -254,6 +317,7 @@ class ArtifactController(Controller):
     )
     async def upload_content(
         self,
+        request: Request[Any, Any, Any],
         state: State,
         artifact_id: PathId,
         data: Annotated[
@@ -266,6 +330,7 @@ class ArtifactController(Controller):
         Validates size limits before storing.
 
         Args:
+            request: The incoming request.
             state: Application state.
             artifact_id: Artifact identifier.
             data: Binary content.
@@ -307,28 +372,21 @@ class ArtifactController(Controller):
                 "content_type": (artifact.content_type or "application/octet-stream"),
             },
         )
-        try:
-            await repo.save(updated)
-        except PersistenceError as exc:
-            logger.warning(
-                PERSISTENCE_ARTIFACT_SAVE_FAILED,
-                artifact_id=artifact_id,
-                error=str(exc),
-                note="metadata save failed, rolling back content",
-            )
-            try:
-                await storage.delete(artifact_id)
-            except Exception as cleanup_exc:
-                logger.warning(
-                    PERSISTENCE_ARTIFACT_STORAGE_ROLLBACK_FAILED,
-                    artifact_id=artifact_id,
-                    error=str(cleanup_exc),
-                )
-            raise
+        await _save_metadata_with_rollback(repo, storage, artifact_id, updated)
         logger.info(
             PERSISTENCE_ARTIFACT_STORED,
             artifact_id=artifact_id,
             size_bytes=size,
+        )
+        publish_ws_event(
+            request,
+            WsEventType.ARTIFACT_CONTENT_UPLOADED,
+            CHANNEL_ARTIFACTS,
+            {
+                "artifact_id": artifact_id,
+                "size_bytes": size,
+                "content_type": updated.content_type,
+            },
         )
         return Response(
             content=ApiResponse[Artifact](data=updated),

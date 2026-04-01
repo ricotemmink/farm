@@ -79,6 +79,16 @@ export type ProjectStatus =
   | 'completed'
   | 'cancelled'
 
+export const PROJECT_STATUS_VALUES = [
+  'planning', 'active', 'on_hold', 'completed', 'cancelled',
+] as const satisfies readonly ProjectStatus[]
+
+export type ArtifactType = 'code' | 'tests' | 'documentation'
+
+export const ARTIFACT_TYPE_VALUES = [
+  'code', 'tests', 'documentation',
+] as const satisfies readonly ArtifactType[]
+
 export type RiskTolerance = 'low' | 'medium' | 'high'
 
 export type CreativityLevel = 'low' | 'medium' | 'high'
@@ -994,10 +1004,74 @@ export interface TriggerMeetingRequest {
   context?: Record<string, string | string[]>
 }
 
+// ── Artifacts ───────────────────────────────────────────────
+
+export interface Artifact {
+  id: string
+  type: ArtifactType
+  path: string
+  task_id: string
+  created_by: string
+  description: string
+  project_id: string | null
+  content_type: string
+  size_bytes: number
+  created_at: string | null
+}
+
+export interface CreateArtifactRequest {
+  type: ArtifactType
+  path: string
+  task_id: string
+  created_by: string
+  description?: string
+  content_type?: string
+  project_id?: string | null
+}
+
+export interface ArtifactFilters {
+  task_id?: string
+  created_by?: string
+  type?: ArtifactType
+  project_id?: string
+  offset?: number
+  limit?: number
+}
+
+// ── Projects ────────────────────────────────────────────────
+
+export interface Project {
+  id: string
+  name: string
+  description: string
+  team: readonly string[]
+  lead: string | null
+  task_ids: readonly string[]
+  deadline: string | null
+  budget: number
+  status: ProjectStatus
+}
+
+export interface CreateProjectRequest {
+  name: string
+  description?: string
+  team?: string[]
+  lead?: string | null
+  deadline?: string
+  budget?: number
+}
+
+export interface ProjectFilters {
+  status?: ProjectStatus
+  lead?: string
+  offset?: number
+  limit?: number
+}
+
 // ── WebSocket ────────────────────────────────────────────────
 
 /** All valid WebSocket channel names. Runtime set derived from this in websocket store. */
-export const WS_CHANNELS = ['tasks', 'agents', 'budget', 'messages', 'system', 'approvals', 'meetings'] as const
+export const WS_CHANNELS = ['tasks', 'agents', 'budget', 'messages', 'system', 'approvals', 'meetings', 'artifacts', 'projects'] as const
 
 export type WsChannel = typeof WS_CHANNELS[number]
 
@@ -1026,6 +1100,11 @@ export type WsEventType =
   | 'coordination.phase_completed'
   | 'coordination.completed'
   | 'coordination.failed'
+  | 'artifact.created'
+  | 'artifact.deleted'
+  | 'artifact.content_uploaded'
+  | 'project.created'
+  | 'project.status_changed'
 
 export const WS_EVENT_TYPE_VALUES = [
   'task.created', 'task.updated', 'task.status_changed', 'task.assigned',
@@ -1036,6 +1115,8 @@ export const WS_EVENT_TYPE_VALUES = [
   'approval.submitted', 'approval.approved', 'approval.rejected', 'approval.expired',
   'meeting.started', 'meeting.completed', 'meeting.failed',
   'coordination.started', 'coordination.phase_completed', 'coordination.completed', 'coordination.failed',
+  'artifact.created', 'artifact.deleted', 'artifact.content_uploaded',
+  'project.created', 'project.status_changed',
 ] as const satisfies readonly WsEventType[]
 
 export const DEPARTMENT_NAME_VALUES = [

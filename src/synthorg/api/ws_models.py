@@ -5,7 +5,6 @@ serialised to JSON and pushed to WebSocket subscribers.
 """
 
 from enum import StrEnum
-from typing import Any
 
 from pydantic import (
     AwareDatetime,
@@ -53,6 +52,14 @@ class WsEventType(StrEnum):
     MEETING_COMPLETED = "meeting.completed"
     MEETING_FAILED = "meeting.failed"
 
+    ARTIFACT_CREATED = "artifact.created"
+    ARTIFACT_DELETED = "artifact.deleted"
+    ARTIFACT_CONTENT_UPLOADED = "artifact.content_uploaded"
+
+    PROJECT_CREATED = "project.created"
+    # Reserved for future status-update endpoint (not yet published).
+    PROJECT_STATUS_CHANGED = "project.status_changed"
+
 
 class WsEvent(BaseModel):
     """A real-time event pushed over WebSocket.
@@ -76,7 +83,7 @@ class WsEvent(BaseModel):
     timestamp: AwareDatetime = Field(
         description="When the event occurred",
     )
-    payload: dict[str, Any] = Field(
+    payload: dict[str, object] = Field(
         default_factory=dict,
         description="Event-specific data",
     )
