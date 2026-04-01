@@ -312,6 +312,8 @@ class CompanyTemplate(BaseModel):
         agents: Template agent definitions.
         departments: Template department definitions.
         workflow: Workflow name.
+        workflow_config: Optional Kanban/Sprint sub-configurations,
+            validated as ``WorkflowConfig`` on the rendered ``RootConfig``.
         communication: Communication pattern name.
         budget_monthly: Default monthly budget in USD (base currency).
         autonomy: Autonomy configuration dict (e.g. ``{"level": "semi"}``).
@@ -338,6 +340,13 @@ class CompanyTemplate(BaseModel):
     workflow: WorkflowType = Field(
         default=WorkflowType.AGILE_KANBAN,
         description="Workflow type",
+    )
+    workflow_config: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Optional Kanban/Sprint sub-configurations. "
+            "Validated as WorkflowConfig on the rendered RootConfig."
+        ),
     )
     communication: NotBlankStr = Field(
         default="hybrid",
