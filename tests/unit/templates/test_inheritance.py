@@ -10,14 +10,18 @@ import pytest
 
 from synthorg.config.schema import RootConfig
 from synthorg.core.enums import CompanyType
-from synthorg.templates.errors import TemplateInheritanceError
+from synthorg.templates._inheritance import (
+    _deduplicate_merged_agent_names,
+    collect_parent_variables,
+)
+from synthorg.templates.errors import TemplateInheritanceError, TemplateRenderError
 from synthorg.templates.loader import load_template, load_template_file
 from synthorg.templates.merge import (
     _merge_agents,
     _merge_departments,
     merge_template_configs,
 )
-from synthorg.templates.renderer import _collect_parent_variables, render_template
+from synthorg.templates.renderer import render_template
 from synthorg.templates.schema import (
     CompanyTemplate,
     TemplateAgentConfig,
@@ -29,7 +33,10 @@ from .conftest import (
     CHILD_EXTENDS_STARTUP_YAML,
     CHILD_OVERRIDE_AGENT_YAML,
     CHILD_REMOVE_AGENT_YAML,
+    CHILD_REMOVE_DEPARTMENT_YAML,
+    CHILD_REMOVE_NONEXISTENT_DEPT_YAML,
     CIRCULAR_SELF_YAML,
+    DEPT_REMOVE_WITHOUT_EXTENDS_YAML,
 )
 
 # ── TestMergeAgents ──────────────────────────────────────────────
@@ -131,6 +138,96 @@ class TestMergeDepartments:
         assert len(result) == 2
         assert result[1]["name"] == "marketing"
 
+    def test_remove_matching_parent_department(self) -> None:
+        """Child _remove: true removes matching parent department."""
+        parent = [
+            {"name": "executive", "budget_percent": 40},
+            {"name": "engineering", "budget_percent": 60},
+        ]
+        child = [{"name": "executive", "_remove": True}]
+        result = _merge_departments(parent, child)
+        assert len(result) == 1
+        assert result[0]["name"] == "engineering"
+
+    def test_remove_nonexistent_department_raises(self) -> None:
+        """_remove for dept not in parent raises TemplateInheritanceError."""
+        parent = [{"name": "engineering"}]
+        child = [{"name": "marketing", "_remove": True}]
+        with pytest.raises(
+            TemplateInheritanceError,
+            match="no matching parent",
+        ):
+            _merge_departments(parent, child)
+
+    def test_remove_stripped_from_output(self) -> None:
+        """_remove key is not in output for non-remove departments."""
+        parent = [{"name": "engineering", "budget_percent": 60}]
+        child = [
+            {"name": "engineering", "budget_percent": 80, "_remove": False},
+        ]
+        result = _merge_departments(parent, child)
+        assert "_remove" not in result[0]
+        assert result[0]["budget_percent"] == 80
+
+    def test_remove_case_insensitive(self) -> None:
+        """Department _remove matches case-insensitively."""
+        parent = [{"name": "Executive"}, {"name": "engineering"}]
+        child = [{"name": "executive", "_remove": True}]
+        result = _merge_departments(parent, child)
+        assert len(result) == 1
+        assert result[0]["name"] == "engineering"
+
+
+# ── TestDepartmentRemoveIntegration ─────────────────────────────
+
+
+@pytest.mark.unit
+class TestDepartmentRemoveIntegration:
+    def test_department_remove_via_extends(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Child removes parent department through full render pipeline."""
+        child_path = tmp_path / "remove_dept.yaml"
+        child_path.write_text(
+            CHILD_REMOVE_DEPARTMENT_YAML,
+            encoding="utf-8",
+        )
+        loaded = load_template_file(child_path)
+        config = render_template(loaded)
+        assert isinstance(config, RootConfig)
+        dept_names = [d.name for d in config.departments]
+        assert "executive" not in dept_names
+        assert "engineering" in dept_names
+
+    def test_department_remove_nonexistent_raises(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Removing a dept not in parent raises through full pipeline."""
+        child_path = tmp_path / "remove_missing.yaml"
+        child_path.write_text(
+            CHILD_REMOVE_NONEXISTENT_DEPT_YAML,
+            encoding="utf-8",
+        )
+        loaded = load_template_file(child_path)
+        with pytest.raises(TemplateInheritanceError, match="no matching parent"):
+            render_template(loaded)
+
+    def test_department_remove_without_extends_raises(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Department _remove without extends raises TemplateRenderError."""
+        child_path = tmp_path / "no_extends_remove.yaml"
+        child_path.write_text(
+            DEPT_REMOVE_WITHOUT_EXTENDS_YAML,
+            encoding="utf-8",
+        )
+        loaded = load_template_file(child_path)
+        with pytest.raises(TemplateRenderError, match="_remove"):
+            render_template(loaded)
+
 
 # ── TestMergeTemplateConfigs ─────────────────────────────────────
 
@@ -219,6 +316,127 @@ class TestMergeTemplateConfigs:
         result = merge_template_configs(parent, child)
         assert result["company_name"] == "Parent Co"
 
+    def test_workflow_child_replaces_parent(self) -> None:
+        """Child workflow replaces parent workflow entirely."""
+        parent: dict[str, Any] = {
+            "workflow": {"type": "kanban", "wip": 3},
+        }
+        child: dict[str, Any] = {
+            "workflow": {"type": "agile_kanban"},
+        }
+        result = merge_template_configs(parent, child)
+        assert result["workflow"] == {"type": "agile_kanban"}
+
+    def test_workflow_inherited_from_parent(self) -> None:
+        """Parent workflow inherited when child has no workflow."""
+        parent: dict[str, Any] = {
+            "workflow": {"type": "kanban", "wip": 3},
+        }
+        child: dict[str, Any] = {}
+        result = merge_template_configs(parent, child)
+        assert result["workflow"] == {"type": "kanban", "wip": 3}
+
+    def test_workflow_deep_copy_isolation(self) -> None:
+        """Inherited workflow is deep-copied from parent."""
+        parent: dict[str, Any] = {
+            "workflow": {"type": "kanban", "config": {"wip": 3}},
+        }
+        child: dict[str, Any] = {}
+        result = merge_template_configs(parent, child)
+        result["workflow"]["config"]["wip"] = 99
+        assert parent["workflow"]["config"]["wip"] == 3
+
+
+# ── TestDeduplicateMergedAgentNames ────────────────────────────
+
+
+@pytest.mark.unit
+class TestDeduplicateMergedAgentNames:
+    def test_empty_agents(self) -> None:
+        """No agents key is a no-op."""
+        merged: dict[str, Any] = {}
+        _deduplicate_merged_agent_names(merged)
+        assert "agents" not in merged
+
+    def test_empty_list(self) -> None:
+        """Empty agents list is a no-op."""
+        merged: dict[str, Any] = {"agents": []}
+        _deduplicate_merged_agent_names(merged)
+        assert merged["agents"] == []
+
+    def test_no_duplicates(self) -> None:
+        """Unique names are unchanged."""
+        merged: dict[str, Any] = {
+            "agents": [{"name": "Alice"}, {"name": "Bob"}],
+        }
+        _deduplicate_merged_agent_names(merged)
+        names = [a["name"] for a in merged["agents"]]
+        assert names == ["Alice", "Bob"]
+
+    def test_single_duplicate(self) -> None:
+        """Second occurrence gets ' 2' suffix."""
+        merged: dict[str, Any] = {
+            "agents": [{"name": "Alice"}, {"name": "Alice"}],
+        }
+        _deduplicate_merged_agent_names(merged)
+        names = [a["name"] for a in merged["agents"]]
+        assert names == ["Alice", "Alice 2"]
+
+    def test_triple_duplicate(self) -> None:
+        """Third occurrence gets ' 3' suffix."""
+        merged: dict[str, Any] = {
+            "agents": [{"name": "A"}, {"name": "A"}, {"name": "A"}],
+        }
+        _deduplicate_merged_agent_names(merged)
+        names = [a["name"] for a in merged["agents"]]
+        assert names == ["A", "A 2", "A 3"]
+
+    def test_empty_names_skipped(self) -> None:
+        """Empty-string names are not deduplicated."""
+        merged: dict[str, Any] = {
+            "agents": [{"name": ""}, {"name": ""}, {"name": "Alice"}],
+        }
+        _deduplicate_merged_agent_names(merged)
+        names = [a["name"] for a in merged["agents"]]
+        assert names == ["", "", "Alice"]
+
+    def test_missing_name_key_skipped(self) -> None:
+        """Agents without a name key are skipped."""
+        merged: dict[str, Any] = {
+            "agents": [{"role": "Dev"}, {"name": "Alice"}],
+        }
+        _deduplicate_merged_agent_names(merged)
+        assert "name" not in merged["agents"][0]
+        assert merged["agents"][1]["name"] == "Alice"
+
+
+# ── TestNamelessDepartmentMerge ─────────────────────────────────
+
+
+@pytest.mark.unit
+class TestNamelessDepartmentMerge:
+    def test_parent_nameless_dept_passes_through(self) -> None:
+        """Parent department with empty name passes through."""
+        parent = [{"name": ""}, {"name": "engineering"}]
+        child: list[dict[str, Any]] = []
+        result = _merge_departments(parent, child)
+        assert len(result) == 2
+        assert result[0]["name"] == ""
+
+    def test_child_nameless_dept_appended(self) -> None:
+        """Child department with empty name is appended."""
+        parent = [{"name": "engineering"}]
+        child = [{"name": ""}]
+        result = _merge_departments(parent, child)
+        assert len(result) == 2
+
+    def test_both_nameless_depts_preserved(self) -> None:
+        """Both parent and child nameless departments are preserved."""
+        parent = [{"name": ""}]
+        child = [{"name": ""}]
+        result = _merge_departments(parent, child)
+        assert len(result) == 2
+
 
 # ── TestCollectParentVariables ────────────────────────────────────
 
@@ -236,7 +454,7 @@ class TestCollectParentVariables:
             agents=(TemplateAgentConfig(role="Backend Developer"),),
         )
         child_vars = {"x": "child_x", "z": "child_z"}
-        result = _collect_parent_variables(parent, child_vars)
+        result = collect_parent_variables(parent, child_vars)
         assert result["x"] == "child_x"
         assert result["y"] == "parent_y"
         assert result["z"] == "child_z"
@@ -248,7 +466,7 @@ class TestCollectParentVariables:
             variables=(TemplateVariable(name="a", default="default_a"),),
             agents=(TemplateAgentConfig(role="Backend Developer"),),
         )
-        result = _collect_parent_variables(parent, {})
+        result = collect_parent_variables(parent, {})
         assert result["a"] == "default_a"
 
     def test_required_parent_var_without_child_value(self) -> None:
@@ -258,7 +476,7 @@ class TestCollectParentVariables:
             variables=(TemplateVariable(name="req", required=True),),
             agents=(TemplateAgentConfig(role="Backend Developer"),),
         )
-        result = _collect_parent_variables(parent, {})
+        result = collect_parent_variables(parent, {})
         assert "req" not in result
 
 
@@ -583,7 +801,7 @@ class TestMergeIdTargeting:
 
 
 @pytest.mark.unit
-class TestInheritanceIntegration:
+class TestInheritanceFullPipeline:
     def test_child_extends_builtin_renders_to_valid_root_config(
         self,
         tmp_path: Path,
@@ -594,5 +812,5 @@ class TestInheritanceIntegration:
         loaded = load_template_file(child_path)
         config = render_template(loaded)
         assert isinstance(config, RootConfig)
-        assert len(config.agents) >= 1
-        assert len(config.departments) >= 1
+        assert len(config.agents) == 6
+        assert len(config.departments) == 3

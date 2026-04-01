@@ -125,19 +125,48 @@ def _validate_optional_fields(
         dept_dict["policies"] = copy.deepcopy(policies)
 
 
+def _handle_dept_remove(
+    dept: dict[str, Any],
+    *,
+    has_extends: bool,
+) -> dict[str, Any]:
+    """Validate and return a ``_remove`` marker for a department.
+
+    Raises:
+        TemplateRenderError: If ``_remove`` is used without ``extends``.
+    """
+    dept_name = dept.get("name", "")
+    if not has_extends:
+        msg = (
+            f"Department {dept_name!r} uses '_remove' but the "
+            "template has no 'extends' -- directive has no effect"
+        )
+        logger.error(
+            TEMPLATE_RENDER_VARIABLE_ERROR,
+            department=dept_name,
+            field="_remove",
+        )
+        raise TemplateRenderError(msg)
+    return {"name": dept_name, "_remove": True}
+
+
 def build_departments(
     raw_depts: list[Any],
+    *,
+    has_extends: bool = False,
 ) -> list[dict[str, Any]]:
     """Build RootConfig-compatible department dicts.
 
     Args:
         raw_depts: List of department dicts from rendered YAML.
+        has_extends: Whether the template uses inheritance.
 
     Returns:
         List of dicts suitable for ``Department`` construction.
 
     Raises:
-        TemplateRenderError: If a department entry is invalid.
+        TemplateRenderError: If a department entry is invalid or
+            ``_remove`` is used without ``extends``.
     """
     departments: list[dict[str, Any]] = []
     for idx, dept in enumerate(raw_depts):
@@ -150,6 +179,12 @@ def build_departments(
                 got=type(dept).__name__,
             )
             raise TemplateRenderError(msg)
+
+        if dept.get("_remove"):
+            departments.append(
+                _handle_dept_remove(dept, has_extends=has_extends),
+            )
+            continue
 
         budget_pct = _parse_budget(dept)
         head_role, head_id = _resolve_head(dept)
