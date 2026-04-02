@@ -1,0 +1,457 @@
+---
+// Scroll-Synced Split Panel -- 4-step "How It Works" with sticky visualization
+---
+
+<section id="how-it-works" class="py-16 px-6">
+  <div class="max-w-6xl mx-auto">
+    <h2 class="text-3xl md:text-4xl font-bold text-center mb-4">See How It Works</h2>
+    <p class="text-gray-400 text-center max-w-2xl mx-auto mb-16">
+      Set up a full AI organization in minutes -- from a solo builder to a 30+ agent enterprise.
+    </p>
+
+    <div class="md:grid md:grid-cols-[1fr_auto_1fr] md:gap-8">
+      <!-- Left: scrollable code steps -->
+      <div class="space-y-0">
+        <!-- Step 1: Pick a Template -->
+        <div class="scroll-step min-h-[60vh] flex items-center" data-step="0">
+          <div class="w-full transition-all duration-500 opacity-40 scale-[0.98]">
+            <div data-code-box class="bg-[#1a1f2e] rounded-xl p-6 border border-white/10 border-l-2 border-l-transparent transition-colors">
+              <div class="flex items-center gap-2 mb-4">
+                <span class="w-3 h-3 rounded-full bg-red-500/80"></span>
+                <span class="w-3 h-3 rounded-full bg-yellow-500/80"></span>
+                <span class="w-3 h-3 rounded-full bg-green-500/80"></span>
+                <span class="ml-3 text-sm text-gray-400 font-mono">setup wizard</span>
+              </div>
+              <pre class="text-sm font-['JetBrains_Mono',monospace] text-gray-300 overflow-x-auto"><code><span class="text-violet-400">Choose a template</span>
+
+<span class="text-gray-500">  Solo Builder</span>       <span class="text-teal-400">2 agents</span>   2 depts
+<span class="text-gray-500">  Tech Startup</span>       <span class="text-teal-400">5 agents</span>   3 depts
+<span class="text-gray-500">  Engineering Squad</span>  <span class="text-teal-400">8 agents</span>   3 depts
+<span class="text-gray-500">  Product Studio</span>     <span class="text-teal-400">10 agents</span>  5 depts
+<span class="text-white bg-violet-600/30 px-1 rounded">&#9654; Agency</span>             <span class="text-teal-400">12 agents</span>  5 depts
+<span class="text-gray-500">  Research Lab</span>       <span class="text-teal-400">7 agents</span>   3 depts
+<span class="text-gray-500">  Enterprise Org</span>     <span class="text-teal-400">30+ agents</span> 9 depts
+
+<span class="text-gray-500 text-xs">Or define your own with YAML config.</span></code></pre>
+            </div>
+            <p class="mt-4 text-sm text-gray-500 italic">9 built-in templates from 2 to 30+ agents. Fully customizable roles, personalities, budgets, and tools.</p>
+          </div>
+        </div>
+
+        <!-- Step 2: Configure -->
+        <div class="scroll-step min-h-[60vh] flex items-center" data-step="1">
+          <div class="w-full transition-all duration-500 opacity-40 scale-[0.98]">
+            <div data-code-box class="bg-[#1a1f2e] rounded-xl p-6 border border-white/10 border-l-2 border-l-transparent transition-colors">
+              <div class="flex items-center gap-2 mb-4">
+                <span class="w-3 h-3 rounded-full bg-red-500/80"></span>
+                <span class="w-3 h-3 rounded-full bg-yellow-500/80"></span>
+                <span class="w-3 h-3 rounded-full bg-green-500/80"></span>
+                <span class="ml-3 text-sm text-gray-400 font-mono">REST API</span>
+              </div>
+              <pre class="text-sm font-['JetBrains_Mono',monospace] text-gray-300 overflow-x-auto"><code><span class="text-violet-400">POST</span> /api/v1/setup/company
+  <span class="text-teal-400">template</span>: "agency"
+  <span class="text-teal-400">company_name</span>: "Acme AI Lab"
+
+<span class="text-green-400">201 Created</span>
+  <span class="text-teal-400">agents_created</span>: 12
+  <span class="text-teal-400">departments</span>:
+    - Operations    <span class="text-gray-500">(PM, Scrum Master)</span>
+    - Engineering   <span class="text-gray-500">(3 developers)</span>
+    - Design        <span class="text-gray-500">(UX, UI)</span>
+    - QA            <span class="text-gray-500">(QA Engineer)</span>
+    - Creative      <span class="text-gray-500">(Writer, Strategist)</span></code></pre>
+            </div>
+            <p class="mt-4 text-sm text-gray-500 italic">Setup wizard or REST API. Auto-assigns LLM models, generates agent names, configures tool access.</p>
+          </div>
+        </div>
+
+        <!-- Step 3: Agents Collaborate -->
+        <div class="scroll-step min-h-[60vh] flex items-center" data-step="2">
+          <div class="w-full transition-all duration-500 opacity-40 scale-[0.98]">
+            <div data-code-box class="bg-[#1a1f2e] rounded-xl p-6 border border-white/10 border-l-2 border-l-transparent transition-colors">
+              <div class="flex items-center gap-2 mb-4">
+                <span class="w-3 h-3 rounded-full bg-red-500/80"></span>
+                <span class="w-3 h-3 rounded-full bg-yellow-500/80"></span>
+                <span class="w-3 h-3 rounded-full bg-green-500/80"></span>
+                <span class="ml-3 text-sm text-gray-400 font-mono">activity log</span>
+              </div>
+              <pre class="text-sm font-['JetBrains_Mono',monospace] text-gray-300 overflow-x-auto"><code><span class="text-violet-400">[TASK]</span>  #12 created: "Redesign checkout flow"
+<span class="text-teal-400">[ENGINE]</span> PM decomposed #12 into 4 subtasks
+<span class="text-teal-400">[ENGINE]</span> #12a -> UX Designer (role-based)
+<span class="text-teal-400">[ENGINE]</span> #12b -> Backend Dev (load-balanced)
+<span class="text-teal-400">[ENGINE]</span> #12c -> Frontend Dev (role-based)
+<span class="text-teal-400">[ENGINE]</span> #12d -> QA Engineer (role-based)
+<span class="text-teal-400">[COMMS]</span>  UX Designer -> PM: "Wireframes ready"
+<span class="text-green-400">[DONE]</span>  #12a approved by PM (quality: 94%)
+<span class="text-teal-400">[COMMS]</span>  Meeting: sprint review (round-robin)</code></pre>
+            </div>
+            <p class="mt-4 text-sm text-gray-500 italic">DAG-based decomposition. 6 routing strategies. Meetings, delegation, and conflict resolution built in.</p>
+          </div>
+        </div>
+
+        <!-- Step 4: Observe Everything -->
+        <div class="scroll-step min-h-[60vh] flex items-center" data-step="3">
+          <div class="w-full transition-all duration-500 opacity-40 scale-[0.98]">
+            <div data-code-box class="bg-[#1a1f2e] rounded-xl p-6 border border-white/10 border-l-2 border-l-transparent transition-colors">
+              <div class="flex items-center gap-2 mb-4">
+                <span class="w-3 h-3 rounded-full bg-red-500/80"></span>
+                <span class="w-3 h-3 rounded-full bg-yellow-500/80"></span>
+                <span class="w-3 h-3 rounded-full bg-green-500/80"></span>
+                <span class="ml-3 text-sm text-gray-400 font-mono">dashboard</span>
+              </div>
+              <pre class="text-sm font-['JetBrains_Mono',monospace] text-gray-300 overflow-x-auto"><code><span class="text-violet-400">Agents active</span>:       12 across 5 departments
+<span class="text-violet-400">Tasks completed</span>:     47
+<span class="text-violet-400">Total cost</span>:          EUR 18.92
+<span class="text-violet-400">Coordination overhead</span>: 14% <span class="text-green-400">(healthy)</span>
+<span class="text-violet-400">Budget remaining</span>:    EUR 81.08 / 100.00
+
+<span class="text-teal-400">Top Performers</span>:
+  Backend Dev    quality: 95%  tasks: 11  cost: EUR 3.20
+  UX Designer    quality: 93%  tasks:  8  cost: EUR 2.15
+  PM             quality: 91%  tasks:  9  cost: EUR 4.80</code></pre>
+            </div>
+            <p class="mt-4 text-sm text-gray-500 italic">Per-token cost tracking. Coordination overhead. Performance scoring. Budget enforcement at every layer.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Center: vertical step indicators -->
+      <div class="hidden md:flex flex-col items-center py-[30vh]">
+        <div class="relative flex flex-col items-center gap-0 h-full">
+          <!-- Vertical track line -->
+          <div class="absolute top-3 bottom-3 w-px bg-white/10"></div>
+
+          <!-- Step dots with labels -->
+          <button class="step-dot relative z-10 w-6 h-6 rounded-full bg-[#1a1f2e] border-2 border-white/20 transition-all duration-300 cursor-pointer hover:border-violet-400/60 flex items-center justify-center text-[9px] text-gray-500 font-mono" data-dot="0" aria-label="Go to step 1: Pick a Template">1</button>
+          <div class="flex-1"></div>
+          <button class="step-dot relative z-10 w-6 h-6 rounded-full bg-[#1a1f2e] border-2 border-white/20 transition-all duration-300 cursor-pointer hover:border-violet-400/60 flex items-center justify-center text-[9px] text-gray-500 font-mono" data-dot="1" aria-label="Go to step 2: Configure">2</button>
+          <div class="flex-1"></div>
+          <button class="step-dot relative z-10 w-6 h-6 rounded-full bg-[#1a1f2e] border-2 border-white/20 transition-all duration-300 cursor-pointer hover:border-violet-400/60 flex items-center justify-center text-[9px] text-gray-500 font-mono" data-dot="2" aria-label="Go to step 3: Collaborate">3</button>
+          <div class="flex-1"></div>
+          <button class="step-dot relative z-10 w-6 h-6 rounded-full bg-[#1a1f2e] border-2 border-white/20 transition-all duration-300 cursor-pointer hover:border-violet-400/60 flex items-center justify-center text-[9px] text-gray-500 font-mono" data-dot="3" aria-label="Go to step 4: Observe">4</button>
+        </div>
+      </div>
+
+      <!-- Right: sticky visualization -->
+      <div class="hidden md:block">
+        <div class="sticky top-[20vh]">
+          <div class="bg-[#0F1219] rounded-xl border border-white/10 p-6 min-h-[420px] flex items-center justify-center">
+            <svg
+              id="sync-viz"
+              viewBox="0 0 420 380"
+              class="w-full max-w-[420px]"
+              aria-hidden="true"
+            >
+              <!-- Step label -->
+              <text id="viz-label" x="210" y="18" text-anchor="middle" fill="#94a3b8" font-size="11" font-family="'JetBrains Mono', monospace" class="transition-all duration-500">
+                Pick a Template
+              </text>
+
+              <!-- Department groups -->
+              <rect id="dept-exec" x="140" y="30" width="140" height="55" rx="6" fill="none" stroke="#a78bfa" stroke-opacity="0.12" stroke-width="1" class="transition-all duration-700" opacity="0" />
+              <text class="dept-label transition-all duration-700" x="148" y="44" fill="#a78bfa" font-size="7" font-family="Inter, sans-serif" opacity="0">Executive</text>
+
+              <rect id="dept-eng" x="10" y="115" width="195" height="120" rx="6" fill="none" stroke="#a78bfa" stroke-opacity="0.12" stroke-width="1" class="transition-all duration-700" opacity="0" />
+              <text class="dept-label transition-all duration-700" x="18" y="129" fill="#a78bfa" font-size="7" font-family="Inter, sans-serif" opacity="0">Engineering</text>
+
+              <rect id="dept-product" x="215" y="115" width="95" height="120" rx="6" fill="none" stroke="#2dd4bf" stroke-opacity="0.12" stroke-width="1" class="transition-all duration-700" opacity="0" />
+              <text class="dept-label transition-all duration-700" x="223" y="129" fill="#2dd4bf" font-size="7" font-family="Inter, sans-serif" opacity="0">Product</text>
+
+              <rect id="dept-design" x="320" y="115" width="90" height="120" rx="6" fill="none" stroke="#2dd4bf" stroke-opacity="0.12" stroke-width="1" class="transition-all duration-700" opacity="0" />
+              <text class="dept-label transition-all duration-700" x="328" y="129" fill="#2dd4bf" font-size="7" font-family="Inter, sans-serif" opacity="0">Design</text>
+
+              <rect id="dept-qa" x="120" y="255" width="180" height="55" rx="6" fill="none" stroke="#f59e0b" stroke-opacity="0.12" stroke-width="1" class="transition-all duration-700" opacity="0" />
+              <text class="dept-label transition-all duration-700" x="128" y="269" fill="#f59e0b" font-size="7" font-family="Inter, sans-serif" opacity="0">QA</text>
+
+              <!-- Agent nodes -->
+              <!-- CEO -->
+              <g id="node-ceo" class="transition-all duration-700" opacity="0">
+                <rect x="165" y="48" width="90" height="30" rx="6" fill="#1a1f2e" stroke="#a78bfa" stroke-width="1.5" />
+                <text x="210" y="67" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600" font-family="Inter, sans-serif">CEO</text>
+                <circle id="status-ceo" cx="247" cy="58" r="3.5" fill="#94a3b8" class="transition-all duration-500" />
+              </g>
+
+              <!-- CTO -->
+              <g id="node-cto" class="transition-all duration-700" opacity="0">
+                <rect x="15" y="137" width="85" height="30" rx="6" fill="#1a1f2e" stroke="#a78bfa" stroke-width="1.2" />
+                <text x="57" y="156" text-anchor="middle" fill="#e2e8f0" font-size="9" font-weight="600" font-family="Inter, sans-serif">CTO</text>
+                <circle id="status-cto" cx="92" cy="147" r="3" fill="#94a3b8" class="transition-all duration-500" />
+              </g>
+
+              <!-- Backend Dev 1 -->
+              <g id="node-be1" class="transition-all duration-700" opacity="0">
+                <rect x="15" y="175" width="85" height="26" rx="5" fill="#1a1f2e" stroke="#a78bfa" stroke-width="0.8" />
+                <text x="57" y="192" text-anchor="middle" fill="#e2e8f0" font-size="8" font-family="Inter, sans-serif">Backend Dev</text>
+                <circle id="status-be1" cx="92" cy="184" r="2.5" fill="#94a3b8" class="transition-all duration-500" />
+              </g>
+
+              <!-- Backend Dev 2 -->
+              <g id="node-be2" class="transition-all duration-700" opacity="0">
+                <rect x="110" y="175" width="85" height="26" rx="5" fill="#1a1f2e" stroke="#a78bfa" stroke-width="0.8" />
+                <text x="152" y="192" text-anchor="middle" fill="#e2e8f0" font-size="8" font-family="Inter, sans-serif">Backend Dev 2</text>
+                <circle id="status-be2" cx="187" cy="184" r="2.5" fill="#94a3b8" class="transition-all duration-500" />
+              </g>
+
+              <!-- Frontend Dev -->
+              <g id="node-fe" class="transition-all duration-700" opacity="0">
+                <rect x="60" y="207" width="95" height="26" rx="5" fill="#1a1f2e" stroke="#a78bfa" stroke-width="0.8" />
+                <text x="107" y="224" text-anchor="middle" fill="#e2e8f0" font-size="8" font-family="Inter, sans-serif">Frontend Dev</text>
+                <circle id="status-fe" cx="147" cy="216" r="2.5" fill="#94a3b8" class="transition-all duration-500" />
+              </g>
+
+              <!-- PM -->
+              <g id="node-pm" class="transition-all duration-700" opacity="0">
+                <rect x="220" y="145" width="85" height="30" rx="6" fill="#1a1f2e" stroke="#2dd4bf" stroke-width="1" />
+                <text x="262" y="164" text-anchor="middle" fill="#e2e8f0" font-size="9" font-weight="600" font-family="Inter, sans-serif">PM</text>
+                <circle id="status-pm" cx="297" cy="155" r="3" fill="#94a3b8" class="transition-all duration-500" />
+              </g>
+
+              <!-- Scrum Master -->
+              <g id="node-sm" class="transition-all duration-700" opacity="0">
+                <rect x="220" y="183" width="85" height="26" rx="5" fill="#1a1f2e" stroke="#2dd4bf" stroke-width="0.8" />
+                <text x="262" y="200" text-anchor="middle" fill="#e2e8f0" font-size="8" font-family="Inter, sans-serif">Scrum Master</text>
+                <circle id="status-sm" cx="297" cy="192" r="2.5" fill="#94a3b8" class="transition-all duration-500" />
+              </g>
+
+              <!-- UX Designer -->
+              <g id="node-ux" class="transition-all duration-700" opacity="0">
+                <rect x="325" y="145" width="80" height="30" rx="6" fill="#1a1f2e" stroke="#2dd4bf" stroke-width="1" />
+                <text x="365" y="164" text-anchor="middle" fill="#e2e8f0" font-size="9" font-weight="600" font-family="Inter, sans-serif">UX Designer</text>
+                <circle id="status-ux" cx="397" cy="155" r="3" fill="#94a3b8" class="transition-all duration-500" />
+              </g>
+
+              <!-- UI Designer -->
+              <g id="node-ui" class="transition-all duration-700" opacity="0">
+                <rect x="325" y="183" width="80" height="26" rx="5" fill="#1a1f2e" stroke="#2dd4bf" stroke-width="0.8" />
+                <text x="365" y="200" text-anchor="middle" fill="#e2e8f0" font-size="8" font-family="Inter, sans-serif">UI Designer</text>
+                <circle id="status-ui" cx="397" cy="192" r="2.5" fill="#94a3b8" class="transition-all duration-500" />
+              </g>
+
+              <!-- QA Engineer -->
+              <g id="node-qa" class="transition-all duration-700" opacity="0">
+                <rect x="155" y="273" width="85" height="30" rx="6" fill="#1a1f2e" stroke="#f59e0b" stroke-width="1" />
+                <text x="197" y="292" text-anchor="middle" fill="#e2e8f0" font-size="9" font-weight="600" font-family="Inter, sans-serif">QA Engineer</text>
+                <circle id="status-qa" cx="232" cy="283" r="3" fill="#94a3b8" class="transition-all duration-500" />
+              </g>
+
+              <!-- Hierarchy edges -->
+              <line id="edge-ceo-cto" x1="210" y1="78" x2="57" y2="137" stroke="#a78bfa" stroke-width="0.8" stroke-opacity="0.25" stroke-dasharray="3 3" class="transition-all duration-700" opacity="0" />
+              <line id="edge-ceo-pm" x1="210" y1="78" x2="262" y2="145" stroke="#a78bfa" stroke-width="0.8" stroke-opacity="0.25" stroke-dasharray="3 3" class="transition-all duration-700" opacity="0" />
+              <line id="edge-ceo-ux" x1="210" y1="78" x2="365" y2="145" stroke="#a78bfa" stroke-width="0.8" stroke-opacity="0.25" stroke-dasharray="3 3" class="transition-all duration-700" opacity="0" />
+              <line id="edge-cto-be1" x1="57" y1="167" x2="57" y2="175" stroke="#a78bfa" stroke-width="0.6" stroke-opacity="0.2" class="transition-all duration-700" opacity="0" />
+              <line id="edge-cto-be2" x1="57" y1="167" x2="152" y2="175" stroke="#a78bfa" stroke-width="0.6" stroke-opacity="0.2" class="transition-all duration-700" opacity="0" />
+              <line id="edge-cto-fe" x1="57" y1="167" x2="107" y2="207" stroke="#a78bfa" stroke-width="0.6" stroke-opacity="0.2" class="transition-all duration-700" opacity="0" />
+
+              <!-- Communication edges (animated) -->
+              <line id="edge-comm1" x1="155" y1="188" x2="220" y2="196" stroke="#2dd4bf" stroke-width="1.2" stroke-opacity="0" stroke-dasharray="5 3" class="transition-all duration-700">
+                <animate attributeName="stroke-dashoffset" from="0" to="-16" dur="1.5s" repeatCount="indefinite" />
+              </line>
+              <line id="edge-comm2" x1="305" y1="160" x2="325" y2="160" stroke="#2dd4bf" stroke-width="1.2" stroke-opacity="0" stroke-dasharray="5 3" class="transition-all duration-700">
+                <animate attributeName="stroke-dashoffset" from="0" to="-16" dur="2s" repeatCount="indefinite" />
+              </line>
+
+              <!-- Task flow (step 2) -->
+              <line id="edge-task" x1="210" y1="78" x2="57" y2="137" stroke="#a78bfa" stroke-width="1.5" stroke-opacity="0" class="transition-all duration-700">
+                <animate attributeName="stroke-dashoffset" from="0" to="-12" dur="1s" repeatCount="indefinite" />
+              </line>
+
+              <!-- Metrics panel (step 4) -->
+              <g id="metrics-group" opacity="0" class="transition-all duration-700">
+                <rect x="40" y="325" width="340" height="45" rx="6" fill="#1a1f2e" stroke="#2dd4bf" stroke-width="0.5" stroke-opacity="0.3" />
+                <text x="60" y="344" fill="#a78bfa" font-size="8" font-family="'JetBrains Mono', monospace">12 agents</text>
+                <text x="140" y="344" fill="#10b981" font-size="8" font-family="'JetBrains Mono', monospace">47 tasks</text>
+                <text x="210" y="344" fill="#2dd4bf" font-size="8" font-family="'JetBrains Mono', monospace">EUR 18.92</text>
+                <text x="300" y="344" fill="#f59e0b" font-size="8" font-family="'JetBrains Mono', monospace">14% coord</text>
+                <rect x="60" y="352" width="70" height="3" rx="1.5" fill="#a78bfa" opacity="0.3" />
+                <rect x="60" y="352" width="50" height="3" rx="1.5" fill="#a78bfa" />
+                <rect x="155" y="352" width="70" height="3" rx="1.5" fill="#10b981" opacity="0.3" />
+                <rect x="155" y="352" width="48" height="3" rx="1.5" fill="#10b981" />
+                <rect x="250" y="352" width="70" height="3" rx="1.5" fill="#2dd4bf" opacity="0.3" />
+                <rect x="250" y="352" width="57" height="3" rx="1.5" fill="#2dd4bf" />
+              </g>
+            </svg>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  const steps = document.querySelectorAll<HTMLDivElement>(".scroll-step");
+  const dots = document.querySelectorAll<HTMLButtonElement>(".step-dot");
+
+  const labels = [
+    "Pick a Template",
+    "Agents Auto-Configured",
+    "Agents Collaborate",
+    "Observe Everything",
+  ];
+
+  // SVG elements
+  const vizLabel = document.getElementById("viz-label");
+  const allNodes = [
+    "node-ceo", "node-cto", "node-be1", "node-be2", "node-fe",
+    "node-pm", "node-sm", "node-ux", "node-ui", "node-qa",
+  ].map((id) => document.getElementById(id));
+  const allDepts = ["dept-exec", "dept-eng", "dept-product", "dept-design", "dept-qa"]
+    .map((id) => document.getElementById(id));
+  const deptLabels = document.querySelectorAll<SVGTextElement>(".dept-label");
+  const allEdges = [
+    "edge-ceo-cto", "edge-ceo-pm", "edge-ceo-ux",
+    "edge-cto-be1", "edge-cto-be2", "edge-cto-fe",
+  ].map((id) => document.getElementById(id));
+  const edgeComm1 = document.getElementById("edge-comm1");
+  const edgeComm2 = document.getElementById("edge-comm2");
+  const edgeTask = document.getElementById("edge-task");
+  const metricsGroup = document.getElementById("metrics-group");
+
+  const statusIds = ["status-ceo", "status-cto", "status-be1", "status-be2", "status-fe",
+    "status-pm", "status-sm", "status-ux", "status-ui", "status-qa"];
+  const statusEls = statusIds.map((id) => document.getElementById(id));
+
+  let currentStep = -1;
+
+  function setStep(step: number): void {
+    if (step === currentStep) return;
+    currentStep = step;
+
+    // Update code step highlighting
+    steps.forEach((s, i) => {
+      const inner = s.firstElementChild as HTMLElement;
+      const codeBox = inner?.querySelector("[data-code-box]") as HTMLElement;
+      if (i === step) {
+        inner.classList.remove("opacity-40", "scale-[0.98]");
+        inner.classList.add("opacity-100", "scale-100");
+        if (codeBox) {
+          codeBox.classList.remove("border-l-transparent");
+          codeBox.classList.add("border-l-violet-500/40");
+        }
+      } else {
+        inner.classList.add("opacity-40", "scale-[0.98]");
+        inner.classList.remove("opacity-100", "scale-100");
+        if (codeBox) {
+          codeBox.classList.add("border-l-transparent");
+          codeBox.classList.remove("border-l-violet-500/40");
+        }
+      }
+    });
+
+    // Update dots
+    dots.forEach((d, i) => {
+      if (i === step) {
+        d.classList.remove("border-white/20", "text-gray-500");
+        d.classList.add("border-violet-400", "text-violet-400", "bg-violet-400/10");
+      } else {
+        d.classList.add("border-white/20", "text-gray-500");
+        d.classList.remove("border-violet-400", "text-violet-400", "bg-violet-400/10");
+      }
+    });
+
+    // Update label
+    if (vizLabel) vizLabel.textContent = labels[step] || "";
+
+    const show = (el: Element | null) => el?.setAttribute("opacity", "1");
+    const hide = (el: Element | null) => el?.setAttribute("opacity", "0");
+    const setFill = (el: Element | null, color: string) => el?.setAttribute("fill", color);
+
+    // Reset all
+    allNodes.forEach(hide);
+    allDepts.forEach(hide);
+    deptLabels.forEach((el) => el.setAttribute("opacity", "0"));
+    allEdges.forEach(hide);
+    edgeComm1?.setAttribute("stroke-opacity", "0");
+    edgeComm2?.setAttribute("stroke-opacity", "0");
+    edgeTask?.setAttribute("stroke-opacity", "0");
+    hide(metricsGroup);
+    statusEls.forEach((el) => setFill(el, "#94a3b8"));
+
+    if (step === 0) {
+      // Step 1: Template selection -- show empty department frames only
+      allDepts.forEach(show);
+      deptLabels.forEach((el) => el.setAttribute("opacity", "0.5"));
+    }
+
+    if (step === 1) {
+      // Step 2: Agents configured -- departments + agents, NO edges yet
+      allDepts.forEach(show);
+      deptLabels.forEach((el) => el.setAttribute("opacity", "0.5"));
+      allNodes.forEach(show);
+    }
+
+    if (step === 2) {
+      // Step 3: Collaboration -- all edges active, communication flowing
+      allDepts.forEach(show);
+      deptLabels.forEach((el) => el.setAttribute("opacity", "0.5"));
+      allNodes.forEach(show);
+      allEdges.forEach(show);
+      edgeTask?.setAttribute("stroke-opacity", "0.6");
+      edgeTask?.setAttribute("stroke-dasharray", "5 3");
+      edgeComm1?.setAttribute("stroke-opacity", "0.6");
+      edgeComm2?.setAttribute("stroke-opacity", "0.6");
+      setFill(statusEls[0], "#a78bfa"); // CEO directing
+      setFill(statusEls[1], "#a78bfa"); // CTO directing
+      setFill(statusEls[2], "#2dd4bf"); // BE1 working
+      setFill(statusEls[3], "#2dd4bf"); // BE2 working
+      setFill(statusEls[4], "#2dd4bf"); // FE working
+      setFill(statusEls[5], "#a78bfa"); // PM directing
+      setFill(statusEls[7], "#10b981"); // UX done
+      setFill(statusEls[9], "#f59e0b"); // QA reviewing
+    }
+
+    if (step === 3) {
+      // Step 4: Observe -- all done, metrics visible
+      allDepts.forEach(show);
+      deptLabels.forEach((el) => el.setAttribute("opacity", "0.5"));
+      allNodes.forEach(show);
+      allEdges.forEach(show);
+      show(metricsGroup);
+      statusEls.forEach((el) => setFill(el, "#10b981"));
+    }
+  }
+
+  // Dot click navigation
+  dots.forEach((dot) => {
+    dot.addEventListener("click", () => {
+      const stepIdx = parseInt(dot.dataset.dot || "0", 10);
+      const target = steps[stepIdx];
+      if (target) {
+        const scrollBehavior = prefersReduced.matches ? "auto" : "smooth";
+        target.scrollIntoView({ behavior: scrollBehavior, block: "center" });
+      }
+    });
+  });
+
+  // Reduced motion: disable SVG SMIL animations
+  const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  function disableSvgAnimations(): void {
+    document.querySelectorAll<SVGElement>("#sync-viz animate").forEach((el) => {
+      el.parentNode?.removeChild(el);
+    });
+  }
+
+  if (prefersReduced.matches) {
+    disableSvgAnimations();
+  }
+
+  // Observer always runs (even with reduced motion -- only animations are disabled)
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          const step = parseInt((entry.target as HTMLElement).dataset.step || "0", 10);
+          setStep(step);
+        }
+      }
+    },
+    {
+      rootMargin: "-35% 0px -35% 0px",
+      threshold: 0,
+    }
+  );
+
+  steps.forEach((step) => observer.observe(step));
+  document.addEventListener("astro:before-swap", () => observer.disconnect(), { once: true });
+  setStep(0);
+</script>
