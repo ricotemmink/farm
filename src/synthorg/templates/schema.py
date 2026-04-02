@@ -380,6 +380,10 @@ class CompanyTemplate(BaseModel):
         default=None,
         description="Parent template name for inheritance",
     )
+    uses_packs: tuple[NotBlankStr, ...] = Field(
+        default=(),
+        description="Pack names to compose into this template",
+    )
 
     @field_validator("extends", mode="before")
     @classmethod
@@ -399,7 +403,7 @@ class CompanyTemplate(BaseModel):
         zero agents (inheriting all from parent).  The final merged
         result is validated separately.
         """
-        if self.extends is not None:
+        if self.extends is not None or self.uses_packs:
             return self
         count = len(self.agents)
         if count < self.metadata.min_agents:
@@ -441,6 +445,20 @@ class CompanyTemplate(BaseModel):
                 if d.name.strip().casefold() in dup_keys
             )
             msg = f"Duplicate department names: {dupes}"
+            logger.warning(TEMPLATE_SCHEMA_VALIDATION_ERROR, error=msg)
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_unique_pack_names(self) -> Self:
+        """Pack names in uses_packs must be unique (case-insensitive)."""
+        normalized = [p.strip().casefold() for p in self.uses_packs]
+        if len(normalized) != len(set(normalized)):
+            dup_keys = {n for n, c in Counter(normalized).items() if c > 1}
+            dupes = sorted(
+                p for p in self.uses_packs if p.strip().casefold() in dup_keys
+            )
+            msg = f"Duplicate pack names in uses_packs: {dupes}"
             logger.warning(TEMPLATE_SCHEMA_VALIDATION_ERROR, error=msg)
             raise ValueError(msg)
         return self
