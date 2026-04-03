@@ -6,7 +6,9 @@ Holds typed references to core services, injected into
 """
 
 from synthorg.api.approval_store import ApprovalStore  # noqa: TC001
+from synthorg.api.auth.presence import UserPresence
 from synthorg.api.auth.service import AuthService  # noqa: TC001
+from synthorg.api.auth.session_store import SessionStore  # noqa: TC001
 from synthorg.api.auth.ticket_store import WsTicketStore
 from synthorg.api.errors import ServiceUnavailableError
 from synthorg.backup.service import BackupService  # noqa: TC001
@@ -87,10 +89,12 @@ class AppState:
         "_provider_management",
         "_provider_registry",
         "_review_gate_service",
+        "_session_store",
         "_settings_service",
         "_task_engine",
         "_ticket_store",
         "_tool_invocation_tracker",
+        "_user_presence",
         "approval_store",
         "config",
         "startup_time",
@@ -161,7 +165,9 @@ class AppState:
         )
         self._review_gate_service: ReviewGateService | None = None
         self._approval_timeout_scheduler: ApprovalTimeoutScheduler | None = None
+        self._session_store: SessionStore | None = None
         self._ticket_store = WsTicketStore()
+        self._user_presence = UserPresence()
         self.startup_time = startup_time
 
     def _require_service[T](self, service: T | None, name: str) -> T:
@@ -433,6 +439,46 @@ class AppState:
     def ticket_store(self) -> WsTicketStore:
         """Return the WebSocket ticket store (always available)."""
         return self._ticket_store
+
+    @property
+    def has_session_store(self) -> bool:
+        """Check whether the session store is configured."""
+        return self._session_store is not None
+
+    @property
+    def session_store(self) -> SessionStore:
+        """Return the JWT session store."""
+        return self._require_service(
+            self._session_store,
+            "session_store",
+        )
+
+    def set_session_store(self, store: SessionStore) -> None:
+        """Set the session store (deferred initialisation).
+
+        Args:
+            store: Configured session store.
+
+        Raises:
+            RuntimeError: If the session store has already been set.
+        """
+        if self._session_store is not None:
+            msg = "session_store is already configured"
+            logger.warning(
+                "app.state.session_store_set",
+                error=msg,
+            )
+            raise RuntimeError(msg)
+        self._session_store = store
+        logger.info(
+            "app.state.session_store_set",
+            note="Session store configured",
+        )
+
+    @property
+    def user_presence(self) -> UserPresence:
+        """Return the user presence tracker (always available)."""
+        return self._user_presence
 
     def set_auth_service(self, service: AuthService) -> None:
         """Set the auth service (deferred initialisation).

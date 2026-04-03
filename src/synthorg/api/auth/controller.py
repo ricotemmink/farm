@@ -1,24 +1,32 @@
-"""Authentication controller -- setup, login, password change, me, ws-ticket."""
+"""Auth controller -- setup, login, password change, me, ws-ticket, sessions."""
 
 import math
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Self
 
-from litestar import Controller, Request, Response, get, post
+import jwt
+from litestar import Controller, Request, Response, delete, get, post
 from litestar.connection import ASGIConnection  # noqa: TC002
 from litestar.exceptions import PermissionDeniedException
 from litestar.middleware.rate_limit import RateLimitConfig as LitestarRateLimitConfig
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from synthorg.api.auth.config import AuthConfig
 from synthorg.api.auth.models import AuthenticatedUser, AuthMethod, User
 from synthorg.api.auth.service import AuthService  # noqa: TC001
+from synthorg.api.auth.session import Session
 from synthorg.api.auth.system_user import SYSTEM_USERNAME, is_system_user
 from synthorg.api.auth.ticket_store import TicketLimitExceededError
 from synthorg.api.dto import ApiResponse
-from synthorg.api.errors import ConflictError, UnauthorizedError
+from synthorg.api.errors import (
+    ApiValidationError,
+    ConflictError,
+    NotFoundError,
+    UnauthorizedError,
+)
 from synthorg.api.guards import HumanRole
+from synthorg.api.state import AppState  # noqa: TC001
 from synthorg.core.types import NotBlankStr  # noqa: TC001
 from synthorg.observability import get_logger
 from synthorg.observability.events.api import (
@@ -27,6 +35,11 @@ from synthorg.observability.events.api import (
     API_AUTH_PASSWORD_CHANGED,
     API_AUTH_SETUP_COMPLETE,
     API_AUTH_TOKEN_ISSUED,
+    API_SESSION_CREATE_FAILED,
+    API_SESSION_CREATED,
+    API_SESSION_FORCE_LOGOUT,
+    API_SESSION_LISTED,
+    API_SESSION_REVOKED,
 )
 
 logger = get_logger(__name__)
@@ -170,6 +183,34 @@ class WsTicketResponse(BaseModel):
     expires_in: int = Field(gt=0)
 
 
+class SessionResponse(BaseModel):
+    """Active JWT session response DTO.
+
+    Attributes:
+        session_id: Unique session identifier (JWT ``jti``).
+        user_id: Session owner's user ID.
+        username: Session owner's login name.
+        ip_address: Client IP at login time.
+        user_agent: Client User-Agent at login time.
+        created_at: Session creation timestamp.
+        last_active_at: Last activity timestamp.
+        expires_at: Session expiry timestamp.
+        is_current: Whether this is the caller's current session.
+    """
+
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
+
+    session_id: NotBlankStr
+    user_id: NotBlankStr
+    username: NotBlankStr
+    ip_address: str
+    user_agent: str
+    created_at: AwareDatetime
+    last_active_at: AwareDatetime
+    expires_at: AwareDatetime
+    is_current: bool = False
+
+
 _PWD_CHANGE_EXEMPT_SUFFIXES = ("/auth/change-password", "/auth/me")
 
 # ── Guards ────────────────────────────────────────────────────
@@ -229,6 +270,82 @@ def require_password_changed(
         raise PermissionDeniedException(detail="Password change required")
 
 
+# ── Helpers ───────────────────────────────────────────────────
+
+
+async def _create_session(
+    request: Request[Any, Any, Any],
+    app_state: AppState,
+    session_id: str,
+    user: User,
+    expires_in: int,
+) -> None:
+    """Create a session record after login/setup.
+
+    Failures are non-fatal -- logged as warnings and swallowed
+    so login/setup still succeeds.
+    """
+    try:
+        store = app_state.session_store
+        now = datetime.now(UTC)
+        client = request.client
+        ua = request.headers.get("user-agent", "")[:512]
+        session = Session(
+            session_id=session_id,
+            user_id=user.id,
+            username=user.username,
+            role=user.role,
+            ip_address=client.host if client else "",
+            user_agent=ua,
+            created_at=now,
+            last_active_at=now,
+            expires_at=now + timedelta(seconds=expires_in),
+        )
+        await store.create(session)
+        logger.info(
+            API_SESSION_CREATED,
+            session_id=session_id,
+            user_id=user.id,
+        )
+    except MemoryError, RecursionError:
+        raise
+    except Exception:
+        logger.warning(
+            API_SESSION_CREATE_FAILED,
+            error="Session creation failed (non-fatal)",
+            session_id=session_id,
+            user_id=user.id,
+            exc_info=True,
+        )
+
+
+def _extract_jti(request: Request[Any, Any, Any]) -> str | None:
+    """Extract the JWT ``jti`` claim from the current request."""
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    token = auth_header[7:]
+    try:
+        app_state = request.app.state["app_state"]
+        claims = app_state.auth_service.decode_token(token)
+    except jwt.InvalidTokenError:
+        logger.debug(
+            API_AUTH_FAILED,
+            reason="jti_extraction_jwt_error",
+        )
+        return None
+    except Exception:
+        logger.warning(
+            API_AUTH_FAILED,
+            reason="jti_extraction_failed",
+            exc_info=True,
+        )
+        return None
+    else:
+        jti: str | None = claims.get("jti")
+        return jti
+
+
 # ── Controller ────────────────────────────────────────────────
 
 
@@ -253,8 +370,11 @@ not collide with the global rate limiter.
 """
 
 
+_VALID_SCOPES: frozenset[str] = frozenset({"own", "all"})
+
+
 class AuthController(Controller):
-    """Authentication endpoints: setup, login, password change, me."""
+    """Authentication endpoints: setup, login, password change, me, sessions, logout."""
 
     path = "/auth"
     tags = ("auth",)
@@ -315,7 +435,15 @@ class AuthController(Controller):
             msg = "Setup already completed"
             raise ConflictError(msg)
 
-        token, expires_in = auth_service.create_token(user)
+        token, expires_in, session_id = auth_service.create_token(user)
+
+        await _create_session(
+            request,
+            app_state,
+            session_id,
+            user,
+            expires_in,
+        )
 
         logger.info(
             API_AUTH_SETUP_COMPLETE,
@@ -374,7 +502,15 @@ class AuthController(Controller):
             msg = "Invalid credentials"
             raise UnauthorizedError(msg)
 
-        token, expires_in = auth_service.create_token(user)
+        token, expires_in, session_id = auth_service.create_token(user)
+
+        await _create_session(
+            request,
+            app_state,
+            session_id,
+            user,
+            expires_in,
+        )
 
         logger.info(
             API_AUTH_TOKEN_ISSUED,
@@ -572,4 +708,147 @@ class AuthController(Controller):
                     expires_in=max(1, math.ceil(app_state.ticket_store.ttl_seconds)),
                 ),
             ),
+        )
+
+    # ── Session management ─────────────────────────────────────
+
+    @get(
+        "/sessions",
+        summary="List active sessions",
+    )
+    async def list_sessions(
+        self,
+        request: Request[Any, Any, Any],
+        scope: str = "own",
+    ) -> Response[ApiResponse[list[SessionResponse]]]:
+        """List active sessions. CEO: ``?scope=all`` for all users."""
+        auth_user = request.scope.get("user")
+        if not isinstance(auth_user, AuthenticatedUser):
+            logger.warning(
+                API_AUTH_FAILED,
+                reason="unauthenticated_session_list",
+            )
+            msg = "Authentication required"
+            raise UnauthorizedError(msg)
+
+        if scope not in _VALID_SCOPES:
+            msg = f"Invalid scope: {scope!r}. Valid: own, all"
+            raise ApiValidationError(msg)
+
+        app_state = request.app.state["app_state"]
+        store = app_state.session_store
+
+        if scope == "all" and auth_user.role == HumanRole.CEO:
+            sessions = await store.list_all()
+        else:
+            sessions = await store.list_by_user(
+                auth_user.user_id,
+            )
+
+        current_jti = _extract_jti(request)
+
+        data = [
+            SessionResponse(
+                session_id=s.session_id,
+                user_id=s.user_id,
+                username=s.username,
+                ip_address=s.ip_address,
+                user_agent=s.user_agent,
+                created_at=s.created_at,
+                last_active_at=s.last_active_at,
+                expires_at=s.expires_at,
+                is_current=(s.session_id == current_jti),
+            )
+            for s in sessions
+        ]
+
+        logger.debug(
+            API_SESSION_LISTED,
+            user_id=auth_user.user_id,
+            count=len(data),
+        )
+
+        return Response(content=ApiResponse(data=data))
+
+    @delete(
+        "/sessions/{session_id:str}",
+        status_code=204,
+        summary="Revoke a session",
+    )
+    async def revoke_session(
+        self,
+        request: Request[Any, Any, Any],
+        session_id: str,
+    ) -> None:
+        """Revoke a session. Own sessions or CEO any."""
+        auth_user = request.scope.get("user")
+        if not isinstance(auth_user, AuthenticatedUser):
+            logger.warning(
+                API_AUTH_FAILED,
+                reason="unauthenticated_session_revoke",
+            )
+            msg = "Authentication required"
+            raise UnauthorizedError(msg)
+
+        app_state = request.app.state["app_state"]
+        store = app_state.session_store
+
+        session = await store.get(session_id)
+        if session is None:
+            msg = "Session not found"
+            raise NotFoundError(msg)
+        # Return 404 for not-owned (prevents session ID enum).
+        if session.user_id != auth_user.user_id and auth_user.role != HumanRole.CEO:
+            logger.warning(
+                API_AUTH_FAILED,
+                reason="session_not_owned",
+                session_id=session_id[:8],
+                user_id=auth_user.user_id,
+            )
+            msg = "Session not found"
+            raise NotFoundError(msg)
+
+        revoked = await store.revoke(session_id)
+        if revoked:
+            logger.info(
+                API_SESSION_REVOKED,
+                session_id=session_id,
+                revoked_by=auth_user.user_id,
+            )
+
+    @post(
+        "/logout",
+        status_code=204,
+        summary="Logout current session",
+    )
+    async def logout(
+        self,
+        request: Request[Any, Any, Any],
+    ) -> None:
+        """Revoke the current session's JWT."""
+        auth_user = request.scope.get("user")
+        if not isinstance(auth_user, AuthenticatedUser):
+            logger.warning(
+                API_AUTH_FAILED,
+                reason="unauthenticated_logout",
+            )
+            msg = "Authentication required"
+            raise UnauthorizedError(msg)
+
+        jti = _extract_jti(request)
+        if not jti:
+            logger.debug(
+                API_AUTH_FAILED,
+                reason="logout_no_jti",
+                user_id=auth_user.user_id,
+            )
+            return
+
+        app_state = request.app.state["app_state"]
+        store = app_state.session_store
+        await store.revoke(jti)
+        logger.info(
+            API_SESSION_FORCE_LOGOUT,
+            session_id=jti,
+            user_id=auth_user.user_id,
         )

@@ -1,7 +1,7 @@
 """API namespace setting definitions.
 
-Registers 11 settings covering server, CORS, rate limiting,
-authentication, and setup.  Five are runtime-editable; six are
+Registers 15 settings covering server, TLS, CORS, rate limiting,
+authentication, and setup.  Five are runtime-editable; ten are
 bootstrap-only (``restart_required=True``) because Litestar bakes
 middleware and CORS into the application at construction time.
 """
@@ -55,6 +55,68 @@ _r.register(
         level=SettingLevel.ADVANCED,
         restart_required=True,
         yaml_path="api.api_prefix",
+    )
+)
+
+# ── TLS (bootstrap-only) ────────────────────────────────────────
+
+_r.register(
+    SettingDefinition(
+        namespace=SettingNamespace.API,
+        key="ssl_certfile",
+        type=SettingType.STRING,
+        default="",
+        description="Path to SSL certificate file (PEM format)",
+        group="Server",
+        level=SettingLevel.ADVANCED,
+        restart_required=True,
+        yaml_path="api.server.ssl_certfile",
+    )
+)
+
+_r.register(
+    SettingDefinition(
+        namespace=SettingNamespace.API,
+        key="ssl_keyfile",
+        type=SettingType.STRING,
+        default="",
+        description="Path to SSL private key file (PEM format)",
+        group="Server",
+        level=SettingLevel.ADVANCED,
+        restart_required=True,
+        sensitive=True,
+        yaml_path="api.server.ssl_keyfile",
+    )
+)
+
+_r.register(
+    SettingDefinition(
+        namespace=SettingNamespace.API,
+        key="ssl_ca_certs",
+        type=SettingType.STRING,
+        default="",
+        description="Path to CA bundle for client certificate verification",
+        group="Server",
+        level=SettingLevel.ADVANCED,
+        restart_required=True,
+        yaml_path="api.server.ssl_ca_certs",
+    )
+)
+
+_r.register(
+    SettingDefinition(
+        namespace=SettingNamespace.API,
+        key="trusted_proxies",
+        type=SettingType.JSON,
+        default="[]",
+        description=(
+            "IP addresses/CIDRs trusted as reverse proxies "
+            "for X-Forwarded-For/Proto header processing"
+        ),
+        group="Server",
+        level=SettingLevel.ADVANCED,
+        restart_required=True,
+        yaml_path="api.server.trusted_proxies",
     )
 )
 

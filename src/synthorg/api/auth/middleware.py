@@ -166,6 +166,20 @@ async def _try_jwt_auth(
             path=path,
         )
         return None
+
+    # Check session revocation (sync, O(1) in-memory lookup).
+    jti = claims.get("jti")
+    if jti and app_state.has_session_store:
+        session_store = app_state.session_store
+        if session_store.is_revoked(jti):
+            logger.warning(
+                API_AUTH_FAILED,
+                reason="session_revoked",
+                jti=jti[:8],
+                path=path,
+            )
+            return None
+
     return await _resolve_jwt_user(claims, app_state, path)
 
 

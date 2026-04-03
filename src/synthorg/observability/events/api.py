@@ -81,3 +81,21 @@ API_USER_CREATED: Final[str] = "api.user.created"
 API_USER_UPDATED: Final[str] = "api.user.updated"
 API_USER_DELETED: Final[str] = "api.user.deleted"
 API_USER_LISTED: Final[str] = "api.user.listed"
+
+# Session management
+API_SESSION_CREATED: Final[str] = "api.session.created"
+API_SESSION_CREATE_FAILED: Final[str] = "api.session.create_failed"
+API_SESSION_REVOKED: Final[str] = "api.session.revoked"
+API_SESSION_LISTED: Final[str] = "api.session.listed"
+API_SESSION_CLEANUP: Final[str] = "api.session.cleanup"
+API_SESSION_FORCE_LOGOUT: Final[str] = "api.session.force_logout"
+
+# Network exposure
+API_TLS_CONFIGURED: Final[str] = "api.tls.configured"
+API_NETWORK_EXPOSURE_WARNING: Final[str] = "api.network.exposure_warning"
+
+# Concurrent access
+API_CONCURRENCY_CONFLICT: Final[str] = "api.concurrency.conflict"
+
+# WebSocket user channels
+API_WS_USER_CHANNEL_DENIED: Final[str] = "api.ws.user_channel_denied"

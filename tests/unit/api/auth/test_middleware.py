@@ -58,6 +58,7 @@ def _build_app(
         def __init__(self) -> None:
             self.auth_service = auth_service
             self.persistence = persistence
+            self.has_session_store = False
 
     app = Litestar(
         route_handlers=[protected_route, public_route],
@@ -77,7 +78,7 @@ class TestAuthMiddlewareJWT:
         await persistence.users.save(user)
 
         app = _build_app(auth_service=svc, persistence=persistence)
-        token, _ = svc.create_token(user)
+        token, _, _ = svc.create_token(user)
 
         with TestClient(app) as client:
             resp = client.get(
@@ -130,7 +131,7 @@ class TestAuthMiddlewareJWT:
         await persistence.connect()
         await persistence.users.save(user)
 
-        token, _ = svc.create_token(user)
+        token, _, _ = svc.create_token(user)
 
         # Change password -- new hash means different pwd_sig
         updated_user = User(
@@ -174,7 +175,7 @@ class TestAuthMiddlewareJWT:
         persistence = FakePersistenceBackend()
         await persistence.connect()
         # Don't save user -- simulate deleted user
-        token, _ = svc.create_token(user)
+        token, _, _ = svc.create_token(user)
         app = _build_app(auth_service=svc, persistence=persistence)
 
         with TestClient(app) as client:
@@ -183,6 +184,54 @@ class TestAuthMiddlewareJWT:
                 headers={"Authorization": f"Bearer {token}"},
             )
             assert resp.status_code == 401
+
+
+@pytest.mark.unit
+class TestAuthMiddlewareRevocation:
+    async def test_revoked_session_returns_401(self) -> None:
+        """JWT with a revoked jti is rejected by the middleware."""
+        from unittest.mock import MagicMock
+
+        svc = _make_auth_service()
+        user = _make_user(svc)
+        persistence = FakePersistenceBackend()
+        await persistence.connect()
+        await persistence.users.save(user)
+
+        token, _, session_id = svc.create_token(user)
+
+        mock_store = MagicMock()
+        mock_store.is_revoked.return_value = True
+
+        auth_config = AuthConfig(jwt_secret=_SECRET)
+
+        @get("/protected")
+        async def protected_route() -> dict[str, str]:
+            return {"status": "ok"}
+
+        middleware_cls = create_auth_middleware_class(auth_config)
+
+        class _RevokedState:
+            def __init__(self) -> None:
+                self.auth_service = svc
+                self.persistence = persistence
+                self.has_session_store = True
+                self.session_store = mock_store
+
+        app = Litestar(
+            route_handlers=[protected_route],
+            middleware=[middleware_cls],
+        )
+        app.state["app_state"] = _RevokedState()
+
+        with TestClient(app) as client:
+            resp = client.get(
+                "/protected",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 401
+
+        mock_store.is_revoked.assert_called_once_with(session_id)
 
 
 @pytest.mark.unit
@@ -419,6 +468,7 @@ class TestAuthMiddlewareSystemUser:
                 "sub": "system",
                 "iss": "synthorg-cli",
                 "aud": "synthorg-backend",
+                "jti": "sys-jti-1",
                 "iat": now,
                 "exp": now + timedelta(seconds=60),
             },
@@ -463,6 +513,7 @@ class TestAuthMiddlewareSystemUser:
                     "sub": "system",
                     "iss": "synthorg-cli",
                     "aud": "synthorg-backend",
+                    "jti": "sys-jti-3",
                     "iat": now,
                     "exp": now + timedelta(seconds=60),
                 },
@@ -512,6 +563,7 @@ class TestAuthMiddlewareSystemUser:
                 "sub": "system",
                 "iss": "attacker",
                 "aud": "synthorg-backend",
+                "jti": "sys-wrong-iss",
                 "iat": now,
                 "exp": now + timedelta(seconds=60),
             },
@@ -555,6 +607,7 @@ class TestAuthMiddlewareSystemUser:
                 "sub": "system",
                 "iss": "synthorg-cli",
                 "aud": "wrong-audience",
+                "jti": "sys-wrong-aud",
                 "iat": now,
                 "exp": now + timedelta(seconds=60),
             },
@@ -599,6 +652,7 @@ class TestAuthMiddlewareSystemUser:
                 "iss": "synthorg-cli",
                 "aud": "synthorg-backend",
                 "pwd_sig": "stale-signature-",
+                "jti": "sys-jti-2",
                 "iat": now,
                 "exp": now + timedelta(seconds=60),
             },
@@ -629,6 +683,7 @@ class TestAuthMiddlewareSystemUser:
         token = pyjwt.encode(
             {
                 "sub": user.id,
+                "jti": "no-pwd-sig",
                 "iat": now,
                 "exp": now + timedelta(seconds=60),
             },

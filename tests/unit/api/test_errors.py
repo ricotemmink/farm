@@ -14,7 +14,9 @@ from synthorg.api.errors import (
     ForbiddenError,
     NotFoundError,
     ServiceUnavailableError,
+    SessionRevokedError,
     UnauthorizedError,
+    VersionConflictError,
     category_title,
     category_type_uri,
 )
@@ -24,6 +26,7 @@ pytestmark = pytest.mark.unit
 _EXPECTED_CODES: dict[str, int] = {
     "UNAUTHORIZED": 1000,
     "FORBIDDEN": 1001,
+    "SESSION_REVOKED": 1002,
     "VALIDATION_ERROR": 2000,
     "REQUEST_VALIDATION_ERROR": 2001,
     "RESOURCE_NOT_FOUND": 3000,
@@ -31,6 +34,7 @@ _EXPECTED_CODES: dict[str, int] = {
     "ROUTE_NOT_FOUND": 3002,
     "RESOURCE_CONFLICT": 4000,
     "DUPLICATE_RECORD": 4001,
+    "VERSION_CONFLICT": 4002,
     "RATE_LIMITED": 5000,
     "BUDGET_EXHAUSTED": 6000,
     "PROVIDER_ERROR": 7000,
@@ -170,6 +174,18 @@ class TestApiErrorMetadata:
                 ErrorCategory.INTERNAL,
                 ErrorCode.SERVICE_UNAVAILABLE,
                 True,
+            ),
+            (
+                VersionConflictError,
+                ErrorCategory.CONFLICT,
+                ErrorCode.VERSION_CONFLICT,
+                False,
+            ),
+            (
+                SessionRevokedError,
+                ErrorCategory.AUTH,
+                ErrorCode.SESSION_REVOKED,
+                False,
             ),
         ],
     )

@@ -75,6 +75,7 @@ from synthorg.observability.events.api import (
     API_APP_SHUTDOWN,
     API_APP_STARTUP,
     API_APPROVAL_PUBLISH_FAILED,
+    API_SESSION_CLEANUP,
     API_WS_SEND_FAILED,
     API_WS_TICKET_CLEANUP,
 )
@@ -203,7 +204,7 @@ def _make_meeting_publisher(
 
 
 async def _ticket_cleanup_loop(app_state: AppState) -> None:
-    """Periodically prune expired WS tickets (runs as background task)."""
+    """Periodically prune expired WS tickets and sessions."""
     while True:
         await asyncio.sleep(60)
         try:
@@ -214,6 +215,18 @@ async def _ticket_cleanup_loop(app_state: AppState) -> None:
             logger.warning(
                 API_WS_TICKET_CLEANUP,
                 error="Periodic ticket cleanup failed",
+                exc_info=True,
+            )
+        # Session cleanup also runs every iteration.
+        try:
+            if app_state.has_session_store:
+                await app_state.session_store.cleanup_expired()
+        except MemoryError, RecursionError:
+            raise
+        except Exception:
+            logger.warning(
+                API_SESSION_CLEANUP,
+                error="Periodic session cleanup failed",
                 exc_info=True,
             )
 
