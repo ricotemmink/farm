@@ -8,7 +8,7 @@ from synthorg.core.enums import (
     SeniorityLevel,
     SkillCategory,
 )
-from synthorg.core.types import NotBlankStr  # noqa: TC001
+from synthorg.core.types import ModelTier, NotBlankStr  # noqa: TC001
 
 
 class Skill(BaseModel):
@@ -37,7 +37,7 @@ class Authority(BaseModel):
         can_approve: Task types this role can approve.
         reports_to: Role this position reports to.
         can_delegate_to: Roles this position can delegate tasks to.
-        budget_limit: Maximum spend per task in USD (base currency).
+        budget_limit: Maximum spend per task in base currency units.
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -57,7 +57,7 @@ class Authority(BaseModel):
     budget_limit: float = Field(
         default=0.0,
         ge=0.0,
-        description="Maximum spend per task in USD (base currency)",
+        description="Maximum spend per task in base currency units",
     )
 
 
@@ -77,7 +77,7 @@ class SeniorityInfo(BaseModel):
     authority_scope: NotBlankStr = Field(
         description="Description of authority at this level",
     )
-    typical_model_tier: NotBlankStr = Field(
+    typical_model_tier: ModelTier = Field(
         description="Recommended model tier",
     )
     cost_tier: NotBlankStr = Field(

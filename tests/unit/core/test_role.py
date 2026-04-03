@@ -142,7 +142,7 @@ class TestSeniorityInfo:
             SeniorityInfo(
                 level=SeniorityLevel.JUNIOR,
                 authority_scope="tasks",
-                typical_model_tier="",
+                typical_model_tier="",  # type: ignore[arg-type]
                 cost_tier="low",
             )
 
@@ -164,12 +164,21 @@ class TestSeniorityInfo:
                 cost_tier="low",
             )
 
-    def test_whitespace_model_tier_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="whitespace-only"):
+    @pytest.mark.parametrize(
+        "bad_tier",
+        ["   ", "extra-large"],
+        ids=["whitespace", "invalid-value"],
+    )
+    def test_invalid_model_tier_rejected(self, bad_tier: str) -> None:
+        """Non-Literal tier values are rejected by Pydantic."""
+        with pytest.raises(
+            ValidationError,
+            match="Input should be 'large', 'medium' or 'small'",
+        ):
             SeniorityInfo(
                 level=SeniorityLevel.JUNIOR,
                 authority_scope="tasks",
-                typical_model_tier="   ",
+                typical_model_tier=bad_tier,  # type: ignore[arg-type]
                 cost_tier="low",
             )
 

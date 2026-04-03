@@ -1,5 +1,6 @@
 """Unit tests for system prompt construction."""
 
+from collections.abc import Mapping
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,8 @@ from synthorg.engine.prompt import (
 )
 from synthorg.engine.prompt_template import (
     AUTONOMY_INSTRUCTIONS,
+    AUTONOMY_MINIMAL,
+    AUTONOMY_SUMMARY,
     PROMPT_TEMPLATE_VERSION,
 )
 from synthorg.engine.token_estimation import DefaultTokenEstimator
@@ -46,10 +49,10 @@ if TYPE_CHECKING:
 # ── TestBuildSystemPrompt ────────────────────────────────────────
 
 
+@pytest.mark.unit
 class TestBuildSystemPrompt:
     """Tests for the build_system_prompt() public API."""
 
-    @pytest.mark.unit
     def test_minimal_agent_produces_valid_prompt(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -64,7 +67,6 @@ class TestBuildSystemPrompt:
         assert result.estimated_tokens > 0
         assert result.content.strip()
 
-    @pytest.mark.unit
     def test_personality_traits_in_prompt(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -79,7 +81,6 @@ class TestBuildSystemPrompt:
         for trait in p.traits:
             assert trait in result.content
 
-    @pytest.mark.unit
     def test_different_personalities_produce_different_prompts(
         self,
     ) -> None:
@@ -119,7 +120,6 @@ class TestBuildSystemPrompt:
         assert "verbose and friendly" in prompt_a.content
         assert "terse and formal" in prompt_b.content
 
-    @pytest.mark.unit
     def test_role_description_included(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -133,7 +133,6 @@ class TestBuildSystemPrompt:
 
         assert sample_role_with_description.description in result.content
 
-    @pytest.mark.unit
     def test_custom_template_overrides_default(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -150,7 +149,6 @@ class TestBuildSystemPrompt:
             f"working as {sample_agent_with_personality.role}."
         )
 
-    @pytest.mark.unit
     def test_authority_boundaries_in_prompt(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -167,7 +165,6 @@ class TestBuildSystemPrompt:
             assert delegate in result.content
         assert f"{auth.budget_limit:.2f}" in result.content
 
-    @pytest.mark.unit
     def test_company_context_injected(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -183,7 +180,6 @@ class TestBuildSystemPrompt:
         for dept in sample_company.departments:
             assert dept.name in result.content
 
-    @pytest.mark.unit
     def test_tools_not_in_default_template(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -200,7 +196,6 @@ class TestBuildSystemPrompt:
             assert tool.name not in result.content
         assert "tools" not in result.sections
 
-    @pytest.mark.unit
     def test_tools_render_in_custom_template(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -226,7 +221,6 @@ class TestBuildSystemPrompt:
             assert tool.name in result.content
             assert tool.description in result.content
 
-    @pytest.mark.unit
     def test_task_context_in_prompt(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -243,7 +237,6 @@ class TestBuildSystemPrompt:
         for criterion in sample_task_with_criteria.acceptance_criteria:
             assert criterion.description in result.content
 
-    @pytest.mark.unit
     def test_task_budget_in_prompt(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -257,7 +250,6 @@ class TestBuildSystemPrompt:
 
         assert f"{sample_task_with_criteria.budget_limit:.2f}" in result.content
 
-    @pytest.mark.unit
     def test_new_personality_dimensions_in_prompt(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -271,7 +263,6 @@ class TestBuildSystemPrompt:
         assert p.collaboration.value in result.content
         assert p.conflict_approach.value in result.content
 
-    @pytest.mark.unit
     def test_new_personality_dimensions_with_custom_values(self) -> None:
         """Prompt reflects explicitly set personality dimensions."""
         model_cfg = ModelConfig(provider="test", model_id="test-001")
@@ -294,7 +285,6 @@ class TestBuildSystemPrompt:
         assert "independent" in result.content
         assert "compete" in result.content
 
-    @pytest.mark.unit
     def test_no_task_section_when_task_is_none(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -305,7 +295,6 @@ class TestBuildSystemPrompt:
         assert "Current Task" not in result.content
         assert "task" not in result.sections
 
-    @pytest.mark.unit
     def test_no_tools_section_in_default_template(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -316,7 +305,6 @@ class TestBuildSystemPrompt:
         assert "Available Tools" not in result.content
         assert "tools" not in result.sections
 
-    @pytest.mark.unit
     def test_no_company_section_when_company_is_none(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -331,6 +319,7 @@ class TestBuildSystemPrompt:
 # ── TestSeniorityAutonomy ────────────────────────────────────────
 
 
+@pytest.mark.unit
 class TestSeniorityAutonomy:
     """Tests for seniority-based autonomy instructions."""
 
@@ -351,7 +340,6 @@ class TestSeniorityAutonomy:
             hiring_date=date(2026, 1, 1),
         )
 
-    @pytest.mark.unit
     def test_junior_gets_guidance_instructions(self) -> None:
         """Junior agents get step-by-step guidance language."""
         agent = self._make_agent(
@@ -365,7 +353,6 @@ class TestSeniorityAutonomy:
         assert "Follow instructions carefully" in result.content
         assert "seek approval" in result.content.lower()
 
-    @pytest.mark.unit
     def test_senior_gets_ownership_instructions(self) -> None:
         """Senior agents get ownership-focused language."""
         agent = self._make_agent(
@@ -378,7 +365,6 @@ class TestSeniorityAutonomy:
 
         assert "Take ownership" in result.content
 
-    @pytest.mark.unit
     def test_c_suite_gets_strategic_scope(self) -> None:
         """C-suite agents get strategic language."""
         agent = self._make_agent(
@@ -392,7 +378,6 @@ class TestSeniorityAutonomy:
         assert "company-wide authority" in result.content.lower()
         assert "vision" in result.content.lower()
 
-    @pytest.mark.unit
     def test_all_levels_produce_unique_instructions(self) -> None:
         """Each seniority level maps to distinct autonomy text."""
         instructions = set(AUTONOMY_INSTRUCTIONS.values())
@@ -402,22 +387,20 @@ class TestSeniorityAutonomy:
 # ── TestTokenEstimation ──────────────────────────────────────────
 
 
+@pytest.mark.unit
 class TestTokenEstimation:
     """Tests for token estimation and budget trimming."""
 
-    @pytest.mark.unit
     def test_default_estimator_positive(self) -> None:
         """Non-empty text produces positive token estimate."""
         estimator = DefaultTokenEstimator()
         assert estimator.estimate_tokens("Hello world, this is a test.") > 0
 
-    @pytest.mark.unit
     def test_default_estimator_empty(self) -> None:
         """Empty text produces zero tokens."""
         estimator = DefaultTokenEstimator()
         assert estimator.estimate_tokens("") == 0
 
-    @pytest.mark.unit
     def test_estimated_tokens_populated(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -426,7 +409,6 @@ class TestTokenEstimation:
         result = build_system_prompt(agent=sample_agent_with_personality)
         assert result.estimated_tokens > 0
 
-    @pytest.mark.unit
     def test_max_tokens_triggers_trimming(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -458,7 +440,6 @@ class TestTokenEstimation:
         assert "identity" in trimmed.sections
         assert "personality" in trimmed.sections
 
-    @pytest.mark.unit
     def test_custom_estimator_used(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -490,10 +471,10 @@ class TestTokenEstimation:
 # ── TestPolicyValidationIntegration ──────────────────────────────
 
 
+@pytest.mark.unit
 class TestPolicyValidationIntegration:
     """Tests for policy validation integration in build_system_prompt."""
 
-    @pytest.mark.unit
     def test_policy_validation_error_does_not_block_prompt(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -540,15 +521,14 @@ class TestPolicyValidationIntegration:
 # ── TestPromptVersioning ─────────────────────────────────────────
 
 
+@pytest.mark.unit
 class TestPromptVersioning:
     """Tests for prompt versioning and section tracking."""
 
-    @pytest.mark.unit
     def test_template_version_frozen(self) -> None:
         """PROMPT_TEMPLATE_VERSION is frozen at '1.0.0' until first deploy."""
         assert PROMPT_TEMPLATE_VERSION == "1.0.0"
 
-    @pytest.mark.unit
     def test_template_version_in_result(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -557,7 +537,6 @@ class TestPromptVersioning:
         result = build_system_prompt(agent=sample_agent_with_personality)
         assert result.template_version == PROMPT_TEMPLATE_VERSION
 
-    @pytest.mark.unit
     def test_sections_tracked(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -586,10 +565,10 @@ class TestPromptVersioning:
 # ── TestSystemPromptModel ────────────────────────────────────────
 
 
+@pytest.mark.unit
 class TestSystemPromptModel:
     """Tests for the SystemPrompt Pydantic model."""
 
-    @pytest.mark.unit
     def test_frozen(self) -> None:
         """SystemPrompt instances are immutable."""
         prompt = SystemPrompt(
@@ -602,12 +581,11 @@ class TestSystemPromptModel:
         with pytest.raises(ValidationError):
             prompt.content = "modified"  # type: ignore[misc]
 
-    @pytest.mark.unit
     def test_metadata_contains_all_agent_info(
         self,
         sample_agent_with_personality: AgentIdentity,
     ) -> None:
-        """Metadata contains all five expected keys with correct values."""
+        """Metadata contains expected keys with correct values."""
         result = build_system_prompt(agent=sample_agent_with_personality)
         agent = sample_agent_with_personality
 
@@ -617,16 +595,17 @@ class TestSystemPromptModel:
             "role": agent.role,
             "department": agent.department,
             "level": agent.level.value,
+            "profile_tier": "large",
         }
 
 
 # ── TestPromptLogging ────────────────────────────────────────────
 
 
+@pytest.mark.unit
 class TestPromptLogging:
     """Tests for structured logging during prompt construction."""
 
-    @pytest.mark.unit
     def test_build_logs_start_and_success(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -639,7 +618,6 @@ class TestPromptLogging:
         assert PROMPT_BUILD_START in events
         assert PROMPT_BUILD_SUCCESS in events
 
-    @pytest.mark.unit
     def test_trim_logs_warning(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -664,10 +642,10 @@ class TestPromptLogging:
 # ── TestPromptErrorHandling ─────────────────────────────────────
 
 
+@pytest.mark.unit
 class TestPromptErrorHandling:
     """Tests for error paths in prompt construction."""
 
-    @pytest.mark.unit
     def test_invalid_custom_template_raises_prompt_build_error(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -679,7 +657,6 @@ class TestPromptErrorHandling:
                 custom_template="{% if %}",
             )
 
-    @pytest.mark.unit
     def test_invalid_template_preserves_exception_chain(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -693,7 +670,6 @@ class TestPromptErrorHandling:
 
         assert exc_info.value.__cause__ is not None
 
-    @pytest.mark.unit
     def test_render_error_raises_prompt_build_error(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -709,10 +685,10 @@ class TestPromptErrorHandling:
 # ── TestTrimmingPriority ────────────────────────────────────────
 
 
+@pytest.mark.unit
 class TestTrimmingPriority:
     """Tests for section trimming priority order."""
 
-    @pytest.mark.unit
     def test_company_trimmed_before_task(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -748,7 +724,6 @@ class TestTrimmingPriority:
         assert "company" not in trimmed.sections
         assert "task" in trimmed.sections
 
-    @pytest.mark.unit
     def test_trimming_order_without_tools(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -785,10 +760,10 @@ class TestTrimmingPriority:
 # ── TestDefaultAgentPrompt ─────────────────────────────────────
 
 
+@pytest.mark.unit
 class TestDefaultAgentPrompt:
     """Tests for agents with minimal/default configuration."""
 
-    @pytest.mark.unit
     def test_empty_optional_fields_render_without_error(self) -> None:
         """Agent with default personality renders without errors."""
         agent = AgentIdentity(
@@ -804,7 +779,6 @@ class TestDefaultAgentPrompt:
         assert "Traits" not in result.content
         assert result.estimated_tokens > 0
 
-    @pytest.mark.unit
     def test_task_with_zero_budget_and_no_deadline(self) -> None:
         """Task with zero budget and no deadline omits those sections."""
         from synthorg.core.enums import Complexity, Priority, TaskStatus, TaskType
@@ -840,10 +814,10 @@ class TestDefaultAgentPrompt:
 # ── TestBudgetExceeded ─────────────────────────────────────────
 
 
+@pytest.mark.unit
 class TestBudgetExceeded:
     """Tests for budget-exceeded warning and max_tokens validation."""
 
-    @pytest.mark.unit
     def test_budget_exceeded_logs_warning(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -861,7 +835,6 @@ class TestBudgetExceeded:
         assert len(exceeded_entries) == 1
         assert exceeded_entries[0]["max_tokens"] == 1
 
-    @pytest.mark.unit
     def test_max_tokens_zero_raises_error(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -873,7 +846,6 @@ class TestBudgetExceeded:
                 max_tokens=0,
             )
 
-    @pytest.mark.unit
     def test_max_tokens_negative_raises_error(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -889,10 +861,10 @@ class TestBudgetExceeded:
 # ── TestBuildErrorPrompt ──────────────────────────────────────
 
 
+@pytest.mark.unit
 class TestBuildErrorPrompt:
     """Tests for the build_error_prompt() fallback function."""
 
-    @pytest.mark.unit
     def test_returns_existing_prompt_when_provided(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -906,7 +878,6 @@ class TestBuildErrorPrompt:
         )
         assert result is existing
 
-    @pytest.mark.unit
     def test_returns_placeholder_when_no_prompt(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -926,10 +897,10 @@ class TestBuildErrorPrompt:
 # ── TestCatchAllExceptionWrapping ──────────────────────────────
 
 
+@pytest.mark.unit
 class TestCatchAllExceptionWrapping:
     """Tests for the catch-all exception handler in build_system_prompt."""
 
-    @pytest.mark.unit
     def test_unexpected_error_wrapped_in_prompt_build_error(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -953,10 +924,10 @@ class TestCatchAllExceptionWrapping:
 # ── TestEffectiveAutonomyInPrompt ──────────────────────────────
 
 
+@pytest.mark.unit
 class TestEffectiveAutonomyInPrompt:
     """Tests for effective autonomy info in the system prompt."""
 
-    @pytest.mark.unit
     def test_autonomy_level_in_prompt(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -974,7 +945,6 @@ class TestEffectiveAutonomyInPrompt:
         )
         assert "semi" in result.content
 
-    @pytest.mark.unit
     def test_auto_approve_actions_in_prompt(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -993,7 +963,6 @@ class TestEffectiveAutonomyInPrompt:
         assert "code:read" in result.content
         assert "code:write" in result.content
 
-    @pytest.mark.unit
     def test_human_approval_actions_in_prompt(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -1012,7 +981,6 @@ class TestEffectiveAutonomyInPrompt:
         assert "infra:deploy" in result.content
         assert "budget:spend" in result.content
 
-    @pytest.mark.unit
     def test_no_autonomy_omits_section(
         self,
         sample_agent_with_personality: AgentIdentity,
@@ -1021,3 +989,237 @@ class TestEffectiveAutonomyInPrompt:
         result = build_system_prompt(agent=sample_agent_with_personality)
         assert "Autonomy level" not in result.content
         assert "Auto-approved actions" not in result.content
+
+
+# ── TestPromptProfileIntegration ─────────────────────────────────
+
+
+@pytest.mark.unit
+class TestPromptProfileIntegration:
+    """Tests for profile-driven prompt rendering via model_tier."""
+
+    def test_model_tier_none_produces_full_prompt(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+    ) -> None:
+        """No tier = full profile, backward compatible."""
+        result = build_system_prompt(
+            agent=sample_agent_with_personality,
+            model_tier=None,
+        )
+        p = sample_agent_with_personality.personality
+
+        assert p.risk_tolerance.value in result.content
+        assert p.creativity.value in result.content
+        assert p.verbosity.value in result.content
+
+    def test_small_tier_omits_org_policies(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+    ) -> None:
+        """Small tier profile excludes org policies from prompt."""
+        policies = ("All code must be reviewed.", "Follow security guidelines.")
+        result = build_system_prompt(
+            agent=sample_agent_with_personality,
+            org_policies=policies,
+            model_tier="small",
+        )
+
+        assert "Organizational Policies" not in result.content
+        assert "All code must be reviewed" not in result.content
+        assert "org_policies" not in result.sections
+
+    def test_large_tier_includes_org_policies(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+    ) -> None:
+        """Large tier profile includes org policies in prompt."""
+        policies = ("All code must be reviewed.",)
+        result = build_system_prompt(
+            agent=sample_agent_with_personality,
+            org_policies=policies,
+            model_tier="large",
+        )
+
+        assert "Organizational Policies" in result.content
+        assert "All code must be reviewed" in result.content
+        assert "org_policies" in result.sections
+
+    def test_small_tier_simplifies_acceptance_criteria(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+        sample_task_with_criteria: Task,
+    ) -> None:
+        """Small tier renders acceptance criteria as flat semicolon line."""
+        result = build_system_prompt(
+            agent=sample_agent_with_personality,
+            task=sample_task_with_criteria,
+            model_tier="small",
+        )
+
+        # Should NOT have the full "### Acceptance Criteria" heading.
+        assert "### Acceptance Criteria" not in result.content
+        # Should have semicolon-joined flat format.
+        assert "**Criteria**:" in result.content
+
+    def test_large_tier_full_acceptance_criteria(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+        sample_task_with_criteria: Task,
+    ) -> None:
+        """Large tier renders full nested acceptance criteria."""
+        result = build_system_prompt(
+            agent=sample_agent_with_personality,
+            task=sample_task_with_criteria,
+            model_tier="large",
+        )
+
+        assert "### Acceptance Criteria" in result.content
+
+    def test_small_tier_minimal_personality(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+    ) -> None:
+        """Small tier shows only communication style, not enums."""
+        result = build_system_prompt(
+            agent=sample_agent_with_personality,
+            model_tier="small",
+        )
+        p = sample_agent_with_personality.personality
+
+        assert p.communication_style in result.content
+        # Behavioral enums should NOT appear.
+        assert "Risk tolerance" not in result.content
+        assert "Verbosity" not in result.content
+        assert "Decision-making" not in result.content
+
+    def test_medium_tier_condensed_personality(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+    ) -> None:
+        """Medium tier shows description + style + traits, no enums."""
+        result = build_system_prompt(
+            agent=sample_agent_with_personality,
+            model_tier="medium",
+        )
+        p = sample_agent_with_personality.personality
+
+        assert p.description in result.content
+        assert p.communication_style in result.content
+        for trait in p.traits:
+            assert trait in result.content
+        # Behavioral enums should NOT appear in condensed mode.
+        assert "Risk tolerance" not in result.content
+        assert "Creativity" not in result.content
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("tier", ["large", "medium", "small"])
+    def test_authority_always_present(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+        tier: str,
+    ) -> None:
+        """Authority section is never stripped by any profile."""
+        result = build_system_prompt(
+            agent=sample_agent_with_personality,
+            model_tier=tier,  # type: ignore[arg-type]
+        )
+
+        assert "## Authority" in result.content
+        assert "authority" in result.sections
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("tier", ["large", "medium", "small"])
+    def test_identity_always_present(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+        tier: str,
+    ) -> None:
+        """Identity section is never stripped by any profile."""
+        result = build_system_prompt(
+            agent=sample_agent_with_personality,
+            model_tier=tier,  # type: ignore[arg-type]
+        )
+
+        assert "## Identity" in result.content
+        assert sample_agent_with_personality.name in result.content
+        assert "identity" in result.sections
+
+    def test_profile_tier_in_metadata(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+    ) -> None:
+        """Metadata includes profile_tier when profile is applied."""
+        result = build_system_prompt(
+            agent=sample_agent_with_personality,
+            model_tier="medium",
+        )
+
+        assert result.metadata["profile_tier"] == "medium"
+
+    def test_small_prompt_shorter_than_large(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+        sample_task_with_criteria: Task,
+    ) -> None:
+        """Small tier prompt uses fewer tokens than large tier."""
+        policies = ("All code must be reviewed.", "Follow security guidelines.")
+        large = build_system_prompt(
+            agent=sample_agent_with_personality,
+            task=sample_task_with_criteria,
+            org_policies=policies,
+            model_tier="large",
+        )
+        small = build_system_prompt(
+            agent=sample_agent_with_personality,
+            task=sample_task_with_criteria,
+            org_policies=policies,
+            model_tier="small",
+        )
+
+        assert small.estimated_tokens < large.estimated_tokens
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("tier", "autonomy_map"),
+        [
+            ("large", AUTONOMY_INSTRUCTIONS),
+            ("medium", AUTONOMY_SUMMARY),
+            ("small", AUTONOMY_MINIMAL),
+        ],
+    )
+    def test_autonomy_text_varies_by_tier(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+        tier: str,
+        autonomy_map: Mapping[SeniorityLevel, str],
+    ) -> None:
+        """Each tier renders the matching autonomy instruction text."""
+        result = build_system_prompt(
+            agent=sample_agent_with_personality,
+            model_tier=tier,  # type: ignore[arg-type]
+        )
+        expected = autonomy_map[sample_agent_with_personality.level]
+
+        assert expected in result.content
+
+
+# ── TestBuildCoreContextDefaults ─────────────────────────────────
+
+
+@pytest.mark.unit
+class TestBuildCoreContextDefaults:
+    """Tests for build_core_context profile=None fallback defaults."""
+
+    def test_none_profile_defaults_to_full(
+        self,
+        sample_agent_with_personality: AgentIdentity,
+    ) -> None:
+        """When profile is None, context uses full-profile defaults."""
+        from synthorg.engine._prompt_helpers import build_core_context
+
+        ctx = build_core_context(sample_agent_with_personality, role=None)
+
+        assert ctx["personality_mode"] == "full"
+        assert ctx["include_org_policies"] is True
+        assert ctx["simplify_acceptance_criteria"] is False

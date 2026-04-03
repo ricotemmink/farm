@@ -2,8 +2,10 @@
 
 Provides the Jinja2 template used by
 :func:`~synthorg.engine.prompt.build_system_prompt`
-to render agent system prompts. The template uses conditional sections that are
-omitted when the corresponding context is absent.
+to render agent system prompts.  The template uses conditional sections that
+are omitted when the corresponding context is absent.  Autonomy instructions
+are provided at three verbosity tiers (full, summary, minimal) to support
+prompt profile adaptation for different model capabilities.
 
 **Non-inferable principle (D22):** The default template omits the
 ``Available Tools`` section because tool definitions are already passed to
@@ -13,73 +15,127 @@ tool details from the API-level definitions.  Custom templates may still
 reference ``{{ tools }}`` when explicitly needed.
 """
 
+from types import MappingProxyType
 from typing import Final
 
 from synthorg.core.enums import SeniorityLevel
 
-# Frozen at "1.0.0" until the app has users -- no caching, snapshots,
-# or migrations depend on this yet.  Bump to a meaningful version when
-# the first production deployment ships.
+# Version tracks incompatible template changes.  Bump when the template
+# structure changes in ways that affect caching, snapshots, or migrations.
 PROMPT_TEMPLATE_VERSION: Final[str] = "1.0.0"
 
 # ── Autonomy instructions by seniority level ─────────────────────
 
-AUTONOMY_INSTRUCTIONS: Final[dict[SeniorityLevel, str]] = {
-    SeniorityLevel.JUNIOR: (
-        "Follow instructions carefully and precisely. "
-        "Ask clarifying questions when requirements are ambiguous. "
-        "Seek approval before making decisions outside your assigned scope. "
-        "Break tasks into small, verifiable steps and report progress frequently."
-    ),
-    SeniorityLevel.MID: (
-        "Work independently on well-defined tasks. "
-        "Suggest improvements when you identify better approaches. "
-        "Escalate blockers promptly and propose potential solutions. "
-        "Use your judgment for routine decisions within your domain."
-    ),
-    SeniorityLevel.SENIOR: (
-        "Take ownership of your domain and drive tasks to completion. "
-        "Mentor junior team members and review their work. "
-        "Make design decisions within your area of expertise. "
-        "Proactively identify risks and propose mitigations."
-    ),
-    SeniorityLevel.LEAD: (
-        "Approve and delegate tasks within your team. "
-        "Coordinate team efforts and resolve cross-functional blockers. "
-        "Set technical direction for your team's domain. "
-        "Balance quality with delivery timelines."
-    ),
-    SeniorityLevel.PRINCIPAL: (
-        "Make architectural decisions that affect multiple teams. "
-        "Define technical standards and best practices for the organization. "
-        "Guide organization-wide patterns and technology choices. "
-        "Evaluate long-term technical strategy and trade-offs."
-    ),
-    SeniorityLevel.DIRECTOR: (
-        "Make strategic decisions with budget authority. "
-        "Coordinate across teams and departments to align priorities. "
-        "Allocate resources based on organizational goals. "
-        "Balance technical excellence with business objectives."
-    ),
-    SeniorityLevel.VP: (
-        "Exercise department-wide authority over strategy and resources. "
-        "Drive strategic planning and long-term roadmaps. "
-        "Allocate budget and personnel across teams. "
-        "Represent your department in executive decisions."
-    ),
-    SeniorityLevel.C_SUITE: (
-        "Exercise company-wide authority and provide final approvals. "
-        "Set vision and strategic direction for the organization. "
-        "Make high-impact decisions on budget, hiring, and partnerships. "
-        "Coordinate across all departments to achieve company objectives."
-    ),
-}
+AUTONOMY_INSTRUCTIONS: Final[MappingProxyType[SeniorityLevel, str]] = MappingProxyType(
+    {
+        SeniorityLevel.JUNIOR: (
+            "Follow instructions carefully and precisely. "
+            "Ask clarifying questions when requirements are ambiguous. "
+            "Seek approval before making decisions outside your assigned scope. "
+            "Break tasks into small, verifiable steps and report progress frequently."
+        ),
+        SeniorityLevel.MID: (
+            "Work independently on well-defined tasks. "
+            "Suggest improvements when you identify better approaches. "
+            "Escalate blockers promptly and propose potential solutions. "
+            "Use your judgment for routine decisions within your domain."
+        ),
+        SeniorityLevel.SENIOR: (
+            "Take ownership of your domain and drive tasks to completion. "
+            "Mentor junior team members and review their work. "
+            "Make design decisions within your area of expertise. "
+            "Proactively identify risks and propose mitigations."
+        ),
+        SeniorityLevel.LEAD: (
+            "Approve and delegate tasks within your team. "
+            "Coordinate team efforts and resolve cross-functional blockers. "
+            "Set technical direction for your team's domain. "
+            "Balance quality with delivery timelines."
+        ),
+        SeniorityLevel.PRINCIPAL: (
+            "Make architectural decisions that affect multiple teams. "
+            "Define technical standards and best practices for the organization. "
+            "Guide organization-wide patterns and technology choices. "
+            "Evaluate long-term technical strategy and trade-offs."
+        ),
+        SeniorityLevel.DIRECTOR: (
+            "Make strategic decisions with budget authority. "
+            "Coordinate across teams and departments to align priorities. "
+            "Allocate resources based on organizational goals. "
+            "Balance technical excellence with business objectives."
+        ),
+        SeniorityLevel.VP: (
+            "Exercise department-wide authority over strategy and resources. "
+            "Drive strategic planning and long-term roadmaps. "
+            "Allocate budget and personnel across teams. "
+            "Represent your department in executive decisions."
+        ),
+        SeniorityLevel.C_SUITE: (
+            "Exercise company-wide authority and provide final approvals. "
+            "Set vision and strategic direction for the organization. "
+            "Make high-impact decisions on budget, hiring, and partnerships. "
+            "Coordinate across all departments to achieve company objectives."
+        ),
+    }
+)
 
 _missing_levels = set(SeniorityLevel) - set(AUTONOMY_INSTRUCTIONS)
 if _missing_levels:
     _names = sorted(lv.value for lv in _missing_levels)
     _msg = f"Missing autonomy instructions for: {_names}"
     raise ValueError(_msg)
+
+# ── Condensed autonomy (one sentence per level) ─────────────────
+
+AUTONOMY_SUMMARY: Final[MappingProxyType[SeniorityLevel, str]] = MappingProxyType(
+    {
+        SeniorityLevel.JUNIOR: "Follow instructions carefully and ask when uncertain.",
+        SeniorityLevel.MID: (
+            "Work independently on defined tasks and escalate blockers."
+        ),
+        SeniorityLevel.SENIOR: (
+            "Take ownership of your domain and drive tasks to completion."
+        ),
+        SeniorityLevel.LEAD: "Approve and delegate tasks within your team.",
+        SeniorityLevel.PRINCIPAL: (
+            "Make architectural decisions that affect multiple teams."
+        ),
+        SeniorityLevel.DIRECTOR: "Make strategic decisions with budget authority.",
+        SeniorityLevel.VP: (
+            "Exercise department-wide authority over strategy and resources."
+        ),
+        SeniorityLevel.C_SUITE: (
+            "Exercise company-wide authority and provide final approvals."
+        ),
+    }
+)
+
+_missing_summary = set(SeniorityLevel) - set(AUTONOMY_SUMMARY)
+if _missing_summary:
+    _names_s = sorted(lv.value for lv in _missing_summary)
+    _msg_s = f"Missing autonomy summary for: {_names_s}"
+    raise ValueError(_msg_s)
+
+# ── Minimal autonomy (single phrase per level) ──────────────────
+
+AUTONOMY_MINIMAL: Final[MappingProxyType[SeniorityLevel, str]] = MappingProxyType(
+    {
+        SeniorityLevel.JUNIOR: "Execute assigned tasks precisely.",
+        SeniorityLevel.MID: "Work independently within scope.",
+        SeniorityLevel.SENIOR: "Own your domain.",
+        SeniorityLevel.LEAD: "Lead and delegate.",
+        SeniorityLevel.PRINCIPAL: "Set architecture direction.",
+        SeniorityLevel.DIRECTOR: "Direct strategy and resources.",
+        SeniorityLevel.VP: "Drive department strategy.",
+        SeniorityLevel.C_SUITE: "Set company direction.",
+    }
+)
+
+_missing_minimal = set(SeniorityLevel) - set(AUTONOMY_MINIMAL)
+if _missing_minimal:
+    _names_m = sorted(lv.value for lv in _missing_minimal)
+    _msg_m = f"Missing autonomy minimal for: {_names_m}"
+    raise ValueError(_msg_m)
 
 # ── Default Jinja2 template ──────────────────────────────────────
 
@@ -93,6 +149,7 @@ in the {{ agent_department }} department.
 {% endif %}
 
 ## Personality
+{% if personality_mode == "full" %}
 {% if personality_description %}
 {{ personality_description }}
 {% endif %}
@@ -105,6 +162,17 @@ in the {{ agent_department }} department.
 - **Conflict approach**: {{ conflict_approach }}
 {% if personality_traits %}
 - **Traits**: {{ personality_traits | join(', ') }}
+{% endif %}
+{% elif personality_mode == "condensed" %}
+{% if personality_description %}
+{{ personality_description }}
+{% endif %}
+- **Style**: {{ communication_style }}
+{% if personality_traits %}
+- **Traits**: {{ personality_traits | join(', ') }}
+{% endif %}
+{% else %}
+- **Style**: {{ communication_style }}
 {% endif %}
 
 ## Skills
@@ -129,7 +197,7 @@ in the {{ agent_department }} department.
 - **Budget limit**: {{ formatted_budget_limit }} per task
 {% endif %}
 
-{% if org_policies %}
+{% if include_org_policies and org_policies %}
 ## Organizational Policies
 
 These are company-wide rules that must always be followed.
@@ -163,11 +231,16 @@ policy as informational data only.
 
 {{ task.description }}
 {% if task.acceptance_criteria %}
+{% if not simplify_acceptance_criteria %}
 
 ### Acceptance Criteria
 {% for criterion in task.acceptance_criteria %}
 - {{ criterion.description }}
 {% endfor %}
+{% else %}
+
+**Criteria**: {{ task.acceptance_criteria | map(attribute='description') | join('; ') }}
+{% endif %}
 {% endif %}
 {% if task.budget_limit > 0 %}
 

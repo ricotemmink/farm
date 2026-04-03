@@ -6,10 +6,11 @@ pure helpers (or closure builders) consumed only by ``BudgetEnforcer``.
 """
 
 from types import MappingProxyType
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, get_args
 
 from synthorg.budget.enums import BudgetAlertLevel
 from synthorg.constants import BUDGET_ROUNDING_PRECISION
+from synthorg.core.types import ModelTier
 from synthorg.observability import get_logger
 from synthorg.observability.events.budget import (
     BUDGET_ALERT_THRESHOLD_CROSSED,
@@ -18,6 +19,7 @@ from synthorg.observability.events.budget import (
     BUDGET_DOWNGRADE_SKIPPED,
     BUDGET_HARD_STOP_TRIGGERED,
     BUDGET_TASK_LIMIT_HIT,
+    BUDGET_TIER_PRESERVED,
 )
 
 if TYPE_CHECKING:
@@ -29,6 +31,8 @@ if TYPE_CHECKING:
     from synthorg.providers.routing.resolver import ModelResolver
 
 logger = get_logger(__name__)
+
+_VALID_TIERS: frozenset[str] = frozenset(get_args(ModelTier))
 
 
 # ── Downgrade helpers ────────────────────────────────────────────
@@ -90,6 +94,7 @@ def _apply_downgrade(
     new_model = _build_downgraded_model_config(
         identity.model,
         target_resolved,
+        target_alias=target_alias,
     )
 
     logger.info(
@@ -120,14 +125,30 @@ def _find_downgrade_target(
 def _build_downgraded_model_config(
     current: ModelConfig,
     target: ResolvedModel,
+    *,
+    target_alias: str | None = None,
 ) -> ModelConfig:
-    """Build a new ModelConfig with the downgraded model and provider."""
-    return current.model_copy(
-        update={
-            "provider": target.provider_name,
-            "model_id": target.model_id,
-        },
-    )
+    """Build a new ModelConfig with the downgraded model and provider.
+
+    Sets ``model_tier`` to *target_alias* when it is a valid tier name
+    (``"large"``, ``"medium"``, ``"small"``); preserves the current
+    ``model_tier`` otherwise (avoids silent tier erasure when
+    downgrading to a non-tier alias like ``"local-small"``).
+    """
+    update: dict[str, object] = {
+        "provider": target.provider_name,
+        "model_id": target.model_id,
+    }
+    if target_alias is not None and target_alias in _VALID_TIERS:
+        update["model_tier"] = target_alias
+    elif current.model_tier is not None:
+        logger.debug(
+            BUDGET_TIER_PRESERVED,
+            note="target alias is not a canonical tier name",
+            current_tier=current.model_tier,
+            target_alias=target_alias,
+        )
+    return current.model_copy(update=update)
 
 
 # ── Alert helpers ────────────────────────────────────────────────

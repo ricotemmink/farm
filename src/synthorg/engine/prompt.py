@@ -28,17 +28,34 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from synthorg.budget.currency import DEFAULT_CURRENCY, format_cost, get_currency_symbol
 from synthorg.engine._prompt_helpers import (
+    SECTION_COMPANY as _SECTION_COMPANY,
+)
+from synthorg.engine._prompt_helpers import (
+    SECTION_ORG_POLICIES as _SECTION_ORG_POLICIES,
+)
+from synthorg.engine._prompt_helpers import (
+    SECTION_TASK as _SECTION_TASK,
+)
+from synthorg.engine._prompt_helpers import (
+    TRIMMABLE_SECTIONS as _TRIMMABLE_SECTIONS,
+)
+from synthorg.engine._prompt_helpers import (
     build_core_context as _build_core_context,
 )
 from synthorg.engine._prompt_helpers import (
     build_metadata as _build_metadata,
 )
+from synthorg.engine._prompt_helpers import (
+    compute_sections as _compute_sections,
+)
 from synthorg.engine.errors import PromptBuildError
 from synthorg.engine.policy_validation import validate_policy_quality
+from synthorg.engine.prompt_profiles import PromptProfile, get_prompt_profile
 from synthorg.engine.prompt_template import (
     DEFAULT_TEMPLATE,
     PROMPT_TEMPLATE_VERSION,
 )
+from synthorg.engine.sanitization import sanitize_message
 from synthorg.engine.token_estimation import (
     DefaultTokenEstimator,
     PromptTokenEstimator,
@@ -53,6 +70,7 @@ from synthorg.observability.events.prompt import (
     PROMPT_CUSTOM_TEMPLATE_FAILED,
     PROMPT_CUSTOM_TEMPLATE_LOADED,
     PROMPT_POLICY_VALIDATION_FAILED,
+    PROMPT_PROFILE_SELECTED,
 )
 
 if TYPE_CHECKING:
@@ -60,6 +78,7 @@ if TYPE_CHECKING:
     from synthorg.core.company import Company
     from synthorg.core.role import Role
     from synthorg.core.task import Task
+    from synthorg.core.types import ModelTier
     from synthorg.providers.models import ToolDefinition
     from synthorg.security.autonomy.models import EffectiveAutonomy
 
@@ -82,7 +101,8 @@ class SystemPrompt(BaseModel):
         template_version: Version of the template that produced this prompt.
         estimated_tokens: Token estimate of the prompt content.
         sections: Names of sections included in the prompt.
-        metadata: Agent identity metadata (agent_id, name, role, department, level).
+        metadata: Agent identity metadata (agent_id, name, role,
+            department, level, and optionally profile_tier).
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -103,29 +123,6 @@ class SystemPrompt(BaseModel):
     )
 
 
-# ── Section names ────────────────────────────────────────────────
-
-_SECTION_IDENTITY = "identity"
-_SECTION_PERSONALITY = "personality"
-_SECTION_SKILLS = "skills"
-_SECTION_AUTHORITY = "authority"
-_SECTION_ORG_POLICIES = "org_policies"
-_SECTION_AUTONOMY = "autonomy"
-_SECTION_TASK = "task"
-_SECTION_COMPANY = "company"
-_SECTION_TOOLS = "tools"
-_SECTION_CONTEXT_BUDGET = "context_budget"
-
-# Sections trimmed when over token budget, least critical first.
-# Tools section was removed from the default template per D22
-# (non-inferable principle), but custom templates may still render tools.
-_TRIMMABLE_SECTIONS = (
-    _SECTION_COMPANY,
-    _SECTION_TASK,
-    _SECTION_ORG_POLICIES,
-)
-
-
 # ── Public API ───────────────────────────────────────────────────
 
 
@@ -143,6 +140,7 @@ def build_system_prompt(  # noqa: PLR0913
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget_indicator: str | None = None,
     currency: str = DEFAULT_CURRENCY,
+    model_tier: ModelTier | None = None,
 ) -> SystemPrompt:
     """Build a system prompt from agent identity and optional context.
 
@@ -167,6 +165,8 @@ def build_system_prompt(  # noqa: PLR0913
             string to inject into the prompt.
         currency: ISO 4217 currency code for budget displays
             (e.g. ``"USD"``, ``"EUR"``).
+        model_tier: Model capability tier for prompt profile selection.
+            ``None`` defaults to the full (large) profile.
 
     Returns:
         Immutable :class:`SystemPrompt` with rendered content and metadata.
@@ -176,6 +176,16 @@ def build_system_prompt(  # noqa: PLR0913
     """
     _validate_max_tokens(agent, max_tokens)
     _validate_org_policies(agent, org_policies)
+
+    profile = get_prompt_profile(model_tier)
+    logger.info(
+        PROMPT_PROFILE_SELECTED,
+        requested_tier=model_tier,
+        selected_tier=profile.tier,
+        defaulted=model_tier is None,
+        personality_mode=profile.personality_mode,
+        autonomy_detail_level=profile.autonomy_detail_level,
+    )
 
     # Advisory only -- issues are logged but never block prompt construction.
     if org_policies:
@@ -198,6 +208,7 @@ def build_system_prompt(  # noqa: PLR0913
         tool_count=len(available_tools),
         has_company=company is not None,
         has_custom_template=custom_template is not None,
+        model_tier=model_tier,
     )
 
     try:
@@ -217,6 +228,7 @@ def build_system_prompt(  # noqa: PLR0913
             effective_autonomy=effective_autonomy,
             context_budget_indicator=context_budget_indicator,
             currency=currency,
+            profile=profile,
         )
     except PromptBuildError:
         raise  # Already logged by inner functions.
@@ -236,7 +248,8 @@ def build_system_prompt(  # noqa: PLR0913
             agent_name=agent.name,
             error=str(exc),
         )
-        msg = f"Unexpected error building prompt for agent '{agent.name}': {exc}"
+        detail = sanitize_message(str(exc))
+        msg = f"Unexpected error building prompt for agent '{agent.name}': {detail}"
         raise PromptBuildError(msg) from exc
 
     return _log_and_return(agent, result)
@@ -343,6 +356,7 @@ def _build_template_context(  # noqa: PLR0913
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget: str | None = None,
     currency: str = DEFAULT_CURRENCY,
+    profile: PromptProfile | None = None,
 ) -> dict[str, Any]:
     """Assemble the full Jinja2 template context from agent and optional inputs.
 
@@ -356,11 +370,12 @@ def _build_template_context(  # noqa: PLR0913
         effective_autonomy: Resolved autonomy for the current run.
         context_budget: Formatted context budget indicator string.
         currency: ISO 4217 currency code for budget displays.
+        profile: Prompt profile controlling rendering verbosity.
 
     Returns:
         Dict of template variables.
     """
-    context = _build_core_context(agent, role, effective_autonomy)
+    context = _build_core_context(agent, role, effective_autonomy, profile)
 
     context["currency_symbol"] = get_currency_symbol(currency)
     context["currency"] = currency
@@ -404,54 +419,6 @@ def _build_template_context(  # noqa: PLR0913
     return context
 
 
-def _compute_sections(  # noqa: PLR0913
-    *,
-    task: Task | None,
-    available_tools: tuple[ToolDefinition, ...] = (),
-    company: Company | None,
-    org_policies: tuple[str, ...] = (),
-    custom_template: bool = False,
-    context_budget: str | None = None,
-) -> tuple[str, ...]:
-    """Determine which sections are present in the rendered prompt.
-
-    The default template omits the tools section per D22 (non-inferable
-    principle).  Custom templates may still render tools, so the tools
-    section is tracked when ``available_tools`` is non-empty and a custom
-    template is in use.
-
-    Args:
-        task: Optional task context.
-        available_tools: Tool definitions (tracked for custom templates).
-        company: Optional company context.
-        org_policies: Company-wide policy texts.
-        custom_template: Whether a custom template is being used.
-        context_budget: Formatted context budget indicator string.
-
-    Returns:
-        Tuple of section names that are included.
-    """
-    sections: list[str] = [
-        _SECTION_IDENTITY,
-        _SECTION_PERSONALITY,
-        _SECTION_SKILLS,
-        _SECTION_AUTHORITY,
-    ]
-    if org_policies:
-        sections.append(_SECTION_ORG_POLICIES)
-    # Autonomy follows org_policies in the template.
-    sections.append(_SECTION_AUTONOMY)
-    if task is not None:
-        sections.append(_SECTION_TASK)
-    if available_tools and custom_template:
-        sections.append(_SECTION_TOOLS)
-    if company is not None:
-        sections.append(_SECTION_COMPANY)
-    if context_budget is not None:
-        sections.append(_SECTION_CONTEXT_BUDGET)
-    return tuple(sections)
-
-
 def _render_template(template_str: str, context: dict[str, Any]) -> str:
     """Render a Jinja2 template string with the given context.
 
@@ -488,6 +455,7 @@ def _trim_sections(  # noqa: PLR0913
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget: str | None = None,
     currency: str = DEFAULT_CURRENCY,
+    profile: PromptProfile | None = None,
 ) -> tuple[
     str,
     int,
@@ -515,13 +483,18 @@ def _trim_sections(  # noqa: PLR0913
             effective_autonomy=effective_autonomy,
             context_budget=context_budget,
             currency=currency,
+            profile=profile,
         )
         if estimated <= max_tokens:
             break
 
         if section == _SECTION_COMPANY and company is not None:
             company = None
-        elif section == _SECTION_ORG_POLICIES and org_policies:
+        elif (
+            section == _SECTION_ORG_POLICIES
+            and org_policies
+            and (profile is None or profile.include_org_policies)
+        ):
             org_policies = ()
         elif section == _SECTION_TASK and task is not None:
             task = None
@@ -543,6 +516,7 @@ def _trim_sections(  # noqa: PLR0913
             effective_autonomy=effective_autonomy,
             context_budget=context_budget,
             currency=currency,
+            profile=profile,
         )
 
     _log_trim_results(agent, max_tokens, estimated, trimmed_sections)
@@ -588,6 +562,7 @@ def _render_with_trimming(  # noqa: PLR0913
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget_indicator: str | None = None,
     currency: str = DEFAULT_CURRENCY,
+    profile: PromptProfile | None = None,
 ) -> SystemPrompt:
     """Render the prompt, trimming optional sections if over token budget."""
     content, estimated = _render_and_estimate(
@@ -602,6 +577,7 @@ def _render_with_trimming(  # noqa: PLR0913
         effective_autonomy=effective_autonomy,
         context_budget=context_budget_indicator,
         currency=currency,
+        profile=profile,
     )
 
     if max_tokens is not None and estimated > max_tokens:
@@ -618,6 +594,7 @@ def _render_with_trimming(  # noqa: PLR0913
             effective_autonomy=effective_autonomy,
             context_budget=context_budget_indicator,
             currency=currency,
+            profile=profile,
         )
 
     return _build_prompt_result(
@@ -630,6 +607,7 @@ def _render_with_trimming(  # noqa: PLR0913
         agent,
         custom_template=template_str is not DEFAULT_TEMPLATE,
         context_budget=context_budget_indicator,
+        profile=profile,
     )
 
 
@@ -644,6 +622,7 @@ def _build_prompt_result(  # noqa: PLR0913
     *,
     custom_template: bool = False,
     context_budget: str | None = None,
+    profile: PromptProfile | None = None,
 ) -> SystemPrompt:
     """Assemble the final ``SystemPrompt`` from rendered content."""
     sections = _compute_sections(
@@ -653,13 +632,17 @@ def _build_prompt_result(  # noqa: PLR0913
         org_policies=org_policies,
         custom_template=custom_template,
         context_budget=context_budget,
+        profile=profile,
     )
+    metadata = _build_metadata(agent)
+    if profile is not None:
+        metadata["profile_tier"] = profile.tier
     return SystemPrompt(
         content=content,
         template_version=PROMPT_TEMPLATE_VERSION,
         estimated_tokens=estimated,
         sections=sections,
-        metadata=_build_metadata(agent),
+        metadata=metadata,
     )
 
 
@@ -676,6 +659,7 @@ def _render_and_estimate(  # noqa: PLR0913
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget: str | None = None,
     currency: str = DEFAULT_CURRENCY,
+    profile: PromptProfile | None = None,
 ) -> tuple[str, int]:
     """Render the template and estimate its token count.
 
@@ -691,6 +675,7 @@ def _render_and_estimate(  # noqa: PLR0913
         effective_autonomy: Resolved autonomy for the current run.
         context_budget: Formatted context budget indicator string.
         currency: ISO 4217 currency code for budget displays.
+        profile: Prompt profile controlling rendering verbosity.
 
     Returns:
         Tuple of (rendered content, estimated token count).
@@ -705,6 +690,7 @@ def _render_and_estimate(  # noqa: PLR0913
         effective_autonomy=effective_autonomy,
         context_budget=context_budget,
         currency=currency,
+        profile=profile,
     )
     content = _render_template(template_str, context)
     return content, estimator.estimate_tokens(content)
