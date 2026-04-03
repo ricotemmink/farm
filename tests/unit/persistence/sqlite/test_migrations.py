@@ -30,6 +30,7 @@ _EXPECTED_TABLES = {
     "artifacts",
     "projects",
     "custom_presets",
+    "workflow_definitions",
 }
 
 _EXPECTED_INDEXES = {
@@ -70,6 +71,8 @@ _EXPECTED_INDEXES = {
     "idx_artifacts_type",
     "idx_projects_status",
     "idx_projects_lead",
+    "idx_wd_workflow_type",
+    "idx_wd_updated_at",
 }
 
 

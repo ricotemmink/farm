@@ -33,8 +33,7 @@ from synthorg.persistence.errors import DuplicateRecordError, QueryError
 from synthorg.persistence.preset_repository import PresetListRow, PresetRow
 from synthorg.security.models import AuditEntry, AuditVerdictStr
 from synthorg.security.timeout.parked_context import ParkedContext
-
-# ── Fake Repositories ────────────────────────────────────────────
+from tests.unit.api.fakes_workflow import FakeWorkflowDefinitionRepository
 
 
 class FakeTaskRepository:
@@ -576,6 +575,7 @@ class FakePersistenceBackend:
         self._artifacts = FakeArtifactRepository()
         self._projects = FakeProjectRepository()
         self._custom_presets = FakePersonalityPresetRepository()
+        self._workflow_definitions = FakeWorkflowDefinitionRepository()
         self._tasks = FakeTaskRepository()
         self._cost_records = FakeCostRecordRepository()
         self._messages = FakeMessageRepository()
@@ -682,6 +682,10 @@ class FakePersistenceBackend:
     @property
     def custom_presets(self) -> FakePersonalityPresetRepository:
         return self._custom_presets
+
+    @property
+    def workflow_definitions(self) -> FakeWorkflowDefinitionRepository:
+        return self._workflow_definitions
 
     async def get_setting(self, key: str) -> str | None:
         return self._settings.get(key)
