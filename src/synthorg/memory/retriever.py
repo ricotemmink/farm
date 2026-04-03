@@ -5,6 +5,7 @@ budget-fit → format.  Implements ``MemoryInjectionStrategy`` protocol.
 """
 
 import asyncio
+import builtins
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -16,7 +17,12 @@ from synthorg.memory.injection import (
     TokenEstimator,
 )
 from synthorg.memory.models import MemoryQuery
-from synthorg.memory.ranking import rank_memories
+from synthorg.memory.ranking import (
+    FusionStrategy,
+    ScoredMemory,
+    fuse_ranked_lists,
+    rank_memories,
+)
 from synthorg.observability import get_logger
 from synthorg.observability.events.memory import (
     MEMORY_FILTER_INIT,
@@ -39,9 +45,6 @@ if TYPE_CHECKING:
     from synthorg.providers.models import ChatMessage, ToolDefinition
 
 logger = get_logger(__name__)
-
-# Alias to disambiguate from domain MemoryError
-builtins_MemoryError = MemoryError  # noqa: N816
 
 
 async def _safe_call(
@@ -70,9 +73,14 @@ async def _safe_call(
     """
     try:
         return await coro
-    except builtins_MemoryError:
-        raise
-    except RecursionError:
+    except builtins.MemoryError, RecursionError:
+        logger.error(
+            MEMORY_RETRIEVAL_DEGRADED,
+            source=source,
+            agent_id=agent_id,
+            error_type="system",
+            exc_info=True,
+        )
         raise
     except memory_errors.MemoryError as exc:
         logger.warning(
@@ -193,9 +201,23 @@ class ContextInjectionStrategy:
                 token_budget=token_budget,
                 categories=categories,
             )
-        except builtins_MemoryError:
+        except builtins.MemoryError:
+            logger.error(
+                MEMORY_RETRIEVAL_DEGRADED,
+                source="pipeline",
+                agent_id=agent_id,
+                error_type="system",
+                exc_info=True,
+            )
             raise
         except RecursionError:
+            logger.error(
+                MEMORY_RETRIEVAL_DEGRADED,
+                source="pipeline",
+                agent_id=agent_id,
+                error_type="system",
+                exc_info=True,
+            )
             raise
         except memory_errors.MemoryError:
             logger.warning(
@@ -212,11 +234,18 @@ class ContextInjectionStrategy:
                 system_errors = exc.subgroup(
                     lambda e: isinstance(
                         e,
-                        builtins_MemoryError | RecursionError,
+                        builtins.MemoryError | RecursionError,
                     ),
                 )
                 if system_errors is not None:
-                    raise system_errors from exc
+                    logger.error(
+                        MEMORY_RETRIEVAL_DEGRADED,
+                        source="pipeline",
+                        agent_id=agent_id,
+                        error_type="system_in_exception_group",
+                        exc_info=True,
+                    )
+                    raise system_errors.exceptions[0] from exc
             logger.error(
                 MEMORY_RETRIEVAL_DEGRADED,
                 source="pipeline",
@@ -251,26 +280,16 @@ class ContextInjectionStrategy:
             limit=self._config.max_memories,
         )
 
-        personal_entries, shared_entries = await self._fetch_memories(
-            agent_id=agent_id,
-            query=query,
-        )
-
-        if not personal_entries and not shared_entries:
-            logger.info(
-                MEMORY_RETRIEVAL_SKIPPED,
+        if self._config.fusion_strategy == FusionStrategy.RRF:
+            ranked = await self._execute_rrf_pipeline(
                 agent_id=agent_id,
-                reason="no memories found",
+                query=query,
             )
-            return ()
-
-        now = datetime.now(UTC)
-        ranked = rank_memories(
-            personal_entries,
-            config=self._config,
-            now=now,
-            shared_entries=shared_entries,
-        )
+        else:
+            ranked = await self._execute_linear_pipeline(
+                agent_id=agent_id,
+                query=query,
+            )
 
         if not ranked:
             logger.info(
@@ -283,7 +302,14 @@ class ContextInjectionStrategy:
         if self._memory_filter is not None:
             try:
                 ranked = self._memory_filter.filter_for_injection(ranked)
-            except builtins_MemoryError, RecursionError:
+            except builtins.MemoryError, RecursionError:
+                logger.error(
+                    MEMORY_RETRIEVAL_DEGRADED,
+                    source="memory_filter",
+                    agent_id=agent_id,
+                    error_type="system",
+                    exc_info=True,
+                )
                 raise
             except Exception as exc:
                 logger.warning(
@@ -315,13 +341,172 @@ class ContextInjectionStrategy:
         logger.info(
             MEMORY_RETRIEVAL_COMPLETE,
             agent_id=agent_id,
-            personal_count=len(personal_entries),
-            shared_count=len(shared_entries),
             ranked_count=len(ranked),
             messages_produced=len(result),
+            fusion_strategy=self._config.fusion_strategy.value,
         )
 
         return result
+
+    async def _execute_linear_pipeline(
+        self,
+        *,
+        agent_id: NotBlankStr,
+        query: MemoryQuery,
+    ) -> tuple[ScoredMemory, ...]:
+        """Run the LINEAR ranking pipeline (dense-only).
+
+        Args:
+            agent_id: Agent identifier.
+            query: Retrieval query.
+
+        Returns:
+            Ranked and filtered memories.
+        """
+        personal_entries, shared_entries = await self._fetch_memories(
+            agent_id=agent_id,
+            query=query,
+        )
+        if not personal_entries and not shared_entries:
+            return ()
+        now = datetime.now(UTC)
+        return rank_memories(
+            personal_entries,
+            config=self._config,
+            now=now,
+            shared_entries=shared_entries,
+        )
+
+    async def _execute_rrf_pipeline(
+        self,
+        *,
+        agent_id: NotBlankStr,
+        query: MemoryQuery,
+    ) -> tuple[ScoredMemory, ...]:
+        """Run the RRF hybrid search pipeline (dense + sparse).
+
+        Fetches dense and sparse results in parallel, merges via
+        ``fuse_ranked_lists()``, and applies ``min_relevance``
+        post-filter (RRF does not filter internally).
+
+        Args:
+            agent_id: Agent identifier.
+            query: Retrieval query.
+
+        Returns:
+            Fused, filtered, and truncated memories.
+        """
+        dense_coro = self._fetch_memories(agent_id=agent_id, query=query)
+        sparse_coro = self._fetch_sparse_memories(
+            agent_id=agent_id,
+            query=query,
+        )
+        try:
+            async with asyncio.TaskGroup() as tg:
+                dense_task = tg.create_task(dense_coro)
+                sparse_task = tg.create_task(sparse_coro)
+        except* builtins.MemoryError as eg:
+            raise eg.exceptions[0] from eg
+        except* RecursionError as eg:
+            raise eg.exceptions[0] from eg
+
+        dense_personal, dense_shared = dense_task.result()
+        sparse_personal, sparse_shared = sparse_task.result()
+
+        # When sparse is empty, fall back to linear ranking instead
+        # of running RRF on a single dense list.
+        if not sparse_personal and not sparse_shared:
+            now = datetime.now(UTC)
+            return rank_memories(
+                dense_personal,
+                config=self._config,
+                now=now,
+                shared_entries=dense_shared,
+            )
+
+        return self._merge_and_fuse(
+            dense_personal + dense_shared,
+            sparse_personal + sparse_shared,
+        )
+
+    def _merge_and_fuse(
+        self,
+        dense_entries: tuple[MemoryEntry, ...],
+        sparse_entries: tuple[MemoryEntry, ...],
+    ) -> tuple[ScoredMemory, ...]:
+        """Sort modalities by relevance, fuse via RRF, and filter.
+
+        Args:
+            dense_entries: Combined personal + shared dense results.
+            sparse_entries: Combined personal + shared sparse results.
+
+        Returns:
+            Fused, filtered, and truncated memories.
+        """
+        # Sort by relevance so RRF rank reflects quality, not source order.
+        dense_list = tuple(
+            sorted(
+                dense_entries,
+                key=lambda e: e.relevance_score or 0.0,
+                reverse=True,
+            )
+        )
+        sparse_list = tuple(
+            sorted(
+                sparse_entries,
+                key=lambda e: e.relevance_score or 0.0,
+                reverse=True,
+            )
+        )
+
+        if not dense_list and not sparse_list:
+            return ()
+
+        ranked = fuse_ranked_lists(
+            (dense_list, sparse_list),
+            k=self._config.rrf_k,
+            max_results=self._config.max_memories,
+        )
+
+        # Post-RRF min_relevance filter (fuse_ranked_lists doesn't filter).
+        return tuple(
+            s for s in ranked if s.combined_score >= self._config.min_relevance
+        )
+
+    async def _fetch_sparse_memories(
+        self,
+        *,
+        agent_id: NotBlankStr,
+        query: MemoryQuery,
+    ) -> tuple[tuple[MemoryEntry, ...], tuple[MemoryEntry, ...]]:
+        """Fetch sparse (BM25) results from the backend.
+
+        Returns empty tuples when the backend does not support
+        sparse search.  Uses the same error isolation pattern as
+        ``_fetch_memories()``.
+
+        Args:
+            agent_id: Agent identifier.
+            query: Retrieval query.
+
+        Returns:
+            Tuple of (personal_sparse, shared_sparse).
+        """
+        if not getattr(self._backend, "supports_sparse_search", False):
+            return (), ()
+
+        retrieve_fn = getattr(self._backend, "retrieve_sparse", None)
+        if retrieve_fn is None:
+            return (), ()
+
+        # SharedKnowledgeStore does not yet expose retrieve_sparse,
+        # so shared sparse is disabled until the protocol is extended.
+        personal = await _safe_call(
+            retrieve_fn(agent_id, query),
+            source="sparse_personal",
+            agent_id=agent_id,
+        )
+        return personal, ()
 
     async def _fetch_memories(
         self,
@@ -373,7 +558,7 @@ class ContextInjectionStrategy:
                     )
             # TaskGroup wraps task exceptions in ExceptionGroup;
             # unwrap system-level errors so callers see bare exceptions.
-            except* builtins_MemoryError as eg:
+            except* builtins.MemoryError as eg:
                 raise eg.exceptions[0] from eg
             except* RecursionError as eg:
                 raise eg.exceptions[0] from eg

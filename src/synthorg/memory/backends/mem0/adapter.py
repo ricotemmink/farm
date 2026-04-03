@@ -34,6 +34,11 @@ from synthorg.memory.backends.mem0.shared import (
     retract_shared,
     search_shared_memories,
 )
+from synthorg.memory.backends.mem0.sparse_search import (
+    async_init_sparse_field,
+    async_retrieve_sparse,
+    async_try_sparse_upsert,
+)
 from synthorg.memory.errors import (
     MemoryConnectionError,
     MemoryRetrievalError,
@@ -42,6 +47,7 @@ from synthorg.memory.errors import (
 from synthorg.memory.errors import (
     MemoryError as DomainMemoryError,
 )
+from synthorg.memory.sparse import BM25Tokenizer
 from synthorg.observability import get_logger
 from synthorg.observability.events.memory import (
     MEMORY_BACKEND_AGENT_ID_REJECTED,
@@ -120,6 +126,10 @@ class Mem0MemoryBackend:
         self._client: Mem0Client | None = None
         self._connected = False
         self._connect_lock = asyncio.Lock()
+        self._qdrant_client: Any = None
+        self._sparse_encoder: BM25Tokenizer | None = (
+            BM25Tokenizer() if mem0_config.sparse_search_enabled else None
+        )
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
@@ -176,6 +186,21 @@ class Mem0MemoryBackend:
                 raise MemoryConnectionError(msg) from exc
             self._client = client  # pyright: ignore[reportAttributeAccessIssue]
             self._connected = True
+            # Expose the Qdrant client for sparse vector operations.
+            if self._mem0_config.sparse_search_enabled:
+                qdrant: Any = None
+                try:
+                    qdrant = client.vector_store.client  # pyright: ignore[reportAttributeAccessIssue]
+                    await async_init_sparse_field(
+                        qdrant,
+                        self._mem0_config.collection_name,
+                    )
+                except builtins.MemoryError, RecursionError:
+                    raise
+                except Exception:
+                    # Non-fatal: dense search still works.
+                    qdrant = None
+                self._qdrant_client = qdrant
             logger.info(MEMORY_BACKEND_CONNECTED, backend="mem0")
 
     async def disconnect(self) -> None:
@@ -196,6 +221,7 @@ class Mem0MemoryBackend:
                 return
             logger.info(MEMORY_BACKEND_DISCONNECTING, backend="mem0")
             self._client = None
+            self._qdrant_client = None
             self._connected = False
             logger.info(MEMORY_BACKEND_DISCONNECTED, backend="mem0")
 
@@ -288,6 +314,13 @@ class Mem0MemoryBackend:
         """Maximum memories per agent from configuration."""
         return self._max_memories_per_agent
 
+    @property
+    def supports_sparse_search(self) -> bool:
+        """Whether BM25 sparse search is available."""
+        return (
+            self._mem0_config.sparse_search_enabled and self._qdrant_client is not None
+        )
+
     # ── Guards ────────────────────────────────────────────────────
 
     def _require_connected(self) -> Mem0Client:
@@ -337,6 +370,26 @@ class Mem0MemoryBackend:
                 f"{SHARED_NAMESPACE!r}"
             )
             raise error_cls(msg)
+
+    # ── Sparse helpers ─────────────────────────────────────────────
+
+    async def _try_sparse_upsert(
+        self,
+        agent_id: NotBlankStr,
+        memory_id: NotBlankStr,
+        content: str,
+    ) -> None:
+        """Upsert a BM25 sparse vector (non-fatal, delegates to sparse_search)."""
+        if self._sparse_encoder is None or self._qdrant_client is None:
+            return
+        await async_try_sparse_upsert(
+            self._sparse_encoder,
+            self._qdrant_client,
+            self._mem0_config.collection_name,
+            agent_id,
+            memory_id,
+            content,
+        )
 
     # ── CRUD Operations ───────────────────────────────────────────
 
@@ -397,6 +450,7 @@ class Mem0MemoryBackend:
             msg = f"Failed to store memory: {exc}"
             raise MemoryStoreError(msg) from exc
         else:
+            await self._try_sparse_upsert(agent_id, memory_id, request.content)
             logger.info(
                 MEMORY_ENTRY_STORED,
                 agent_id=agent_id,
@@ -722,6 +776,26 @@ class Mem0MemoryBackend:
                     category=category.value if category else None,
                 )
             return total
+
+    # ── Sparse Search ──────────────────────────────────────────────
+
+    async def retrieve_sparse(
+        self,
+        agent_id: NotBlankStr,
+        query: MemoryQuery,
+    ) -> tuple[MemoryEntry, ...]:
+        """Retrieve memories via BM25 sparse search (delegates to sparse_search)."""
+        if not self.supports_sparse_search or self._sparse_encoder is None:
+            return ()
+        self._require_connected()
+        self._validate_agent_id(agent_id, error_cls=MemoryRetrievalError)
+        return await async_retrieve_sparse(
+            self._sparse_encoder,
+            self._qdrant_client,
+            self._mem0_config.collection_name,
+            agent_id,
+            query,
+        )
 
     # ── SharedKnowledgeStore ──────────────────────────────────────
     # Implementations live in shared.py to keep this file under

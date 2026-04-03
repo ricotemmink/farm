@@ -190,6 +190,14 @@ class Mem0BackendConfig(BaseModel):
     embedder: Mem0EmbedderConfig = Field(
         description="Embedder settings",
     )
+    sparse_search_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable BM25 sparse vector search alongside dense retrieval. "
+            "When True, a sparse vector field is added to the Qdrant "
+            "collection and sparse vectors are upserted on store."
+        ),
+    )
 
     @model_validator(mode="after")
     def _reject_traversal(self) -> Self:
@@ -310,6 +318,7 @@ def build_config_from_company_config(
     config: CompanyMemoryConfig,
     *,
     embedder: Mem0EmbedderConfig,
+    sparse_search_enabled: bool = False,
 ) -> Mem0BackendConfig:
     """Derive a ``Mem0BackendConfig`` from the top-level memory config.
 
@@ -317,6 +326,8 @@ def build_config_from_company_config(
         config: Company-wide memory configuration.
         embedder: Embedder settings (provider and model must be
             supplied explicitly to avoid vendor names in defaults).
+        sparse_search_enabled: Enable BM25 sparse vector search
+            alongside dense retrieval.
 
     Returns:
         Mem0-specific backend configuration.
@@ -357,4 +368,5 @@ def build_config_from_company_config(
     return Mem0BackendConfig(
         data_dir=config.storage.data_dir,
         embedder=embedder,
+        sparse_search_enabled=sparse_search_enabled,
     )

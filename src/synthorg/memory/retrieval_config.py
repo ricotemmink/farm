@@ -112,6 +112,23 @@ class MemoryRetrievalConfig(BaseModel):
         le=1000,
         description="RRF smoothing constant k (only used with RRF strategy)",
     )
+    query_reformulation_enabled: bool = Field(
+        default=False,
+        description=(
+            "Reserved for future query reformulation support in the "
+            "TOOL_BASED strategy. Not yet wired into the retrieval "
+            "pipeline -- must remain False until implemented."
+        ),
+    )
+    max_reformulation_rounds: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description=(
+            "Reserved for future query reformulation support (1-5). "
+            "Currently unused until reformulation is wired."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_weight_sum(self) -> Self:
@@ -150,30 +167,50 @@ class MemoryRetrievalConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _validate_supported_fusion_strategy(self) -> Self:
-        """Reject fusion strategies not yet wired into the retrieval pipeline."""
-        if self.fusion_strategy != FusionStrategy.LINEAR:
-            msg = (
-                f"Fusion strategy {self.fusion_strategy.value!r} is not yet "
-                f"wired into the retrieval pipeline; use "
-                f"fuse_ranked_lists() directly"
-            )
+    def _validate_reformulation_not_supported(self) -> Self:
+        """Reject query_reformulation_enabled until wiring is complete."""
+        if not self.query_reformulation_enabled:
+            return self
+        msg = (
+            "query_reformulation_enabled is not yet supported: "
+            "the retrieval pipeline does not consume this option"
+        )
+        logger.warning(
+            CONFIG_VALIDATION_FAILED,
+            field="query_reformulation_enabled",
+            value=self.query_reformulation_enabled,
+            reason=msg,
+        )
+        raise ValueError(msg)
+
+    @model_validator(mode="after")
+    def _validate_personal_boost_rrf_consistency(self) -> Self:
+        """Warn when personal_boost is explicitly set with RRF fusion."""
+        if (
+            self.fusion_strategy == FusionStrategy.RRF
+            and self.personal_boost > 0.0
+            and "personal_boost" in self.model_fields_set
+        ):
             logger.warning(
                 CONFIG_VALIDATION_FAILED,
-                field="fusion_strategy",
-                value=self.fusion_strategy.value,
-                reason=msg,
+                field="personal_boost",
+                value=self.personal_boost,
+                reason=(
+                    "personal_boost may not be applied when pure RRF "
+                    "is used; fallback to rank_memories (when sparse "
+                    "is empty) does apply personal_boost"
+                ),
             )
-            raise ValueError(msg)
         return self
 
     @model_validator(mode="after")
     def _validate_supported_strategy(self) -> Self:
         """Reject strategies that are not yet implemented."""
-        if self.strategy != InjectionStrategy.CONTEXT:
+        _supported = {InjectionStrategy.CONTEXT, InjectionStrategy.TOOL_BASED}
+        if self.strategy not in _supported:
             msg = (
                 f"Strategy {self.strategy.value!r} is not yet implemented; "
-                f"only {InjectionStrategy.CONTEXT.value!r} is supported"
+                f"supported: {sorted(s.value for s in _supported)}"
             )
             logger.warning(
                 CONFIG_VALIDATION_FAILED,

@@ -124,9 +124,11 @@ class TestMemoryRetrievalConfigStrategy:
         c = MemoryRetrievalConfig(strategy=InjectionStrategy.CONTEXT)
         assert c.strategy is InjectionStrategy.CONTEXT
 
-    def test_unsupported_strategy_rejected(self) -> None:
-        with pytest.raises(ValueError, match="not yet implemented"):
-            MemoryRetrievalConfig(strategy=InjectionStrategy.TOOL_BASED)
+    def test_tool_based_strategy_accepted(self) -> None:
+        c = MemoryRetrievalConfig(strategy=InjectionStrategy.TOOL_BASED)
+        assert c.strategy is InjectionStrategy.TOOL_BASED
+
+    def test_self_editing_strategy_rejected(self) -> None:
         with pytest.raises(ValueError, match="not yet implemented"):
             MemoryRetrievalConfig(strategy=InjectionStrategy.SELF_EDITING)
 
@@ -161,12 +163,20 @@ class TestMemoryRetrievalConfigFusion:
         c = MemoryRetrievalConfig()
         assert c.fusion_strategy is FusionStrategy.LINEAR
 
-    def test_rrf_fusion_strategy_rejected(self) -> None:
-        """RRF is not yet wired into the retrieval pipeline."""
-        with pytest.raises(
-            ValidationError, match="not yet wired into the retrieval pipeline"
-        ):
-            MemoryRetrievalConfig(fusion_strategy=FusionStrategy.RRF)
+    def test_rrf_fusion_strategy_accepted(self) -> None:
+        c = MemoryRetrievalConfig(fusion_strategy=FusionStrategy.RRF)
+        assert c.fusion_strategy is FusionStrategy.RRF
+
+    def test_rrf_skips_weight_sum_validation(self) -> None:
+        """RRF does not need relevance + recency weights to sum to 1."""
+        c = MemoryRetrievalConfig(
+            fusion_strategy=FusionStrategy.RRF,
+            relevance_weight=0.5,
+            recency_weight=0.3,
+        )
+        assert c.fusion_strategy is FusionStrategy.RRF
+        assert c.relevance_weight == 0.5
+        assert c.recency_weight == 0.3
 
     def test_linear_strategy_still_enforces_weight_sum(self) -> None:
         with pytest.raises(ValidationError, match=r"must equal 1\.0"):
@@ -203,3 +213,75 @@ class TestMemoryRetrievalConfigFusion:
         assert len(events) == 1
         assert events[0]["field"] == "rrf_k"
         assert "rrf_k is ignored" in events[0]["reason"]
+
+
+@pytest.mark.unit
+class TestMemoryRetrievalConfigReformulation:
+    def test_default_reformulation_disabled(self) -> None:
+        c = MemoryRetrievalConfig()
+        assert c.query_reformulation_enabled is False
+
+    def test_default_max_reformulation_rounds(self) -> None:
+        c = MemoryRetrievalConfig()
+        assert c.max_reformulation_rounds == 2
+
+    def test_reformulation_enabled_rejected(self) -> None:
+        """Reformulation is not yet wired -- reject with ValueError."""
+        with pytest.raises(ValueError, match="not yet supported"):
+            MemoryRetrievalConfig(query_reformulation_enabled=True)
+
+    def test_max_reformulation_rounds_zero_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            MemoryRetrievalConfig(max_reformulation_rounds=0)
+
+    def test_max_reformulation_rounds_six_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            MemoryRetrievalConfig(max_reformulation_rounds=6)
+
+    def test_max_reformulation_rounds_boundaries(self) -> None:
+        c1 = MemoryRetrievalConfig(max_reformulation_rounds=1)
+        assert c1.max_reformulation_rounds == 1
+        c5 = MemoryRetrievalConfig(max_reformulation_rounds=5)
+        assert c5.max_reformulation_rounds == 5
+
+
+@pytest.mark.unit
+class TestPersonalBoostRRFWarning:
+    def test_personal_boost_with_rrf_warns(self) -> None:
+        """personal_boost > 0 with RRF fusion emits a warning."""
+        with structlog.testing.capture_logs() as cap:
+            c = MemoryRetrievalConfig(
+                fusion_strategy=FusionStrategy.RRF,
+                personal_boost=0.1,
+            )
+        assert c.personal_boost == 0.1
+        events = [e for e in cap if e.get("event") == CONFIG_VALIDATION_FAILED]
+        assert len(events) == 1
+        assert "personal_boost" in events[0]["reason"]
+
+    def test_default_personal_boost_with_rrf_no_warning(self) -> None:
+        """Default personal_boost (0.1) should not warn -- only explicit."""
+        with structlog.testing.capture_logs() as cap:
+            c = MemoryRetrievalConfig(fusion_strategy=FusionStrategy.RRF)
+        assert c.personal_boost == 0.1
+        events = [
+            e
+            for e in cap
+            if e.get("event") == CONFIG_VALIDATION_FAILED
+            and e.get("field") == "personal_boost"
+        ]
+        assert len(events) == 0
+
+    def test_personal_boost_zero_with_rrf_no_warning(self) -> None:
+        with structlog.testing.capture_logs() as cap:
+            MemoryRetrievalConfig(
+                fusion_strategy=FusionStrategy.RRF,
+                personal_boost=0.0,
+            )
+        events = [
+            e
+            for e in cap
+            if e.get("event") == CONFIG_VALIDATION_FAILED
+            and e.get("field") == "personal_boost"
+        ]
+        assert len(events) == 0
