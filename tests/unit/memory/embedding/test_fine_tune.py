@@ -1,13 +1,24 @@
 """Tests for fine-tuning pipeline stage functions."""
 
+import json
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
+from synthorg.memory.embedding.cancellation import CancellationToken
 from synthorg.memory.embedding.fine_tune import (
     FineTuneStage,
-    contrastive_fine_tune,
+    _chunk_text,
+    _compute_metrics,
+    _generate_query,
+    _scan_documents,
     deploy_checkpoint,
     generate_training_data,
-    mine_hard_negatives,
+)
+from synthorg.memory.errors import (
+    FineTuneCancelledError,
+    FineTuneDependencyError,
 )
 
 
@@ -18,9 +29,56 @@ class TestFineTuneStage:
         assert FineTuneStage.GENERATING_DATA.value == "generating_data"
         assert FineTuneStage.MINING_NEGATIVES.value == "mining_negatives"
         assert FineTuneStage.TRAINING.value == "training"
+        assert FineTuneStage.EVALUATING.value == "evaluating"
         assert FineTuneStage.DEPLOYING.value == "deploying"
         assert FineTuneStage.COMPLETE.value == "complete"
         assert FineTuneStage.FAILED.value == "failed"
+
+
+# -- Helpers ----------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestChunkText:
+    def test_basic_chunking(self) -> None:
+        text = " ".join(f"word{i}" for i in range(20))
+        chunks = _chunk_text(text, chunk_size=10)
+        assert len(chunks) == 2
+
+    def test_empty_text(self) -> None:
+        assert _chunk_text("") == []
+
+    def test_single_chunk(self) -> None:
+        chunks = _chunk_text("hello world", chunk_size=100)
+        assert len(chunks) == 1
+        assert chunks[0] == "hello world"
+
+
+@pytest.mark.unit
+class TestGenerateQuery:
+    def test_extractive_fallback(self) -> None:
+        query = _generate_query("First sentence. Second.", None)
+        assert "First sentence" in query
+
+
+@pytest.mark.unit
+class TestScanDocuments:
+    def test_scans_text_files(self, tmp_path: Path) -> None:
+        (tmp_path / "doc.txt").write_text("hello")
+        (tmp_path / "readme.md").write_text("world")
+        (tmp_path / "data.json").write_text("{}")  # not scanned
+        results = _scan_documents(str(tmp_path))
+        assert len(results) == 2
+
+    def test_empty_dir(self, tmp_path: Path) -> None:
+        assert _scan_documents(str(tmp_path)) == []
+
+    def test_skips_empty_files(self, tmp_path: Path) -> None:
+        (tmp_path / "empty.txt").write_text("")
+        assert _scan_documents(str(tmp_path)) == []
+
+
+# -- Stage 1: Generate training data ----------------------------------
 
 
 @pytest.mark.unit
@@ -39,91 +97,206 @@ class TestGenerateTrainingData:
                 output_dir="   ",
             )
 
-    async def test_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError, match="training"):
+    async def test_no_documents_raises(self, tmp_path: Path) -> None:
+        src = tmp_path / "empty_src"
+        src.mkdir()
+        out = tmp_path / "out"
+        with pytest.raises(ValueError, match="No documents"):
             await generate_training_data(
-                source_dir="/source",
-                output_dir="/output",
+                source_dir=str(src),
+                output_dir=str(out),
             )
+
+    async def test_generates_training_and_validation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        # Need enough content for at least 2 chunks (512 words each).
+        (src / "doc1.txt").write_text("This is test content. " * 300)
+        (src / "doc2.txt").write_text("Another document here. " * 300)
+        out = tmp_path / "out"
+        train_path, val_path = await generate_training_data(
+            source_dir=str(src),
+            output_dir=str(out),
+            validation_split=0.3,
+        )
+        assert train_path.exists()
+        assert val_path.exists()
+        train_lines = [ln for ln in train_path.read_text().splitlines() if ln.strip()]
+        val_lines = [ln for ln in val_path.read_text().splitlines() if ln.strip()]
+        assert len(train_lines) >= 1
+        assert len(val_lines) >= 1
+        # Validate JSONL format.
+        pair = json.loads(train_lines[0])
+        assert "query" in pair
+        assert "positive_passage" in pair
+
+    async def test_progress_callback_called(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "a.txt").write_text("content one")
+        (src / "b.txt").write_text("content two")
+        out = tmp_path / "out"
+        progress_values: list[float] = []
+        await generate_training_data(
+            source_dir=str(src),
+            output_dir=str(out),
+            progress_callback=progress_values.append,
+        )
+        assert len(progress_values) >= 2
+        assert progress_values[-1] == 1.0
+
+    async def test_cancellation_checked(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "doc.txt").write_text("content")
+        out = tmp_path / "out"
+        token = CancellationToken()
+        token.cancel()
+        with pytest.raises(FineTuneCancelledError):
+            await generate_training_data(
+                source_dir=str(src),
+                output_dir=str(out),
+                cancellation=token,
+            )
+
+
+# -- Stage 2: Mine hard negatives (mock-based) -----------------------
 
 
 @pytest.mark.unit
 class TestMineHardNegatives:
     async def test_rejects_blank_training_data_path(self) -> None:
+        from synthorg.memory.embedding.fine_tune import (
+            mine_hard_negatives,
+        )
+
         with pytest.raises(ValueError, match="training_data_path"):
             await mine_hard_negatives(
                 training_data_path="   ",
-                base_model="test-model",
+                base_model="test-small-001",
                 output_dir="/output",
             )
 
-    async def test_rejects_blank_base_model(self) -> None:
-        with pytest.raises(ValueError, match="base_model"):
+    async def test_dependency_error_without_sentence_transformers(
+        self,
+    ) -> None:
+        from synthorg.memory.embedding.fine_tune import (
+            mine_hard_negatives,
+        )
+
+        with (
+            patch(
+                "synthorg.memory.embedding.fine_tune._import_sentence_transformers",
+                side_effect=FineTuneDependencyError("missing"),
+            ),
+            pytest.raises(FineTuneDependencyError),
+        ):
             await mine_hard_negatives(
-                training_data_path="/data",
-                base_model="   ",
+                training_data_path="/data/train.jsonl",
+                base_model="test-small-001",
                 output_dir="/output",
             )
 
-    async def test_rejects_blank_output_dir(self) -> None:
-        with pytest.raises(ValueError, match="output_dir"):
-            await mine_hard_negatives(
-                training_data_path="/data",
-                base_model="test-model",
-                output_dir="   ",
-            )
 
-    async def test_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError, match="mining"):
-            await mine_hard_negatives(
-                training_data_path="/data",
-                base_model="test-model",
-                output_dir="/output",
-            )
+# -- Stage 3: Contrastive fine-tuning (mock-based) -------------------
 
 
 @pytest.mark.unit
 class TestContrastiveFineTune:
     async def test_rejects_blank_training_data_path(self) -> None:
+        from synthorg.memory.embedding.fine_tune import (
+            contrastive_fine_tune,
+        )
+
         with pytest.raises(ValueError, match="training_data_path"):
             await contrastive_fine_tune(
                 training_data_path="   ",
-                base_model="test-model",
+                base_model="test-small-001",
                 output_dir="/output",
             )
 
-    async def test_rejects_blank_base_model(self) -> None:
-        with pytest.raises(ValueError, match="base_model"):
-            await contrastive_fine_tune(
-                training_data_path="/data",
-                base_model="   ",
-                output_dir="/output",
+    @pytest.mark.parametrize(
+        ("param", "value", "match"),
+        [
+            ("epochs", 0, "epochs"),
+            ("batch_size", 0, "batch_size"),
+            ("learning_rate", -0.001, "learning_rate"),
+            ("temperature", 0.0, "temperature"),
+        ],
+    )
+    async def test_rejects_invalid_hyperparameters(
+        self,
+        param: str,
+        value: float,
+        match: str,
+    ) -> None:
+        from typing import Any
+
+        from synthorg.memory.embedding.fine_tune import (
+            contrastive_fine_tune,
+        )
+
+        kwargs: dict[str, Any] = {
+            "training_data_path": "/data",
+            "base_model": "test-small-001",
+            "output_dir": "/output",
+            param: value,
+        }
+        with pytest.raises(ValueError, match=match):
+            await contrastive_fine_tune(**kwargs)
+
+
+# -- Stage 4: Evaluation (mock-based) --------------------------------
+
+
+@pytest.mark.unit
+class TestEvaluateCheckpoint:
+    async def test_rejects_blank_checkpoint_path(self) -> None:
+        from synthorg.memory.embedding.fine_tune import (
+            evaluate_checkpoint,
+        )
+
+        with pytest.raises(ValueError, match="checkpoint_path"):
+            await evaluate_checkpoint(
+                checkpoint_path="   ",
+                base_model="test-small-001",
+                validation_data_path="/val.jsonl",
+                output_dir="/out",
             )
 
-    async def test_rejects_blank_output_dir(self) -> None:
-        with pytest.raises(ValueError, match="output_dir"):
-            await contrastive_fine_tune(
-                training_data_path="/data",
-                base_model="test-model",
-                output_dir="   ",
+    async def test_rejects_empty_validation_data(self) -> None:
+        from synthorg.memory.embedding.fine_tune import (
+            evaluate_checkpoint,
+        )
+
+        with (
+            patch(
+                "synthorg.memory.embedding.fine_tune._import_sentence_transformers",
+            ),
+            patch(
+                "synthorg.memory.embedding.fine_tune._read_jsonl",
+                return_value=[],
+            ),
+            pytest.raises(ValueError, match="empty"),
+        ):
+            await evaluate_checkpoint(
+                checkpoint_path="/cp",
+                base_model="test-small-001",
+                validation_data_path="/val.jsonl",
+                output_dir="/out",
             )
 
-    async def test_rejects_zero_epochs(self) -> None:
-        with pytest.raises(ValueError, match="epochs"):
-            await contrastive_fine_tune(
-                training_data_path="/data",
-                base_model="test-model",
-                output_dir="/output",
-                epochs=0,
-            )
 
-    async def test_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError, match="training"):
-            await contrastive_fine_tune(
-                training_data_path="/data",
-                base_model="test-model",
-                output_dir="/output",
-            )
+# -- Stage 5: Deploy checkpoint ---------------------------------------
 
 
 @pytest.mark.unit
@@ -132,8 +305,50 @@ class TestDeployCheckpoint:
         with pytest.raises(ValueError, match="checkpoint_path"):
             await deploy_checkpoint(checkpoint_path="   ")
 
-    async def test_raises_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError, match="deploy"):
+    async def test_rejects_nonexistent_path(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        missing = tmp_path / "definitely_missing_dir"
+        with pytest.raises(ValueError, match="does not exist"):
             await deploy_checkpoint(
-                checkpoint_path="/models/checkpoint",
+                checkpoint_path=str(missing),
             )
+
+    async def test_returns_none_without_settings_service(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        cp_dir = tmp_path / "checkpoint"
+        cp_dir.mkdir()
+        result = await deploy_checkpoint(checkpoint_path=str(cp_dir))
+        assert result is None
+        # No backup file created when no settings_service.
+        backup = cp_dir.parent / "backup_config.json"
+        assert not backup.exists()
+
+
+# -- Compute metrics --------------------------------------------------
+
+
+@pytest.mark.unit
+class TestComputeMetrics:
+    def test_perfect_ranking(self) -> None:
+        import numpy as np
+
+        n = 5
+        embs = np.eye(n, dtype=np.float32)
+        ndcg, recall = _compute_metrics(embs, embs)
+        assert ndcg == pytest.approx(1.0)
+        assert recall == pytest.approx(1.0)
+
+    def test_random_embeddings_positive(self) -> None:
+        import numpy as np
+
+        rng = np.random.default_rng(42)
+        n = 20
+        q = rng.random((n, 64)).astype(np.float32)
+        p = rng.random((n, 64)).astype(np.float32)
+        ndcg, recall = _compute_metrics(q, p)
+        assert 0.0 <= ndcg <= 1.0
+        assert 0.0 <= recall <= 1.0
