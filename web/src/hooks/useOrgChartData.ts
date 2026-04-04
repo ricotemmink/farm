@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo } from 'react'
+import { createLogger } from '@/lib/logger'
 import type { Node, Edge } from '@xyflow/react'
 import { useCompanyStore } from '@/stores/company'
 import { useAgentsStore } from '@/stores/agents'
@@ -12,6 +13,8 @@ import type { CommunicationLink } from '@/pages/org/aggregate-messages'
 import type { CommunicationEdgeData } from '@/pages/org/CommunicationEdge'
 import type { ViewMode } from '@/pages/org/OrgChartToolbar'
 import type { WsChannel } from '@/api/types'
+
+const log = createLogger('useOrgChartData')
 
 const ORG_POLL_INTERVAL = 30_000
 const ORG_CHANNELS = ['agents'] as const satisfies readonly WsChannel[]
@@ -65,12 +68,12 @@ export function useOrgChartData(viewMode: ViewMode = 'hierarchy'): UseOrgChartDa
     companyStore.fetchCompanyData().then(() => {
       if (useCompanyStore.getState().config) {
         companyStore.fetchDepartmentHealths().catch((err: unknown) => {
-          console.warn('[useOrgChartData] fetchDepartmentHealths failed:', err)
+          log.warn('fetchDepartmentHealths failed:', err)
         })
       }
       polling.start()
     }).catch((err: unknown) => {
-      console.warn('[useOrgChartData] fetchCompanyData failed:', err)
+      log.warn('fetchCompanyData failed:', err)
       polling.start()
     })
     return () => polling.stop()

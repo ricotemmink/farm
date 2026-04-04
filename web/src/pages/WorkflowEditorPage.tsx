@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo } from 'react'
+import { createLogger } from '@/lib/logger'
 import { ReactFlow, ReactFlowProvider, Background, type Node } from '@xyflow/react'
 import type { MouseEvent as ReactMouseEvent } from 'react'
 import { Workflow } from 'lucide-react'
@@ -22,6 +23,8 @@ import { WorkflowNodeDrawer } from './workflow-editor/WorkflowNodeDrawer'
 import { WorkflowYamlPreview } from './workflow-editor/WorkflowYamlPreview'
 import { WorkflowEditorSkeleton } from './workflow-editor/WorkflowEditorSkeleton'
 
+const log = createLogger('WorkflowEditor')
+
 // Declared outside component for stable reference identity
 const nodeTypes = {
   start: StartNode,
@@ -44,7 +47,7 @@ function saveViewport(viewport: { x: number; y: number; zoom: number }) {
   try {
     localStorage.setItem(VIEWPORT_KEY, JSON.stringify(viewport))
   } catch (err) {
-    console.warn('Failed to save viewport to localStorage:', err)
+    log.warn('Failed to save viewport to localStorage:', err)
   }
 }
 
@@ -63,7 +66,7 @@ function loadViewport(): { x: number; y: number; zoom: number } | undefined {
       return parsed as { x: number; y: number; zoom: number }
     }
   } catch (err) {
-    console.warn('Failed to load viewport from localStorage:', err)
+    log.warn('Failed to load viewport from localStorage:', err)
   }
   return undefined
 }

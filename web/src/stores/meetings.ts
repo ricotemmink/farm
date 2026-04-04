@@ -2,12 +2,15 @@ import { create } from 'zustand'
 import * as meetingsApi from '@/api/endpoints/meetings'
 import { getErrorMessage } from '@/utils/errors'
 import { sanitizeForLog } from '@/utils/logging'
+import { createLogger } from '@/lib/logger'
 import type {
   MeetingFilters,
   MeetingResponse,
   TriggerMeetingRequest,
   WsEvent,
 } from '@/api/types'
+
+const log = createLogger('meetings')
 
 export interface MeetingsState {
   // Data
@@ -72,7 +75,7 @@ export const useMeetingsStore = create<MeetingsState>()((set, get) => ({
       })
     } catch (err) {
       if (seq !== listRequestSeq) {
-        console.warn('[meetings] Discarding error from stale list request:', sanitizeForLog(err))
+        log.warn('Discarding error from stale list request:', getErrorMessage(err))
         return
       }
       set({ loading: false, error: getErrorMessage(err) })
@@ -93,7 +96,7 @@ export const useMeetingsStore = create<MeetingsState>()((set, get) => ({
       set({ selectedMeeting: meeting, loadingDetail: false, detailError: null })
     } catch (err) {
       if (seq !== detailRequestSeq) {
-        console.warn('[meetings] Discarding error from stale detail request:', sanitizeForLog(err))
+        log.warn('Discarding error from stale detail request:', getErrorMessage(err))
         return
       }
       set({ loadingDetail: false, detailError: getErrorMessage(err) })
@@ -111,7 +114,7 @@ export const useMeetingsStore = create<MeetingsState>()((set, get) => ({
       }))
       return meetings
     } catch (err) {
-      console.error('[meetings] triggerMeeting failed:', sanitizeForLog(err))
+      log.error('triggerMeeting failed:', getErrorMessage(err))
       set({ triggering: false })
       throw err
     }
@@ -120,7 +123,7 @@ export const useMeetingsStore = create<MeetingsState>()((set, get) => ({
   handleWsEvent: (event) => {
     const { payload } = event
     if (!payload.meeting || typeof payload.meeting !== 'object' || Array.isArray(payload.meeting)) {
-      console.debug('[meetings/ws] Event has no meeting payload, skipping:', event.event_type)
+      log.warn('Event has no meeting payload, skipping:', event.event_type)
       return
     }
     const candidate = payload.meeting as Record<string, unknown>
@@ -136,7 +139,7 @@ export const useMeetingsStore = create<MeetingsState>()((set, get) => ({
     ) {
       get().upsertMeeting(candidate as unknown as MeetingResponse)
     } else {
-      console.error('[meetings/ws] Received malformed meeting payload, skipping upsert', {
+      log.error('Received malformed meeting WS payload, skipping upsert', {
         meeting_id: sanitizeForLog(candidate.meeting_id),
         hasStatus: typeof candidate.status === 'string',
         hasTypeName: typeof candidate.meeting_type_name === 'string',

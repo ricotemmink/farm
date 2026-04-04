@@ -1,7 +1,10 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
+import { createLogger } from '@/lib/logger'
 import type { SettingEntry, SettingNamespace } from '@/api/types'
 import { useToastStore } from '@/stores/toast'
 import { saveSettingsBatch } from '@/pages/settings/utils'
+
+const log = createLogger('useSettingsDirtyState')
 
 export interface UseSettingsDirtyStateReturn {
   dirtyValues: Map<string, string>
@@ -93,8 +96,8 @@ export function useSettingsDirtyState(
         })
       }
     } catch (err) {
-      console.error(
-        '[settings] Unexpected error in handleSave:',
+      log.error(
+        'Unexpected error in handleSave:',
         err,
       )
       useToastStore.getState().add({

@@ -5,6 +5,7 @@ import { listDepartments, getDepartmentHealth } from '@/api/endpoints/company'
 import { listActivities } from '@/api/endpoints/activities'
 import { computeOrgHealth, wsEventToActivityItem } from '@/utils/dashboard'
 import { getErrorMessage } from '@/utils/errors'
+import { createLogger } from '@/lib/logger'
 import type {
   ActivityItem,
   BudgetConfig,
@@ -13,6 +14,8 @@ import type {
   OverviewMetrics,
   WsEvent,
 } from '@/api/types'
+
+const log = createLogger('analytics')
 
 const MAX_ACTIVITIES = 50
 
@@ -70,7 +73,7 @@ export const useAnalyticsStore = create<AnalyticsState>()((set, get) => ({
         const deptResult = await listDepartments({ limit: 100 })
         const healthPromises = deptResult.data.map((dept) =>
           getDepartmentHealth(dept.name).catch((err: unknown) => {
-            console.warn(`Failed to fetch health for ${dept.name}:`, err)
+            log.warn('Failed to fetch health for dept:', dept.name, err)
             return null
           }),
         )
@@ -79,7 +82,7 @@ export const useAnalyticsStore = create<AnalyticsState>()((set, get) => ({
           (h): h is DepartmentHealth => h !== null,
         )
       } catch (err) {
-        console.warn('Failed to fetch department list:', err)
+        log.warn('Failed to fetch department list:', getErrorMessage(err))
       }
 
       const orgHealthPercent = computeOrgHealth(departmentHealths)
@@ -103,8 +106,8 @@ export const useAnalyticsStore = create<AnalyticsState>()((set, get) => ({
     try {
       const overview = await getOverviewMetrics()
       set({ overview })
-    } catch {
-      // Lightweight refresh -- don't set error for polling failures
+    } catch (err) {
+      log.warn('Failed to refresh overview (polling):', getErrorMessage(err))
     }
   },
 
@@ -119,7 +122,7 @@ export const useAnalyticsStore = create<AnalyticsState>()((set, get) => ({
       const item = wsEventToActivityItem(event)
       get().pushActivity(item)
     } catch (err) {
-      console.error('Failed to process WebSocket event:', err)
+      log.error('Failed to process WebSocket event:', err)
     }
   },
 }))

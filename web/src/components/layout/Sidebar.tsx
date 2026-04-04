@@ -22,6 +22,7 @@ import {
   Workflow,
   X,
 } from 'lucide-react'
+import { createLogger } from '@/lib/logger'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/hooks/useAuth'
 import { useBreakpoint } from '@/hooks/useBreakpoint'
@@ -33,6 +34,8 @@ import { ROUTES } from '@/router/routes'
 import { Drawer } from '@/components/ui/drawer'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { SidebarNavItem } from './SidebarNavItem'
+
+const log = createLogger('Sidebar')
 
 export const STORAGE_KEY = 'sidebar_collapsed'
 
@@ -80,7 +83,7 @@ export function Sidebar({ overlayOpen = false, onOverlayClose }: SidebarProps) {
 
   useEffect(() => {
     if (process.env.NODE_ENV !== 'production' && overlayOpen && !onOverlayClose) {
-      console.warn('Sidebar: `onOverlayClose` is required when `overlayOpen` is true -- dismiss actions will be inert.')
+      log.warn('`onOverlayClose` is required when `overlayOpen` is true -- dismiss actions will be inert.')
     }
   }, [overlayOpen, onOverlayClose])
 

@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import * as tasksApi from '@/api/endpoints/tasks'
 import { getErrorMessage } from '@/utils/errors'
+import { sanitizeForLog } from '@/utils/logging'
+import { createLogger } from '@/lib/logger'
 import type {
   CancelTaskRequest,
   CreateTaskRequest,
@@ -11,6 +13,8 @@ import type {
   UpdateTaskRequest,
   WsEvent,
 } from '@/api/types'
+
+const log = createLogger('tasks')
 
 interface TasksState {
   // Data
@@ -118,8 +122,8 @@ export const useTasksStore = create<TasksState>()((set, get) => ({
         if (pendingTransitions.has(candidate.id as string)) return
         get().upsertTask(candidate as unknown as Task)
       } else {
-        console.error('[tasks/ws] Received malformed task payload, skipping upsert', {
-          id: candidate.id,
+        log.error('Received malformed task WS payload, skipping upsert', {
+          id: sanitizeForLog(candidate.id),
           hasTitle: typeof candidate.title === 'string',
           hasStatus: typeof candidate.status === 'string',
         })

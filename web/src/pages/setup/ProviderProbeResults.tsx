@@ -1,7 +1,10 @@
 import { useState } from 'react'
+import { createLogger } from '@/lib/logger'
 import { Check, X, Loader2, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import type { ProviderPreset, ProbePresetResponse, ProviderConfig } from '@/api/types'
+
+const log = createLogger('setup')
 
 interface ProbeResultItemProps {
   preset: ProviderPreset
@@ -81,7 +84,7 @@ export function ProviderProbeResults({
     } catch (err) {
       // Expected: store sets providersError before re-throwing.
       // Log unexpected errors for debugging.
-      console.error('ProviderProbeResults: add preset failed:', err)
+      log.error('Add preset failed:', err)
     } finally {
       setAddingPreset(null)
     }

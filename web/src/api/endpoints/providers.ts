@@ -1,3 +1,4 @@
+import { createLogger } from '@/lib/logger'
 import { apiClient, unwrap, unwrapVoid } from '../client'
 import type {
   AddAllowlistEntryRequest,
@@ -18,6 +19,8 @@ import type {
   TestConnectionResponse,
   UpdateProviderRequest,
 } from '../types'
+
+const log = createLogger('providers-api')
 
 export async function listProviders(): Promise<Record<string, ProviderConfig>> {
   const response = await apiClient.get<ApiResponse<Record<string, ProviderConfig>>>('/providers')
@@ -142,7 +145,7 @@ function processSseLines(
       } catch (err) {
         state.currentEvent = ''
         if (err instanceof SyntaxError) {
-          console.warn('[SSE] Malformed JSON in pull stream line')
+          log.warn('Malformed JSON in pull stream line')
           continue
         }
         if (err instanceof Error) throw err

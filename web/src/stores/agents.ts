@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { listAgents, getAgent, getAgentPerformance, getAgentActivity, getAgentHistory } from '@/api/endpoints/agents'
 import { listTasks } from '@/api/endpoints/tasks'
 import { getErrorMessage } from '@/utils/errors'
+import { createLogger } from '@/lib/logger'
 import type {
   AgentActivityEvent,
   AgentConfig,
@@ -15,6 +16,8 @@ import type {
 } from '@/api/types'
 import type { AgentRuntimeStatus } from '@/lib/utils'
 import type { AgentSortKey } from '@/utils/agents'
+
+const log = createLogger('agents')
 
 const MAX_ACTIVITIES = 100
 
@@ -186,7 +189,7 @@ export const useAgentsStore = create<AgentsState>()((set, get) => ({
     } catch (err) {
       // Pagination failure -- existing data preserved, log for debugging
       set({ activityLoading: false })
-      console.warn('Failed to load more activity:', getErrorMessage(err))
+      log.warn('Failed to load more activity:', getErrorMessage(err))
     }
   },
 

@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react'
+import { createLogger } from '@/lib/logger'
 import type { LogLevel, SinkInfo, TestSinkResult } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Drawer } from '@/components/ui/drawer'
@@ -6,6 +7,8 @@ import { InputField } from '@/components/ui/input-field'
 import { SelectField } from '@/components/ui/select-field'
 import { TagInput } from '@/components/ui/tag-input'
 import { ToggleField } from '@/components/ui/toggle-field'
+
+const log = createLogger('sinks')
 
 const LOG_LEVELS = [
   { value: 'DEBUG', label: 'Debug' },
@@ -96,7 +99,7 @@ export function SinkFormDrawer({ open, onClose, sink, isNew, onTest, onSave }: S
       const result = await onTest(payload)
       setTestResult(result)
     } catch (err) {
-      console.error('[sinks] Test config failed:', err)
+      log.error('Test config failed:', err)
       const message = err instanceof Error ? err.message : 'Test request failed'
       setTestResult({ valid: false, error: message })
     } finally {

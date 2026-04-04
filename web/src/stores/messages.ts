@@ -2,7 +2,10 @@ import { create } from 'zustand'
 import * as messagesApi from '@/api/endpoints/messages'
 import { getErrorMessage } from '@/utils/errors'
 import { sanitizeForLog } from '@/utils/logging'
+import { createLogger } from '@/lib/logger'
 import type { Channel, Message, WsEvent } from '@/api/types'
+
+const log = createLogger('messages')
 
 const MESSAGES_FETCH_LIMIT = 50
 
@@ -31,8 +34,8 @@ function parseWsMessage(
     typeof c.metadata !== 'object' ||
     Array.isArray(c.metadata)
   ) {
-    console.error(
-      '[messages/ws] Malformed payload, skipping',
+    log.error(
+      'Malformed WS payload, skipping',
       {
         id: sanitizeForLog(c.id),
         hasSender: typeof c.sender === 'string',
