@@ -264,8 +264,8 @@ class LlmCalibrationRecord(BaseModel):
     )
 
 
-class CollaborationOverride(BaseModel):
-    """Human-applied override for an agent's collaboration score.
+class _BaseOverride(BaseModel):
+    """Shared base for human-applied score overrides.
 
     Attributes:
         id: Unique override identifier.
@@ -316,6 +316,14 @@ class CollaborationOverride(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+
+class CollaborationOverride(_BaseOverride):
+    """Human-applied override for an agent's collaboration score."""
+
+
+class QualityOverride(_BaseOverride):
+    """Human-applied override for an agent's quality score."""
 
 
 class TrendResult(BaseModel):

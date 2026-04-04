@@ -67,7 +67,11 @@ from synthorg.core.approval import ApprovalItem  # noqa: TC001
 from synthorg.engine.coordination.service import MultiAgentCoordinator  # noqa: TC001
 from synthorg.engine.review_gate import ReviewGateService
 from synthorg.engine.task_engine import TaskEngine  # noqa: TC001
-from synthorg.hr.performance.tracker import PerformanceTracker  # noqa: TC001
+from synthorg.hr.performance.config import PerformanceConfig
+from synthorg.hr.performance.quality_protocol import (
+    QualityScoringStrategy,  # noqa: TC001
+)
+from synthorg.hr.performance.tracker import PerformanceTracker
 from synthorg.hr.registry import AgentRegistryService  # noqa: TC001
 from synthorg.observability import get_logger
 from synthorg.observability.config import DEFAULT_SINKS, LogConfig
@@ -91,6 +95,7 @@ from synthorg.persistence.filesystem_artifact_storage import (
     FileSystemArtifactStorage,
 )
 from synthorg.persistence.protocol import PersistenceBackend  # noqa: TC001
+from synthorg.providers.errors import DriverNotRegisteredError
 from synthorg.providers.health import ProviderHealthTracker  # noqa: TC001
 from synthorg.providers.health_prober import ProviderHealthProber  # noqa: TC001
 from synthorg.providers.registry import ProviderRegistry  # noqa: TC001
@@ -388,6 +393,7 @@ def _build_lifecycle(  # noqa: PLR0913, C901
                     bridge,
                     message_bus,
                     persistence,
+                    performance_tracker=app_state._performance_tracker,  # noqa: SLF001
                 )
                 raise
         await _maybe_bootstrap_agents(app_state)
@@ -429,6 +435,7 @@ def _build_lifecycle(  # noqa: PLR0913, C901
             bridge,
             message_bus,
             persistence,
+            performance_tracker=app_state._performance_tracker,  # noqa: SLF001
         )
 
     return [on_startup], [on_shutdown]
@@ -489,6 +496,122 @@ def _bootstrap_app_logging(effective_config: RootConfig) -> RootConfig:
     )
     bootstrap_logging(patched)
     return patched
+
+
+def _resolve_llm_judge_strategy(
+    cfg: PerformanceConfig,
+    *,
+    provider_registry: ProviderRegistry,
+    cost_tracker: CostTracker | None,
+) -> QualityScoringStrategy | None:
+    """Resolve the LLM judge strategy from config.
+
+    Returns ``None`` if the judge model is not configured, the named
+    provider is not registered, or no providers are available.
+
+    Args:
+        cfg: Performance configuration.
+        provider_registry: Provider registry for LLM judge calls.
+        cost_tracker: Optional cost tracker for judge cost recording.
+
+    Returns:
+        Configured LLM judge strategy, or ``None``.
+    """
+    if cfg.quality_judge_model is None:
+        return None
+
+    judge_provider_name = cfg.quality_judge_provider
+    if judge_provider_name is not None:
+        try:
+            provider_driver = provider_registry.get(str(judge_provider_name))
+        except DriverNotRegisteredError:
+            logger.warning(
+                API_APP_STARTUP,
+                note="Quality judge provider not found, LLM judge disabled",
+                provider=str(judge_provider_name),
+            )
+            return None
+    else:
+        available = provider_registry.list_providers()
+        if not available:
+            logger.warning(
+                API_APP_STARTUP,
+                note="No providers available, LLM judge disabled",
+            )
+            return None
+        provider_driver = provider_registry.get(available[0])
+
+    from synthorg.hr.performance.llm_judge_quality_strategy import (  # noqa: PLC0415
+        LlmJudgeQualityStrategy,
+    )
+
+    logger.info(
+        API_APP_STARTUP,
+        note="Quality LLM judge configured",
+        model=str(cfg.quality_judge_model),
+    )
+    return LlmJudgeQualityStrategy(
+        provider=provider_driver,
+        model=cfg.quality_judge_model,
+        cost_tracker=cost_tracker,
+    )
+
+
+def _build_performance_tracker(
+    *,
+    cost_tracker: CostTracker | None = None,
+    provider_registry: ProviderRegistry | None = None,
+    perf_config: PerformanceConfig | None = None,
+) -> PerformanceTracker:
+    """Build a PerformanceTracker with composite quality strategy.
+
+    Always wires a ``QualityOverrideStore`` (human overrides are free).
+    Delegates LLM judge resolution to :func:`_resolve_llm_judge_strategy`.
+
+    Args:
+        cost_tracker: Optional cost tracker for judge cost recording.
+        provider_registry: Provider registry for LLM judge calls.
+        perf_config: Performance configuration (default config if None).
+
+    Returns:
+        Configured performance tracker.
+    """
+    from synthorg.hr.performance.ci_quality_strategy import (  # noqa: PLC0415
+        CISignalQualityStrategy,
+    )
+    from synthorg.hr.performance.composite_quality_strategy import (  # noqa: PLC0415
+        CompositeQualityStrategy,
+    )
+    from synthorg.hr.performance.quality_override_store import (  # noqa: PLC0415
+        QualityOverrideStore,
+    )
+
+    cfg = perf_config or PerformanceConfig()
+    quality_override_store = QualityOverrideStore()
+
+    llm_strategy = (
+        _resolve_llm_judge_strategy(
+            cfg,
+            provider_registry=provider_registry,
+            cost_tracker=cost_tracker,
+        )
+        if provider_registry is not None
+        else None
+    )
+
+    composite = CompositeQualityStrategy(
+        ci_strategy=CISignalQualityStrategy(),
+        llm_strategy=llm_strategy,
+        override_store=quality_override_store,
+        ci_weight=cfg.quality_ci_weight,
+        llm_weight=cfg.quality_llm_weight,
+    )
+
+    return PerformanceTracker(
+        quality_strategy=composite,
+        config=cfg,
+        quality_override_store=quality_override_store,
+    )
 
 
 def create_app(  # noqa: PLR0913, PLR0915
@@ -637,6 +760,16 @@ def create_app(  # noqa: PLR0913, PLR0915
     if meeting_scheduler is not None and meeting_scheduler._event_publisher is None:  # noqa: SLF001
         meeting_scheduler._event_publisher = _make_meeting_publisher(  # noqa: SLF001
             channels_plugin,
+        )
+
+    # Auto-wire performance tracker with composite quality strategy
+    # when not explicitly injected (production path).
+    # TODO(#1061): pass effective_config.performance once RootConfig
+    # has a PerformanceConfig field -- currently uses defaults.
+    if performance_tracker is None:
+        performance_tracker = _build_performance_tracker(
+            cost_tracker=cost_tracker,
+            provider_registry=provider_registry,
         )
 
     app_state = AppState(
