@@ -1,11 +1,12 @@
 """Export the Litestar OpenAPI schema and generate a standalone Scalar UI page.
 
 Used by CI (pages.yml, pages-preview.yml) to generate:
-- ``docs/_generated/openapi.json`` -- raw OpenAPI schema
-- ``docs/_generated/api-reference.html`` -- standalone Scalar UI page
+- ``docs/openapi/openapi.json`` -- raw OpenAPI schema
+- ``docs/openapi/reference.html`` -- standalone Scalar UI page
 
-Both are generated before the docs build so the docs site can
-link to the interactive API reference.
+Both are written as siblings of ``docs/openapi/index.md`` (the REST API
+landing page) so the docs build copies them into ``_site/docs/openapi/``
+as static assets alongside the rendered landing page.
 
 Can also be run locally before ``zensical build`` to preview the
 API reference page (see Quick Commands in CLAUDE.md).
@@ -18,12 +19,16 @@ from pathlib import Path
 
 # Repository root is the parent of the scripts/ directory
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OUTPUT_DIR = REPO_ROOT / "docs" / "_generated"
+OUTPUT_DIR = REPO_ROOT / "docs" / "openapi"
 SCHEMA_FILE = OUTPUT_DIR / "openapi.json"
-HTML_FILE = OUTPUT_DIR / "api-reference.html"
+HTML_FILE = OUTPUT_DIR / "reference.html"
 
-# Pinned for stability; update after testing newer releases in local preview
+# Pinned for stability; update after testing newer releases in local preview.
+# When bumping SCALAR_VERSION, recompute SCALAR_SRI:
+#   curl -sL "https://cdn.jsdelivr.net/npm/@scalar/api-reference@<VERSION>" \
+#     | openssl dgst -sha384 -binary | openssl base64 -A
 SCALAR_VERSION = "1.48.5"
+SCALAR_SRI = "sha384-l6LAVhtmxWg9mKRgVbB+DB/wFX+V9aQie5dzkMMvz+f4TO2B/0vRuSFsOdZraKZC"
 
 STANDALONE_HTML = """\
 <!DOCTYPE html>
@@ -67,7 +72,7 @@ STANDALONE_HTML = """\
   <div class="banner">
     Static snapshot of the OpenAPI schema --
     when running locally, use the live docs at <code>/docs/api</code> instead.
-    <a href="../">&larr; Back to docs</a>
+    <a href="./">&larr; Back to overview</a>
   </div>
 
   <script
@@ -75,7 +80,11 @@ STANDALONE_HTML = """\
     data-url="openapi.json"
     data-configuration='{"theme": "default", "layout": "modern"}'
   ></script>
-  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@SCALAR_VERSION"></script>
+  <script
+    src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@SCALAR_VERSION"
+    integrity="SCALAR_SRI"
+    crossorigin="anonymous"
+  ></script>
   <noscript>
     <p style="padding: 2rem; text-align: center;">
       This API reference requires JavaScript to render.
@@ -84,7 +93,7 @@ STANDALONE_HTML = """\
   </noscript>
 </body>
 </html>
-""".replace("SCALAR_VERSION", SCALAR_VERSION)
+""".replace("SCALAR_VERSION", SCALAR_VERSION).replace("SCALAR_SRI", SCALAR_SRI)
 
 
 def main() -> int:
