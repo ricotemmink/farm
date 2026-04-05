@@ -619,3 +619,9 @@ class TestFuseRankedLists:
     def test_max_results_below_one_raises(self, bad_max: int) -> None:
         with pytest.raises(ValueError, match=r"max_results must be >= 1"):
             fuse_ranked_lists((), max_results=bad_max)
+
+
+# ── Diversity re-ranking ───────────────────────────────────────────
+# Tests for ``_bigram_jaccard`` and ``apply_diversity_penalty`` live in
+# ``test_ranking_diversity.py`` -- split from this file to stay under
+# the 800-line file convention.

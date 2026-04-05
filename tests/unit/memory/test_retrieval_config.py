@@ -216,6 +216,69 @@ class TestMemoryRetrievalConfigFusion:
 
 
 @pytest.mark.unit
+class TestMemoryRetrievalConfigDiversity:
+    def test_default_diversity_disabled(self) -> None:
+        c = MemoryRetrievalConfig()
+        assert c.diversity_penalty_enabled is False
+
+    def test_default_diversity_lambda(self) -> None:
+        c = MemoryRetrievalConfig()
+        assert c.diversity_lambda == 0.7
+
+    def test_diversity_enabled(self) -> None:
+        c = MemoryRetrievalConfig(diversity_penalty_enabled=True)
+        assert c.diversity_penalty_enabled is True
+
+    def test_diversity_lambda_boundaries(self) -> None:
+        c0 = MemoryRetrievalConfig(
+            diversity_penalty_enabled=True,
+            diversity_lambda=0.0,
+        )
+        assert c0.diversity_lambda == 0.0
+        c1 = MemoryRetrievalConfig(
+            diversity_penalty_enabled=True,
+            diversity_lambda=1.0,
+        )
+        assert c1.diversity_lambda == 1.0
+
+    def test_diversity_lambda_below_zero_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            MemoryRetrievalConfig(diversity_lambda=-0.1)
+
+    def test_diversity_lambda_above_one_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            MemoryRetrievalConfig(diversity_lambda=1.1)
+
+    def test_diversity_lambda_non_default_when_disabled_warns(self) -> None:
+        with structlog.testing.capture_logs() as cap:
+            c = MemoryRetrievalConfig(diversity_lambda=0.5)
+        assert c.diversity_lambda == 0.5
+        events = [
+            e
+            for e in cap
+            if e.get("event") == CONFIG_VALIDATION_FAILED
+            and e.get("field") == "diversity_lambda"
+        ]
+        assert len(events) == 1
+        assert "diversity_lambda is ignored" in events[0]["reason"]
+
+    def test_diversity_lambda_default_when_disabled_no_warning(self) -> None:
+        with structlog.testing.capture_logs() as cap:
+            MemoryRetrievalConfig()
+        events = [
+            e
+            for e in cap
+            if e.get("event") == CONFIG_VALIDATION_FAILED
+            and e.get("field") == "diversity_lambda"
+        ]
+        assert len(events) == 0
+
+    def test_diversity_lambda_nan_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            MemoryRetrievalConfig(diversity_lambda=float("nan"))
+
+
+@pytest.mark.unit
 class TestMemoryRetrievalConfigReformulation:
     def test_default_reformulation_disabled(self) -> None:
         c = MemoryRetrievalConfig()
@@ -225,10 +288,21 @@ class TestMemoryRetrievalConfigReformulation:
         c = MemoryRetrievalConfig()
         assert c.max_reformulation_rounds == 2
 
-    def test_reformulation_enabled_rejected(self) -> None:
-        """Reformulation is not yet wired -- reject with ValueError."""
-        with pytest.raises(ValueError, match="not yet supported"):
-            MemoryRetrievalConfig(query_reformulation_enabled=True)
+    def test_reformulation_enabled_with_context_rejected(self) -> None:
+        """Reformulation is only wired into TOOL_BASED strategy."""
+        with pytest.raises(ValueError, match=r"requires strategy='tool_based'"):
+            MemoryRetrievalConfig(
+                strategy=InjectionStrategy.CONTEXT,
+                query_reformulation_enabled=True,
+            )
+
+    def test_reformulation_enabled_with_tool_based_accepted(self) -> None:
+        c = MemoryRetrievalConfig(
+            strategy=InjectionStrategy.TOOL_BASED,
+            query_reformulation_enabled=True,
+        )
+        assert c.query_reformulation_enabled is True
+        assert c.strategy is InjectionStrategy.TOOL_BASED
 
     def test_max_reformulation_rounds_zero_rejected(self) -> None:
         with pytest.raises(ValidationError):
@@ -283,5 +357,54 @@ class TestPersonalBoostRRFWarning:
             for e in cap
             if e.get("event") == CONFIG_VALIDATION_FAILED
             and e.get("field") == "personal_boost"
+        ]
+        assert len(events) == 0
+
+
+@pytest.mark.unit
+class TestDiversityStrategyConsistency:
+    def test_diversity_with_tool_based_raises(self) -> None:
+        """Diversity penalty only applies to CONTEXT; raise on TOOL_BASED.
+
+        Symmetric enforcement with
+        ``_validate_reformulation_requires_tool_based``: a silent no-op
+        is worse than a hard error because the misconfiguration would
+        survive deployment unnoticed.
+        """
+        with (
+            structlog.testing.capture_logs() as cap,
+            pytest.raises(
+                ValueError,
+                match=(
+                    r"diversity_penalty_enabled is only applied by "
+                    r"ContextInjectionStrategy"
+                ),
+            ),
+        ):
+            MemoryRetrievalConfig(
+                strategy=InjectionStrategy.TOOL_BASED,
+                diversity_penalty_enabled=True,
+            )
+        events = [
+            e
+            for e in cap
+            if e.get("event") == CONFIG_VALIDATION_FAILED
+            and e.get("field") == "diversity_penalty_enabled"
+        ]
+        assert len(events) == 1
+        assert "ContextInjectionStrategy" in events[0]["reason"]
+
+    def test_diversity_with_context_no_warning(self) -> None:
+        """Diversity penalty with CONTEXT strategy is the supported path."""
+        with structlog.testing.capture_logs() as cap:
+            MemoryRetrievalConfig(
+                strategy=InjectionStrategy.CONTEXT,
+                diversity_penalty_enabled=True,
+            )
+        events = [
+            e
+            for e in cap
+            if e.get("event") == CONFIG_VALIDATION_FAILED
+            and e.get("field") == "diversity_penalty_enabled"
         ]
         assert len(events) == 0

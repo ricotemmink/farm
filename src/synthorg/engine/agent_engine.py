@@ -67,6 +67,9 @@ from synthorg.observability.correlation import correlation_scope
 from synthorg.observability.events.approval_gate import (
     APPROVAL_GATE_LOOP_WIRING_WARNING,
 )
+from synthorg.observability.events.consolidation import (
+    DISTILLATION_CAPTURE_SKIPPED,
+)
 from synthorg.observability.events.degradation import (
     DEGRADATION_PROVIDER_SWAPPED,
 )
@@ -223,16 +226,23 @@ class AgentEngine:
             When set (and ``memory_backend`` is also provided), a
             proposer LLM call analyses failures and stores
             procedural memory entries.
-        memory_backend: Optional memory backend for storing
-            procedural memory entries.  When omitted, procedural
-            memory generation is silently skipped even if
-            ``procedural_memory_config`` is set.
+        memory_backend: Optional memory backend used by both the
+            procedural memory pipeline and distillation capture.  When
+            omitted, both features are silently skipped regardless of
+            ``procedural_memory_config`` / ``distillation_capture_enabled``.
+        distillation_capture_enabled: When ``True``, the post-execution
+            pipeline invokes ``capture_distillation`` to record a
+            trajectory summary as an EPISODIC memory entry tagged
+            ``"distillation"``.  Requires ``memory_backend`` to be
+            provided; silently no-ops otherwise (skip paths are logged
+            at DEBUG for operator visibility).  Defaults to ``False``
+            (opt-in).
         config_resolver: Optional settings resolver for reading
             runtime ENGINE settings (personality trimming controls).
             When ``None``, built-in defaults are used.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0915
         self,
         *,
         provider: CompletionProvider,
@@ -261,6 +271,7 @@ class AgentEngine:
         memory_injection_strategy: MemoryInjectionStrategy | None = None,
         procedural_memory_config: ProceduralMemoryConfig | None = None,
         memory_backend: MemoryBackend | None = None,
+        distillation_capture_enabled: bool = False,
         config_resolver: ConfigResolver | None = None,
     ) -> None:
         if execution_loop is not None and auto_loop_config is not None:
@@ -331,6 +342,7 @@ class AgentEngine:
         self._memory_injection_strategy = memory_injection_strategy
         self._procedural_memory_config = procedural_memory_config
         self._memory_backend = memory_backend
+        self._distillation_capture_enabled = distillation_capture_enabled
         self._config_resolver = config_resolver
         self._procedural_proposer: ProceduralMemoryProposer | None = None
         if (
@@ -702,7 +714,59 @@ class AgentEngine:
             agent_id,
             task_id,
         )
+        await self._try_capture_distillation(
+            execution_result,
+            agent_id,
+            task_id,
+        )
         return execution_result
+
+    async def _try_capture_distillation(
+        self,
+        execution_result: ExecutionResult,
+        agent_id: str,
+        task_id: str,
+    ) -> None:
+        """Capture trajectory distillation at task completion (non-critical).
+
+        Skips when distillation capture is disabled or no memory
+        backend is configured; both skip paths emit a DEBUG log so
+        operators investigating "why no distillation entries?" can
+        tell which branch was hit.  Captures regardless of termination
+        reason -- successful runs, errors, timeouts, and budget
+        exhaustions all produce useful trajectory context for
+        downstream consolidation.  Non-system failures are swallowed
+        and logged by ``capture_distillation``; system errors
+        (``MemoryError``, ``RecursionError``) propagate.
+        """
+        if not self._distillation_capture_enabled:
+            logger.debug(
+                DISTILLATION_CAPTURE_SKIPPED,
+                agent_id=agent_id,
+                task_id=task_id,
+                reason="capture_disabled",
+            )
+            return
+        if self._memory_backend is None:
+            logger.debug(
+                DISTILLATION_CAPTURE_SKIPPED,
+                agent_id=agent_id,
+                task_id=task_id,
+                reason="no_memory_backend",
+            )
+            return
+        from pydantic import TypeAdapter  # noqa: PLC0415
+
+        from synthorg.core.types import NotBlankStr  # noqa: PLC0415
+        from synthorg.memory.consolidation import capture_distillation  # noqa: PLC0415
+
+        _nb = TypeAdapter(NotBlankStr)
+        await capture_distillation(
+            execution_result,
+            agent_id=_nb.validate_python(agent_id),
+            task_id=_nb.validate_python(task_id),
+            backend=self._memory_backend,
+        )
 
     async def _try_procedural_memory(
         self,

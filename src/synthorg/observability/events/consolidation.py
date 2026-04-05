@@ -64,3 +64,15 @@ ARCHIVAL_INDEX_BUILT: Final[str] = "consolidation.archival.index_built"
 
 MAX_MEMORIES_ENFORCED: Final[str] = "consolidation.max_memories.enforced"
 MAX_MEMORIES_ENFORCE_FAILED: Final[str] = "consolidation.max_memories.failed"
+
+# ── LLM consolidation strategy ──────────────────────────────────
+
+LLM_STRATEGY_SYNTHESIZED: Final[str] = "consolidation.llm.synthesized"
+LLM_STRATEGY_FALLBACK: Final[str] = "consolidation.llm.fallback"
+LLM_STRATEGY_ERROR: Final[str] = "consolidation.llm.error"
+
+# ── Distillation capture ────────────────────────────────────────
+
+DISTILLATION_CAPTURED: Final[str] = "consolidation.distillation.captured"
+DISTILLATION_CAPTURE_FAILED: Final[str] = "consolidation.distillation.capture_failed"
+DISTILLATION_CAPTURE_SKIPPED: Final[str] = "consolidation.distillation.capture_skipped"

@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 
 _WEIGHT_SUM_TOLERANCE = 1e-6
 _DEFAULT_RRF_K = 60
+_DEFAULT_DIVERSITY_LAMBDA = 0.7
 
 
 class MemoryRetrievalConfig(BaseModel):
@@ -38,6 +39,24 @@ class MemoryRetrievalConfig(BaseModel):
         fusion_strategy: Ranking fusion strategy -- LINEAR for single-source
             relevance+recency, RRF for multi-source ranked list merging.
         rrf_k: RRF smoothing constant (1-1000, only used with RRF strategy).
+        diversity_penalty_enabled: When True, apply MMR-style diversity
+            penalty to re-rank retrieval results, reducing redundancy.
+            Only consumed by ``ContextInjectionStrategy``; a validator
+            raises if combined with another strategy.  Defaults to
+            False.
+        diversity_lambda: MMR trade-off parameter (0.0-1.0).  ``1.0``
+            means pure relevance (no diversity), ``0.0`` means maximum
+            diversity.  Defaults to 0.7.  Only consulted when
+            ``diversity_penalty_enabled`` is True.
+        query_reformulation_enabled: When True, enables the
+            Search-and-Ask iterative query-reformulation loop in the
+            TOOL_BASED strategy.  Requires ``ToolBasedInjectionStrategy``
+            to be constructed with both ``reformulator`` and
+            ``sufficiency_checker``; the strategy constructor raises
+            when the flag is set but either dependency is missing.
+            Defaults to False.
+        max_reformulation_rounds: Maximum rounds of query reformulation
+            in the Search-and-Ask loop (1-5).  Defaults to 2.
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -112,12 +131,36 @@ class MemoryRetrievalConfig(BaseModel):
         le=1000,
         description="RRF smoothing constant k (only used with RRF strategy)",
     )
+    diversity_penalty_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, apply MMR-style diversity penalty to re-rank "
+            "retrieval results, reducing redundancy"
+        ),
+    )
+    diversity_lambda: float = Field(
+        default=_DEFAULT_DIVERSITY_LAMBDA,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "MMR trade-off parameter: 1.0 = pure relevance (no "
+            "diversity), 0.0 = maximum diversity"
+        ),
+    )
     query_reformulation_enabled: bool = Field(
         default=False,
         description=(
-            "Reserved for future query reformulation support in the "
-            "TOOL_BASED strategy. Not yet wired into the retrieval "
-            "pipeline -- must remain False until implemented."
+            "Enables iterative query reformulation in the TOOL_BASED "
+            "strategy.  When True, ``ToolBasedInjectionStrategy`` "
+            "runs a Search-and-Ask loop (retrieve -> check sufficiency "
+            "-> reformulate -> re-retrieve) up to "
+            "``max_reformulation_rounds`` rounds.  Requires both "
+            "``reformulator`` AND ``sufficiency_checker`` to be passed "
+            "to the strategy constructor -- the constructor raises "
+            "``ValueError`` when the flag is set but either collaborator "
+            "is missing (fail-fast at wiring time rather than silent "
+            "no-op at retrieval time).  A config-level validator also "
+            "rejects this flag with strategies other than TOOL_BASED."
         ),
     )
     max_reformulation_rounds: int = Field(
@@ -125,8 +168,8 @@ class MemoryRetrievalConfig(BaseModel):
         ge=1,
         le=5,
         description=(
-            "Reserved for future query reformulation support (1-5). "
-            "Currently unused until reformulation is wired."
+            "Maximum rounds of query reformulation in the Search-and-Ask "
+            "loop when ``query_reformulation_enabled`` is True (1-5)."
         ),
     )
 
@@ -167,18 +210,66 @@ class MemoryRetrievalConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _validate_reformulation_not_supported(self) -> Self:
-        """Reject query_reformulation_enabled until wiring is complete."""
+    def _validate_diversity_lambda_consistency(self) -> Self:
+        """Warn when diversity_lambda is customized but penalty is disabled."""
+        if (
+            not self.diversity_penalty_enabled
+            and self.diversity_lambda != _DEFAULT_DIVERSITY_LAMBDA
+            and "diversity_lambda" in self.model_fields_set
+        ):
+            logger.warning(
+                CONFIG_VALIDATION_FAILED,
+                field="diversity_lambda",
+                value=self.diversity_lambda,
+                reason=(
+                    "diversity_lambda is ignored when "
+                    "diversity_penalty_enabled is False"
+                ),
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_diversity_strategy_consistency(self) -> Self:
+        """Reject diversity penalty combined with a strategy that ignores it.
+
+        Symmetric with ``_validate_reformulation_requires_tool_based``: a
+        silent no-op is worse than a hard error because the
+        misconfiguration survives deployment unnoticed.
+        """
+        if (
+            self.diversity_penalty_enabled
+            and self.strategy != InjectionStrategy.CONTEXT
+        ):
+            msg = (
+                "diversity_penalty_enabled is only applied by "
+                f"ContextInjectionStrategy; got strategy={self.strategy.value!r}"
+            )
+            logger.warning(
+                CONFIG_VALIDATION_FAILED,
+                field="diversity_penalty_enabled",
+                value=self.diversity_penalty_enabled,
+                strategy=self.strategy.value,
+                reason=msg,
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_reformulation_requires_tool_based(self) -> Self:
+        """Query reformulation is only wired into the TOOL_BASED strategy."""
         if not self.query_reformulation_enabled:
             return self
+        if self.strategy == InjectionStrategy.TOOL_BASED:
+            return self
         msg = (
-            "query_reformulation_enabled is not yet supported: "
-            "the retrieval pipeline does not consume this option"
+            "query_reformulation_enabled requires strategy='tool_based'; "
+            f"got strategy={self.strategy.value!r}"
         )
         logger.warning(
             CONFIG_VALIDATION_FAILED,
             field="query_reformulation_enabled",
             value=self.query_reformulation_enabled,
+            strategy=self.strategy.value,
             reason=msg,
         )
         raise ValueError(msg)
@@ -196,9 +287,9 @@ class MemoryRetrievalConfig(BaseModel):
                 field="personal_boost",
                 value=self.personal_boost,
                 reason=(
-                    "personal_boost may not be applied when pure RRF "
-                    "is used; fallback to rank_memories (when sparse "
-                    "is empty) does apply personal_boost"
+                    "personal_boost has no effect when pure RRF "
+                    "fusion runs, but IS applied on the sparse-empty "
+                    "fallback path that runs linear ranking"
                 ),
             )
         return self

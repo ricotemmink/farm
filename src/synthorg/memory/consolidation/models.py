@@ -82,7 +82,19 @@ class ConsolidationResult(BaseModel):
 
     Attributes:
         removed_ids: IDs of removed memory entries.
-        summary_id: ID of the summary entry (if created).
+        summary_ids: IDs of summary entries created during the run.
+            Strategies that produce a single summary populate a
+            one-element tuple; strategies that produce per-group
+            summaries (e.g. ``LLMConsolidationStrategy``) populate one
+            entry per group so callers see every summary, not just the
+            last one.  Callers that previously passed a scalar
+            ``summary_id=`` keyword (now a derived ``@computed_field``)
+            will hit a hard ``ValidationError`` because the model uses
+            ``extra='forbid'`` -- no silent data loss.
+        summary_id: Derived from ``summary_ids[-1]`` when any summary
+            was produced, otherwise ``None``.  Kept as a
+            ``@computed_field`` so callers that only need a single
+            representative id keep working.
         archived_count: Number of entries archived.
         consolidated_count: Derived from ``len(removed_ids)``.
         mode_assignments: Per-entry archival mode assignments (set by
@@ -91,15 +103,15 @@ class ConsolidationResult(BaseModel):
             (built by service after archival completes).
     """
 
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False, extra="forbid")
 
     removed_ids: tuple[NotBlankStr, ...] = Field(
         default=(),
         description="IDs of removed memory entries",
     )
-    summary_id: NotBlankStr | None = Field(
-        default=None,
-        description="ID of the summary entry (if created)",
+    summary_ids: tuple[NotBlankStr, ...] = Field(
+        default=(),
+        description="IDs of every summary entry produced during the run",
     )
     archived_count: int = Field(
         default=0,
@@ -116,10 +128,13 @@ class ConsolidationResult(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validate_archival_consistency(self) -> Self:
+    def _validate_archival_consistency(self) -> Self:  # noqa: C901
         """Ensure archival fields are internally consistent."""
         if len(self.removed_ids) != len(set(self.removed_ids)):
             msg = "removed_ids contains duplicates"
+            raise ValueError(msg)
+        if len(self.summary_ids) != len(set(self.summary_ids)):
+            msg = "summary_ids contains duplicates"
             raise ValueError(msg)
         if self.archived_count > self.consolidated_count:
             msg = (
@@ -165,6 +180,23 @@ class ConsolidationResult(BaseModel):
     def consolidated_count(self) -> int:
         """Number of memories consolidated (derived from ``removed_ids``)."""
         return len(self.removed_ids)
+
+    @property
+    def summary_id(self) -> NotBlankStr | None:
+        """Representative summary id (last one produced, or ``None``).
+
+        Derived from ``summary_ids``.  Callers that need every summary
+        (e.g. multi-category ``LLMConsolidationStrategy`` runs) should
+        read ``summary_ids`` directly.
+
+        Exposed as a plain ``@property`` (not ``@computed_field``) so
+        it is NOT emitted by ``model_dump()``.  Otherwise the serialized
+        payload would include ``summary_id`` and a round-trip through
+        ``model_validate(result.model_dump())`` would fail against the
+        ``extra='forbid'`` guard -- a nasty surprise for any
+        persistence or copy-through-JSON path.
+        """
+        return self.summary_ids[-1] if self.summary_ids else None
 
 
 class ArchivalEntry(BaseModel):

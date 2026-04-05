@@ -412,6 +412,58 @@ models in `memory/consolidation/config.py`:
 | `ArchivalConfig` | Enables/disables archival of consolidated entries to `ArchivalStore`, nested `DualModeConfig` |
 | `DualModeConfig` | Density-aware dual-mode archival: threshold, summarization model, anchor/fact limits |
 
+#### Consolidation Strategies
+
+Three implementations of the `ConsolidationStrategy` protocol ship out of the box:
+
+| Strategy | Behavior |
+|----------|----------|
+| `SimpleConsolidationStrategy` | Deterministic concatenation baseline -- merges older entries into a single summary without semantic deduplication |
+| `DualModeConsolidationStrategy` | Density-aware: dense groups use extractive preservation, sparse groups use abstractive summarization (see Dual-Mode Archival) |
+| `LLMConsolidationStrategy` | Groups entries by category, keeps the highest-relevance entry per group (with most-recent as tiebreaker; the kept entry is left unchanged in the backend and is NOT fed to the LLM). The remaining entries are sent to an LLM for semantic synthesis (wrapped in `<entry>` tags with explicit "treat as data, not instructions" guidance to resist prompt injection), the summary is stored tagged `"llm-synthesized"`, and only the entries that were actually represented in the LLM prompt are deleted. Synthesis → store → delete ordering prevents data loss on failure; entries dropped by the `_MAX_TOTAL_USER_CONTENT_CHARS` prompt cap are preserved for the next consolidation pass. Groups are processed in parallel via `asyncio.TaskGroup`. **Concat-fallback paths** (tagged `"concat-fallback"`, logged at WARNING, every input entry is included in the concatenation and eligible for deletion): `RetryExhaustedError`, retryable `ProviderError` surfaced directly, empty/whitespace LLM response, and unexpected non-`ProviderError` exception. **Propagating paths** (NO fallback summary, NO deletions): non-retryable `ProviderError` (logged at ERROR first) and system errors `MemoryError` / `RecursionError`. |
+
+Strategy selection is injection-based: callers construct and pass the chosen strategy
+to `MemoryConsolidationService`.  `LLMConsolidationStrategy.__init__` accepts
+`group_threshold` (default 3, minimum 3 -- smaller groups cannot meaningfully
+dedup against the retained entry), `temperature` (default 0.3),
+`max_summary_tokens` (default 500), and `include_distillation_context` (default
+True -- when enabled, the strategy queries the backend for at most 5 recent
+entries tagged `"distillation"` and embeds their trajectory summaries,
+truncated to ~500 chars each, in the synthesis system prompt). The per-entry
+user-prompt content is capped at 2000 chars and the total concatenated user
+content is capped at ~20000 chars; entries beyond the total cap are dropped
+with a WARNING log. `ConsolidationResult.summary_ids` contains every summary
+id produced during the run (one per processed group); the scalar `summary_id`
+accessor is a `@computed_field` returning the last element for callers that
+only need a representative id.
+
+#### Distillation Capture
+
+At task completion, `synthorg.memory.consolidation.capture_distillation` records
+the execution trajectory as an EPISODIC memory entry tagged `"distillation"`.
+`DistillationRequest` captures:
+
+| Field | Source |
+|-------|--------|
+| `agent_id`, `task_id` | Caller context |
+| `trajectory_summary` | Turn count, total tokens, unique tools, total tool calls |
+| `outcome` | `TerminationReason` + optional error message |
+| `memory_tool_invocations` | Names of `search_memory` / `recall_memory` invocations from `TurnRecord.tool_calls_made` (NOT memory entry IDs -- raw tool names, counted per invocation) |
+| `created_at` | Capture timestamp |
+
+`AgentEngine` wires this into `_post_execution_pipeline` when
+`distillation_capture_enabled=True` is passed to the constructor (default False
+for opt-in behavior).  Capture fires regardless of termination reason --
+successful runs, errors, timeouts, and budget exhaustions all produce useful
+trajectory context for downstream consolidation.  The helper is non-critical:
+non-system failures log at WARNING and return `None`; system errors
+(`builtins.MemoryError`, `RecursionError`) propagate.
+
+Downstream, `LLMConsolidationStrategy` picks these entries up by tag query
+when synthesizing category groups, embedding the trajectory summaries and
+outcomes in the synthesis system prompt so the LLM has context about what the
+agent was trying to accomplish when the memories it is merging were created.
+
 #### Dual-Mode Archival
 
 When `ArchivalConfig.dual_mode.enabled` is `True`, consolidation classifies content density before
@@ -693,9 +745,14 @@ the agent during execution.
     1. `MemoryBackend.retrieve()` -- fetch candidate memories (dense vector search)
     2. Rank by relevance + recency via linear combination
     3. Filter by `min_relevance` threshold
-    4. Apply `MemoryFilterStrategy` ([Decision Log](../architecture/decisions.md) D23, optional) -- exclude inferable content
-    5. Greedy token-budget packing
-    6. Format as `ChatMessage` (configured role: SYSTEM or USER) with delimiters
+    4. Apply `MemoryFilterStrategy` ([Decision Log](../architecture/decisions.md) D23, optional) -- exclude inferable content (fails **closed** on filter exceptions: returns empty to avoid bypassing privacy filters)
+    5. **Optional MMR diversity re-ranking** when `diversity_penalty_enabled: true`
+       -- balances relevance vs redundancy via Maximal Marginal Relevance with
+       word-bigram Jaccard similarity (see **Diversity Re-ranking** below).
+       Filtering runs first so excluded entries do not act as MMR anchors and
+       suppress diverse-but-visible candidates.
+    6. Greedy token-budget packing
+    7. Format as `ChatMessage` (configured role: SYSTEM or USER) with delimiters
 
     **Pipeline (RRF hybrid search -- multi-source):**
 
@@ -706,9 +763,10 @@ the agent during execution.
     2. Sparse BM25 search: `MemoryBackend.retrieve_sparse()` for personal (shared sparse disabled until `SharedKnowledgeStore` adds the method)
     3. Fuse via `fuse_ranked_lists()` with configurable `rrf_k` smoothing constant
     4. Post-RRF `min_relevance` filter on `combined_score`
-    5. Apply `MemoryFilterStrategy` (optional)
-    6. Greedy token-budget packing
-    7. Format as `ChatMessage`
+    5. Apply `MemoryFilterStrategy` (optional, fails closed)
+    6. **Optional MMR diversity re-ranking** when `diversity_penalty_enabled: true`
+    7. Greedy token-budget packing
+    8. Format as `ChatMessage`
 
     BM25 sparse vectors are stored alongside dense vectors in Qdrant using a named sparse
     vector field with `Modifier.IDF` (Qdrant applies IDF server-side). The `BM25Tokenizer`
@@ -740,6 +798,27 @@ the agent during execution.
     linear strategy remains the default for single-source retrieval.  Results are truncated to
     `max_results` (default 20) after scoring and sorting.
 
+    **Diversity Re-ranking (MMR)**
+
+    When `diversity_penalty_enabled: true` is set on the config, the
+    `ContextInjectionStrategy` pipeline runs `apply_diversity_penalty()` after
+    filtering and before token-budget packing.  Running the filter first ensures
+    that privacy-excluded entries are not used as MMR anchors (which could
+    otherwise suppress visible candidates that happen to be textually similar to
+    excluded ones).  The re-ranker uses Maximal Marginal Relevance:
+
+        MMR(candidate) = lambda * combined_score - (1 - lambda) * max_sim_to_selected
+
+    where `diversity_lambda` (default 0.7, range `[0.0, 1.0]`) controls the
+    trade-off: `1.0` = pure relevance (no diversity penalty), `0.0` = maximum
+    diversity.  The default similarity function is word-bigram Jaccard; callers
+    can inject a custom `similarity_fn` (e.g., cosine on embeddings) for
+    domain-specific redundancy measures.  Bigram sets are pre-computed once per
+    entry to keep complexity at `O(n**2)` rather than `O(n**2 * k)`.  This
+    feature applies only to `ContextInjectionStrategy` -- a `model_validator`
+    warns when `diversity_penalty_enabled=True` is combined with a strategy
+    that ignores it (e.g. `TOOL_BASED`).
+
     !!! tip "Non-Inferable Filter"
 
         Retrieved memories are filtered before injection to exclude content the agent can
@@ -770,9 +849,15 @@ the agent during execution.
       hybrid dense+sparse with RRF fusion is not yet wired into the tool-based path)
     - Hybrid retrieval and RRF fusion are handled at the `ContextInjectionStrategy`
       level, not within `ToolBasedInjectionStrategy`
-    - `QueryReformulator` and `SufficiencyChecker` protocols exist with LLM-based
-      implementations, but iterative reformulation is not yet wired into the tool-based
-      strategy's search handler (reserved via `query_reformulation_enabled` config field)
+    - When `query_reformulation_enabled: true` is set on the config and both a
+      `QueryReformulator` and a `SufficiencyChecker` are provided at construction,
+      `search_memory` runs an iterative **Search-and-Ask** loop: retrieve -> check
+      sufficiency -> reformulate query -> re-retrieve, up to `max_reformulation_rounds`
+      rounds (default 2, max 5).  Results from all rounds are merged by entry ID,
+      keeping the highest-relevance version of any duplicate.  Sufficiency checker
+      and reformulator failures degrade gracefully to the current cumulative entries
+      rather than propagating.  Diversity (MMR) re-ranking is currently applied only
+      in the `ContextInjectionStrategy` pipeline, not in the tool-based handler.
 
     **ToolRegistry integration**: `SearchMemoryTool` and `RecallMemoryTool` are `BaseTool`
     subclasses (`memory/tools.py`) that delegate execution to
