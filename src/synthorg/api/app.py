@@ -844,8 +844,19 @@ def create_app(  # noqa: PLR0913, PLR0915
     _should_auto_wire = settings_service is None and persistence is not None
 
     # Review gate service -- transitions tasks from IN_REVIEW on approval.
-    review_gate_service = ReviewGateService(task_engine=task_engine)
-    app_state.set_review_gate_service(review_gate_service)
+    # Needs ``task_engine`` for self-review enforcement (preflight) and
+    # state transitions; ``persistence`` is OPTIONAL and only used for
+    # the auditable decisions drop-box.  Construct the service whenever
+    # ``task_engine`` exists so the fail-fast self-review / missing-task
+    # preflight still runs in task-engine-only deployments; decision
+    # recording gracefully degrades to a WARNING-level no-op when
+    # persistence is absent.
+    if task_engine is not None:
+        review_gate_service = ReviewGateService(
+            task_engine=task_engine,
+            persistence=persistence,
+        )
+        app_state.set_review_gate_service(review_gate_service)
 
     # Approval timeout scheduler -- None here; auto-creation from
     # settings at startup is not yet wired.  Pass explicitly via the

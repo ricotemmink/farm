@@ -455,3 +455,43 @@ CREATE TABLE IF NOT EXISTS workflow_definition_versions (
 
 CREATE INDEX IF NOT EXISTS idx_wdv_definition_saved
     ON workflow_definition_versions(definition_id, saved_at DESC);
+
+-- ── Decision records (auditable decisions drop-box) ─────────────
+-- Append-only audit trail.  ON DELETE RESTRICT on the tasks FK is
+-- deliberate: preserving the audit trail takes priority over task
+-- cleanup, so tasks with decision records cannot be deleted until
+-- their audit entries are explicitly archived or purged.  Dropping
+-- this RESTRICT would silently cascade-delete audit data and violate
+-- issue #700's append-only guarantee.
+CREATE TABLE IF NOT EXISTS decision_records (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    approval_id TEXT,
+    executing_agent_id TEXT NOT NULL,
+    reviewer_agent_id TEXT NOT NULL CHECK(reviewer_agent_id != executing_agent_id),
+    decision TEXT NOT NULL CHECK(decision IN (
+        'approved', 'rejected', 'auto_approved', 'auto_rejected', 'escalated'
+    )),
+    reason TEXT,
+    criteria_snapshot TEXT NOT NULL DEFAULT '[]',
+    -- recorded_at must be ISO 8601 with a UTC offset ('+00:00' or 'Z')
+    -- so lexicographic ordering equals chronological ordering.  The
+    -- repository normalizes to UTC via .astimezone(UTC).isoformat()
+    -- before inserting; the CHECK here enforces the invariant against
+    -- raw SQL callers and migrations.
+    recorded_at TEXT NOT NULL CHECK(
+        recorded_at LIKE '%+00:00' OR recorded_at LIKE '%Z'
+    ),
+    version INTEGER NOT NULL CHECK(version >= 1),
+    metadata TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(task_id, version)
+);
+
+-- idx_dr_task_id is intentionally omitted -- the UNIQUE(task_id, version)
+-- constraint already creates a covering index on task_id as the leading
+-- key.  Adding a separate idx on task_id alone would be redundant write
+-- overhead with no planner benefit.
+CREATE INDEX IF NOT EXISTS idx_dr_executing_agent_recorded
+    ON decision_records(executing_agent_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dr_reviewer_agent_recorded
+    ON decision_records(reviewer_agent_id, recorded_at DESC);

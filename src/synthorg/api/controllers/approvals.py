@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 from uuid import uuid4
 
 from litestar import Controller, Request, get, post
@@ -13,6 +13,12 @@ from pydantic import ConfigDict, Field
 
 from synthorg.api.auth.models import AuthenticatedUser
 from synthorg.api.channels import CHANNEL_APPROVALS, get_channels_plugin
+from synthorg.api.controllers._approval_review_gate import (
+    preflight_review_gate,
+    signal_resume_intent,
+    try_mid_execution_resume,
+    try_review_gate_transition,
+)
 from synthorg.api.dto import (
     ApiResponse,
     ApproveRequest,
@@ -51,16 +57,6 @@ from synthorg.observability.events.api import (
     API_RESOURCE_NOT_FOUND,
     API_VALIDATION_FAILED,
 )
-from synthorg.observability.events.approval_gate import (
-    APPROVAL_GATE_RESUME_CONTEXT_LOADED,
-    APPROVAL_GATE_RESUME_FAILED,
-    APPROVAL_GATE_RESUME_TRIGGERED,
-    APPROVAL_GATE_REVIEW_TRANSITION_FAILED,
-)
-
-if TYPE_CHECKING:
-    from synthorg.engine.approval_gate import ApprovalGate
-    from synthorg.engine.review_gate import ReviewGateService
 
 logger = get_logger(__name__)
 
@@ -262,133 +258,13 @@ def _log_approval_decision(
     )
 
 
-async def _try_mid_execution_resume(
-    approval_gate: ApprovalGate,
-    approval_id: str,
-    *,
-    approved: bool,
-) -> bool:
-    """Attempt to resume a mid-execution parked context.
-
-    Returns ``True`` if the flow was handled (context found or
-    error -- caller should not fall through to the review gate).
-    Returns ``False`` if no parked context exists.
-    """
-    try:
-        resumed = await approval_gate.resume_context(approval_id)
-    except MemoryError, RecursionError:
-        raise
-    except Exception:
-        logger.warning(
-            APPROVAL_GATE_RESUME_FAILED,
-            approval_id=approval_id,
-            error="Failed to resume parked context",
-            exc_info=True,
-        )
-        # Resume lookup failed -- do NOT fall through to review
-        # gate, because the parked context may still exist.
-        return True
-
-    if resumed is not None:
-        _context, parked_id = resumed
-        logger.info(
-            APPROVAL_GATE_RESUME_CONTEXT_LOADED,
-            approval_id=approval_id,
-            parked_id=parked_id,
-            approved=approved,
-            note=(
-                "Parked context loaded -- agent re-execution "
-                "requires external orchestration"
-            ),
-        )
-        return True
-    return False
-
-
-async def _try_review_gate_transition(  # noqa: PLR0913
-    review_gate: ReviewGateService,
-    approval_id: str,
-    task_id: str,
-    *,
-    approved: bool,
-    decided_by: str,
-    decision_reason: str | None,
-) -> None:
-    """Delegate a review decision to the review gate service."""
-    try:
-        await review_gate.complete_review(
-            task_id=task_id,
-            requested_by=decided_by,
-            approved=approved,
-            decided_by=decided_by,
-            reason=decision_reason,
-        )
-    except MemoryError, RecursionError:
-        raise
-    except Exception:
-        logger.warning(
-            APPROVAL_GATE_REVIEW_TRANSITION_FAILED,
-            approval_id=approval_id,
-            task_id=task_id,
-            error="Review gate transition failed (non-fatal)",
-            exc_info=True,
-        )
-
-
-async def _signal_resume_intent(  # noqa: PLR0913
-    app_state: AppState,
-    approval_id: str,
-    *,
-    approved: bool,
-    decided_by: str,
-    decision_reason: str | None = None,
-    task_id: str | None = None,
-) -> None:
-    """Execute the resume or review-gate flow for a decided approval.
-
-    Two flows depending on whether a parked context exists:
-
-    1. **Mid-execution parking** (``_try_mid_execution_resume``):
-       resume a parked context if one exists.
-    2. **Review gate** (``_try_review_gate_transition``):
-       transition the task from IN_REVIEW on approval/rejection.
-
-    Args:
-        app_state: Application state containing services.
-        approval_id: The approval item identifier.
-        approved: Whether the action was approved.
-        decided_by: Who made the decision.
-        decision_reason: Optional reason for the decision.
-        task_id: Optional task identifier for review-gate flow.
-    """
-    logger.info(
-        APPROVAL_GATE_RESUME_TRIGGERED,
-        approval_id=approval_id,
-        approved=approved,
-        decided_by=decided_by,
-        has_reason=decision_reason is not None,
-    )
-
-    # Flow 1: mid-execution parking.
-    approval_gate = app_state.approval_gate
-    if approval_gate is not None:
-        handled = await _try_mid_execution_resume(
-            approval_gate, approval_id, approved=approved
-        )
-        if handled:
-            return
-
-    # Flow 2: review gate -- transition task status.
-    review_gate = app_state.review_gate_service
-    if review_gate is not None and task_id is not None:
-        await _try_review_gate_transition(
-            review_gate,
-            approval_id,
-            task_id,
-            approved=approved,
-            decided_by=decided_by,
-            decision_reason=decision_reason,
-        )
+# Review-gate flow helpers live in a sibling module to keep this file
+# under the 800-line limit.  Re-aliased with leading underscore here to
+# preserve the internal API shape for the controller's callers.
+_try_mid_execution_resume = try_mid_execution_resume
+_preflight_review_gate = preflight_review_gate
+_try_review_gate_transition = try_review_gate_transition
+_signal_resume_intent = signal_resume_intent
 
 
 async def _get_approval_or_404(
@@ -447,7 +323,22 @@ async def _save_decision_and_notify(  # noqa: PLR0913
 
     Raises:
         ConflictError: If the approval is no longer pending.
+        ForbiddenError: If the decider is the original executing agent
+            (self-review preflight fails).
+        NotFoundError: If the associated task no longer exists.
     """
+    # Run the review-gate preflight BEFORE persisting the decision so
+    # a rejected preflight never leaves a decided approval row or a
+    # broadcast WebSocket event behind.
+    review_gate = app_state.review_gate_service
+    if review_gate is not None and updated.task_id is not None:
+        await _preflight_review_gate(
+            review_gate,
+            approval_id,
+            updated.task_id,
+            decided_by=decided_by,
+        )
+
     saved = await app_state.approval_store.save_if_pending(updated)
     if saved is None:
         msg = "Approval is no longer pending (already decided or expired)"

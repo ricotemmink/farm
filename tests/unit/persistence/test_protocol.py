@@ -26,6 +26,7 @@ from synthorg.persistence.repositories import (
     AuditRepository,
     CheckpointRepository,
     CostRecordRepository,
+    DecisionRepository,
     HeartbeatRepository,
     MessageRepository,
     ParkedContextRepository,
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
     from synthorg.core.task import Task
     from synthorg.engine.agent_state import AgentRuntimeState
     from synthorg.engine.checkpoint.models import Checkpoint, Heartbeat
+    from synthorg.engine.decisions import DecisionRecord
     from synthorg.engine.workflow.definition import WorkflowDefinition
     from synthorg.hr.enums import LifecycleEventType
     from synthorg.hr.models import AgentLifecycleEvent
@@ -197,6 +199,28 @@ class _FakeAuditRepository:
         until: AwareDatetime | None = None,
         limit: int = 100,
     ) -> tuple[AuditEntry, ...]:
+        return ()
+
+
+class _FakeDecisionRepository:
+    async def append_with_next_version(
+        self,
+        **_kwargs: object,
+    ) -> DecisionRecord:
+        raise NotImplementedError
+
+    async def get(self, record_id: str) -> DecisionRecord | None:
+        return None
+
+    async def list_by_task(self, task_id: str) -> tuple[DecisionRecord, ...]:
+        return ()
+
+    async def list_by_agent(
+        self,
+        agent_id: str,
+        *,
+        role: str,
+    ) -> tuple[DecisionRecord, ...]:
         return ()
 
 
@@ -481,6 +505,10 @@ class _FakeBackend:
         return _FakeAuditRepository()
 
     @property
+    def decision_records(self) -> _FakeDecisionRepository:
+        return _FakeDecisionRepository()
+
+    @property
     def users(self) -> _FakeUserRepository:
         return _FakeUserRepository()
 
@@ -523,6 +551,19 @@ class _FakeBackend:
     @property
     def workflow_executions(self) -> _FakeWorkflowExecutionRepository:
         return _FakeWorkflowExecutionRepository()
+
+    @property
+    def workflow_versions(self) -> object:
+        # ``PersistenceBackend`` is ``@runtime_checkable``, which only
+        # verifies that the ``workflow_versions`` attribute exists --
+        # not that its value implements the full
+        # ``WorkflowVersionRepository`` interface.  Returning a bare
+        # ``object()`` is enough to satisfy the isinstance conformance
+        # test in this module; the real ``WorkflowVersionRepository``
+        # fake with ``save_version`` / ``get_version`` / etc. lives
+        # in ``tests/unit/api/fakes_workflow.py`` and is used by
+        # tests that actually exercise the workflow-version behavior.
+        return object()
 
     async def get_setting(self, key: str) -> str | None:
         return None
@@ -569,6 +610,9 @@ class TestProtocolCompliance:
 
     def test_fake_audit_repo_is_audit_repository(self) -> None:
         assert isinstance(_FakeAuditRepository(), AuditRepository)
+
+    def test_fake_decision_repo_is_decision_repository(self) -> None:
+        assert isinstance(_FakeDecisionRepository(), DecisionRepository)
 
     def test_fake_user_repo_is_user_repository(self) -> None:
         assert isinstance(_FakeUserRepository(), UserRepository)

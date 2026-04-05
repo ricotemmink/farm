@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from synthorg.budget.currency import DEFAULT_CURRENCY
 from synthorg.budget.errors import BudgetExhaustedError, QuotaExhaustedError
 from synthorg.budget.quota import DegradationAction
+from synthorg.core.enums import FailureCategory  # noqa: TC001
 from synthorg.engine._security_factory import (
     make_security_interceptor,
     registry_with_approval_tool,
@@ -85,6 +86,7 @@ from synthorg.observability.events.execution import (
     EXECUTION_ENGINE_TIMEOUT,
     EXECUTION_LOOP_AUTO_SELECTED,
     EXECUTION_LOOP_BUDGET_UNAVAILABLE,
+    EXECUTION_RECOVERY_DIAGNOSIS,
     EXECUTION_RECOVERY_FAILED,
     EXECUTION_RESUME_COMPLETE,
     EXECUTION_RESUME_FAILED,
@@ -152,6 +154,12 @@ _PROMPT_TOKEN_RATIO_THRESHOLD: float = 0.3
 """Prompt-to-total token ratio above which a warning is emitted."""
 
 _DEFAULT_RECOVERY_STRATEGY = FailAndReassignStrategy()
+
+# Cap on the number of failed acceptance criteria embedded in the
+# post-recovery transition reason.  Criteria beyond this limit are
+# summarised as "+N more" so the status history does not grow
+# unbounded on tasks with many criteria.
+_TRANSITION_REASON_CRITERIA_CAP = 5
 """Module-level default instance for the recovery strategy."""
 
 
@@ -653,6 +661,14 @@ class AgentEngine:
                 effective_autonomy=effective_autonomy,
                 provider=provider,
             )
+            if recovery_result is not None:
+                logger.info(
+                    EXECUTION_RECOVERY_DIAGNOSIS,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    failure_category=recovery_result.failure_category.value,
+                    criteria_failed_count=len(recovery_result.criteria_failed),
+                )
             # Sync post-recovery status to TaskEngine (typically FAILED,
             # depends on recovery strategy).
             ctx = execution_result.context
@@ -668,12 +684,46 @@ class AgentEngine:
                     from_status=pre_recovery_status.value,
                     to_status=ctx.task_execution.status.value,
                 )
+                # Embed the failure category in the transition reason so
+                # the downstream task router / reassignment selector can
+                # read it from the task's status history and make a more
+                # informed decision (e.g. route TOOL_FAILURE retries to
+                # an agent with different tool access, BUDGET_EXCEEDED to
+                # a cheaper tier, etc.).  recovery_result is guaranteed
+                # non-None here: reaching this block requires the status
+                # to have changed, which only happens when a recovery
+                # strategy ran and produced a result.
+                assert recovery_result is not None  # noqa: S101
+                category = recovery_result.failure_category.value
+                # When the category is QUALITY_GATE_FAILED (or any other
+                # category that collected criteria_failed), preserve a
+                # sanitized summary of the failing criteria in the
+                # transition reason so downstream routing/history does
+                # not lose them.  Capped at the first ~5 criteria and
+                # each sanitized via sanitize_message() to strip
+                # paths/URLs/injection markers before the string hits
+                # the task status history.
+                criteria_suffix = ""
+                if recovery_result.criteria_failed:
+                    capped = recovery_result.criteria_failed[
+                        :_TRANSITION_REASON_CRITERIA_CAP
+                    ]
+                    sanitized = "; ".join(sanitize_message(c) for c in capped)
+                    overflow = (
+                        len(recovery_result.criteria_failed)
+                        - _TRANSITION_REASON_CRITERIA_CAP
+                    )
+                    more = f" +{overflow} more" if overflow > 0 else ""
+                    criteria_suffix = f", unmet_criteria={sanitized}{more}"
                 await sync_to_task_engine(
                     self._task_engine,
                     target_status=ctx.task_execution.status,
                     task_id=task_id,
                     agent_id=agent_id,
-                    reason=f"Post-recovery status: {ctx.task_execution.status.value}",
+                    reason=(
+                        f"Post-recovery status: {ctx.task_execution.status.value} "
+                        f"(failure_category={category}{criteria_suffix})"
+                    ),
                 )
         # Clean up checkpoints and heartbeat on non-ERROR exits.
         # The ERROR path is handled inside _finalize_resume (resume)
@@ -1133,6 +1183,8 @@ class AgentEngine:
                 recovery_result.error_message,
                 agent_id,
                 task_id,
+                failure_category=recovery_result.failure_category,
+                criteria_failed=recovery_result.criteria_failed,
                 completion_config=completion_config,
                 effective_autonomy=effective_autonomy,
                 provider=provider,
@@ -1163,6 +1215,8 @@ class AgentEngine:
         agent_id: str,
         task_id: str,
         *,
+        failure_category: FailureCategory,
+        criteria_failed: tuple[str, ...] = (),
         completion_config: CompletionConfig | None = None,
         effective_autonomy: EffectiveAutonomy | None = None,
         provider: CompletionProvider | None = None,
@@ -1178,6 +1232,8 @@ class AgentEngine:
             error_message,
             agent_id,
             task_id,
+            failure_category=failure_category,
+            criteria_failed=criteria_failed,
         )
         result = await self._execute_resumed_loop(
             checkpoint_ctx,
