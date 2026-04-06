@@ -2,11 +2,22 @@ ci:
   autoupdate_schedule: never
   autofix_prs: true
   autofix_commit_msg: "style: auto-fix pre-commit hooks"
-  skip: [commitizen, gitleaks, hadolint-docker, no-em-dashes, no-redundant-timeout, mypy, pytest-unit, golangci-lint, go-vet, go-test, eslint-web]
+  skip: [commitizen, gitleaks, hadolint-docker, no-em-dashes, no-redundant-timeout, mypy, pytest-unit, golangci-lint, go-vet, go-test, eslint-web, check-push-rebased]
 
 default_install_hook_types: [pre-commit, commit-msg, pre-push]
 
 repos:
+  - repo: local
+    hooks:
+      - id: check-push-rebased
+        name: check push rebased (block if behind main)
+        entry: bash
+        args: ["scripts/check_push_rebased.sh"]
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+        types: []
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
@@ -25,6 +36,13 @@ repos:
         args: [--maxkb=1024]
       - id: no-commit-to-branch
         args: [--branch, main]
+      - id: check-symlinks
+      - id: check-case-conflict
+      - id: debug-statements
+        types: [python]
+      - id: detect-private-key
+        exclude: ^tests/
+      - id: mixed-line-ending
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.9
@@ -53,13 +71,15 @@ repos:
     hooks:
       - id: no-em-dashes
         name: no em-dashes (U+2014)
-        entry: bash -c 'uv run python scripts/check_no_em_dashes.py "$@"' --
+        entry: uv
+        args: [run, python, scripts/check_no_em_dashes.py]
         language: system
         types: [text]
 
       - id: no-redundant-timeout
         name: no redundant pytest.mark.timeout(30)
-        entry: bash -c 'uv run python scripts/check_no_redundant_timeout.py "$@"' --
+        entry: uv
+        args: [run, python, scripts/check_no_redundant_timeout.py]
         language: system
         files: ^tests/.*\.py$
 
