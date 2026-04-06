@@ -1,18 +1,20 @@
-import { useCallback, useRef, useState } from 'react'
-import { Dialog } from 'radix-ui'
+import { useRef, useState } from 'react'
+import { Dialog } from '@base-ui/react/dialog'
 import { Loader2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { InputField } from '@/components/ui/input-field'
-import { getErrorMessage } from '@/utils/errors'
-import type { CreateDepartmentRequest, Department } from '@/api/types'
+import { ORG_EDIT_COMING_SOON_TOOLTIP } from './coming-soon'
 
 export interface DepartmentCreateDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  existingNames: readonly string[]
-  onCreate: (data: CreateDepartmentRequest) => Promise<Department>
-  disabled?: boolean
+  // `existingNames`, `onCreate`, and `disabled` props removed temporarily --
+  // the Create button is unconditionally disabled while the backend CRUD
+  // endpoints are pending (#1081).  Restore these props once #1081 lands:
+  //   existingNames: readonly string[]
+  //   onCreate: (data: CreateDepartmentRequest) => Promise<Department>
+  //   disabled?: boolean
 }
 
 interface FormState {
@@ -27,10 +29,10 @@ const INITIAL_FORM: FormState = {
   budget_percent: '0',
 }
 
-export function DepartmentCreateDialog({ open, onOpenChange, existingNames, onCreate, disabled }: DepartmentCreateDialogProps) {
+export function DepartmentCreateDialog({ open, onOpenChange }: DepartmentCreateDialogProps) {
   const [form, setForm] = useState<FormState>(INITIAL_FORM)
   const [errors, setErrors] = useState<Partial<Record<keyof FormState, string>>>({})
-  const [submitting, setSubmitting] = useState(false)
+  const submitting = false // #1081-gated: restore useState when backend lands
   const [submitError, setSubmitError] = useState<string | null>(null)
 
   const prevOpenRef = useRef(open)
@@ -47,60 +49,38 @@ export function DepartmentCreateDialog({ open, onOpenChange, existingNames, onCr
     setSubmitError(null)
   }
 
-  const handleSubmit = useCallback(async () => {
-    const next: Partial<Record<keyof FormState, string>> = {}
-    if (!form.name.trim()) {
-      next.name = 'Name is required'
-    } else if (existingNames.some((n) => n.toLowerCase() === form.name.trim().toLowerCase())) {
-      next.name = 'Department already exists'
-    }
-    if (!form.display_name.trim()) next.display_name = 'Display name is required'
-    const pct = Number(form.budget_percent)
-    if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
-      next.budget_percent = 'Must be between 0 and 100'
-    }
-    setErrors(next)
-    if (Object.keys(next).length > 0) return
-
-    setSubmitting(true)
-    setSubmitError(null)
-    try {
-      await onCreate({
-        name: form.name.trim(),
-        display_name: form.display_name.trim(),
-        budget_percent: Number(form.budget_percent),
-      })
-      setForm(INITIAL_FORM)
-      onOpenChange(false)
-    } catch (err) {
-      setSubmitError(getErrorMessage(err))
-    } finally {
-      setSubmitting(false)
-    }
-  }, [form, existingNames, onCreate, onOpenChange])
+  // handleSubmit removed -- gated behind #1081 (backend CRUD).
+  // Restore validation + onCreate call when the backend lands.
 
   return (
-    <Dialog.Root open={open} onOpenChange={(v) => { if (!submitting) onOpenChange(v) }}>
+    <Dialog.Root open={open} onOpenChange={(v: boolean) => { if (!submitting) onOpenChange(v) }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content
+        <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity duration-200 ease-out data-[closed]:opacity-0 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
+        <Dialog.Popup
           className={cn(
             'fixed top-1/2 left-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2',
-            'rounded-xl border border-border-bright bg-surface p-6 shadow-lg',
-            'data-[state=open]:animate-in data-[state=closed]:animate-out',
-            'data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
-            'data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
+            'rounded-xl border border-border-bright bg-surface p-card shadow-[var(--so-shadow-card-hover)]',
+            'transition-[opacity,translate,scale] duration-200 ease-out',
+            'data-[closed]:opacity-0 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0',
+            'data-[closed]:scale-95 data-[starting-style]:scale-95 data-[ending-style]:scale-95',
           )}
         >
           <div className="flex items-center justify-between mb-4">
             <Dialog.Title className="text-base font-semibold text-foreground">
               New Department
             </Dialog.Title>
-            <Dialog.Close asChild>
-              <Button variant="ghost" size="icon" aria-label="Close">
-                <X className="size-4" />
-              </Button>
-            </Dialog.Close>
+            <Dialog.Close
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Close"
+                  disabled={submitting}
+                >
+                  <X className="size-4" />
+                </Button>
+              }
+            />
           </div>
 
           <div className="space-y-4">
@@ -137,16 +117,28 @@ export function DepartmentCreateDialog({ open, onOpenChange, existingNames, onCr
             )}
 
             <div className="flex justify-end gap-3 pt-2">
-              <Dialog.Close asChild>
-                <Button variant="outline" disabled={submitting}>Cancel</Button>
-              </Dialog.Close>
-              <Button disabled={submitting || disabled} onClick={handleSubmit}>
+              <Dialog.Close
+                render={
+                  <Button variant="outline" disabled={submitting}>Cancel</Button>
+                }
+              />
+              {/*
+               * Create is disabled until the backend CRUD endpoints
+               * land -- see #1081.  The trigger button on DepartmentsTab
+               * is also disabled so this dialog should rarely be
+               * reachable; the extra gate here is a defense-in-depth
+               * safety net.
+               */}
+              <Button
+                disabled
+                title={ORG_EDIT_COMING_SOON_TOOLTIP}
+              >
                 {submitting && <Loader2 className="mr-2 size-4 animate-spin" />}
                 Create Department
               </Button>
             </div>
           </div>
-        </Dialog.Content>
+        </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>
   )

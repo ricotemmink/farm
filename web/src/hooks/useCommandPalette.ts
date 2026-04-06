@@ -8,7 +8,15 @@ export interface CommandItem {
   icon?: LucideIcon
   /** Keyboard shortcut display (e.g. ["ctrl", "n"]). */
   shortcut?: string[]
-  action: () => void
+  /**
+   * Action to run when the palette item is selected.  Return types are
+   * intentionally permissive (`unknown` / `Promise<unknown>`) so call
+   * sites can pass through third-party imperative handles like
+   * `fitView()` from @xyflow/react (which returns `Promise<boolean>`)
+   * without hand-wrapping them in a `() => { ... }`.  The return value
+   * is discarded -- the palette only cares about success vs rejection.
+   */
+  action: () => unknown | Promise<unknown>
   /** Group heading in the palette. */
   group: string
   /** Additional search terms. */
@@ -23,7 +31,7 @@ export interface CommandItem {
 
 type RegistrationKey = string
 
-const commandGroups = new Map<RegistrationKey, CommandItem[]>()
+const commandGroups = new Map<RegistrationKey, readonly CommandItem[]>()
 const listeners = new Set<() => void>()
 let openState = false
 let registrationCounter = 0
@@ -68,7 +76,7 @@ function getOpenSnapshot() {
 // Public API
 // ---------------------------------------------------------------------------
 
-function registerCommands(commands: CommandItem[]): () => void {
+function registerCommands(commands: readonly CommandItem[]): () => void {
   const key = String(++registrationCounter)
   commandGroups.set(key, commands)
   updateCommandsSnapshot()
@@ -93,6 +101,7 @@ function setOpen(value: boolean) {
  *
  * - `registerCommands(items)` registers commands with the palette; returns a cleanup function.
  * - `open()` / `close()` programmatically control the palette.
+ * - `setOpen(value)` sets the open state directly (useful as an `onOpenChange` callback).
  * - `commands` is the current list of all registered commands.
  * - `isOpen` reflects the palette's open state.
  */
@@ -103,6 +112,7 @@ export function useCommandPalette() {
   const open = useCallback(() => setOpen(true), [])
   const close = useCallback(() => setOpen(false), [])
   const toggle = useCallback(() => setOpen(!getOpenSnapshot()), [])
+  const setOpenCb = useCallback((value: boolean) => { setOpen(value) }, [])
 
   return {
     commands,
@@ -111,16 +121,19 @@ export function useCommandPalette() {
     open,
     close,
     toggle,
+    setOpen: setOpenCb,
   }
 }
 
 /**
  * Hook that registers commands on mount and cleans up on unmount.
  *
- * Note: `commands` should be memoized (e.g., via `useMemo` or a module-level constant)
- * to avoid re-registration on every render.
+ * Note: `commands` should be memoized (e.g., via `useMemo` or a module-level
+ * constant) to avoid re-registration on every render -- the effect has
+ * `[commands]` as its dependency, so an unmemoized caller array causes
+ * registration thrash that cascades into every command-palette subscriber.
  */
-export function useRegisterCommands(commands: CommandItem[]) {
+export function useRegisterCommands(commands: readonly CommandItem[]): void {
   useEffect(() => {
     const cleanup = registerCommands(commands)
     return cleanup

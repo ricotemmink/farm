@@ -64,8 +64,8 @@ class OverviewMetrics(BaseModel):
         budget_used_percent: Percentage of monthly budget used.
             Values above 100.0 indicate budget overrun.
         cost_7d_trend: Daily spend sparkline for the last 7 days.
-        active_agents_count: Number of active agents.
-        idle_agents_count: Number of non-active agents.
+        active_agents_count: Agents currently executing an in-progress task.
+        idle_agents_count: Employed agents not currently executing a task.
         currency: ISO 4217 currency code.
     """
 
@@ -99,11 +99,11 @@ class OverviewMetrics(BaseModel):
     )
     active_agents_count: int = Field(
         ge=0,
-        description="Number of active agents",
+        description="Agents currently executing an in-progress task",
     )
     idle_agents_count: int = Field(
         ge=0,
-        description="Number of non-active agents",
+        description="Employed agents not currently executing a task",
     )
 
 
@@ -235,34 +235,98 @@ async def _resolve_budget_context(
 async def _resolve_agent_counts(
     app_state: AppState,
     config_agent_count: int,
+    all_tasks: Sequence[Any] | None = None,
 ) -> tuple[int, int]:
     """Resolve active and idle agent counts.
 
-    Uses AgentRegistryService when available, falls back to
-    config_resolver count (all active, zero idle).
+    "Active" means **currently busy executing a task** -- an agent is
+    counted as active if they are assigned to at least one task whose
+    status is ``IN_PROGRESS``.  "Idle" is everyone else on the payroll
+    (employed agents from :meth:`AgentRegistryService.list_active`
+    minus the busy ones).
+
+    The older semantics treated every agent with employment status
+    ``ACTIVE`` as "active", which conflated HR lifecycle with runtime
+    state and produced the surprising "4 active / 0 idle / 0 tasks"
+    display.  The runtime-state definition matches operator intuition:
+    if no tasks are in progress, no agents are active.
+
+    Uses :class:`AgentRegistryService` when available to resolve
+    employed agents.  When the registry is unavailable, returns
+    ``(0, config_agent_count)`` because without the HR registry
+    there is no way to tell which agents are employed vs. merely
+    assigned to tasks, and treating every agent as idle is the
+    safest conservative display.
 
     Args:
         app_state: Application state.
-        config_agent_count: Fallback total from config.
+        config_agent_count: Fallback total from config (caller
+            typically passes ``len(agents)``).
+        all_tasks: The full task list already fetched by the caller.
+            Required for the runtime-state computation; when omitted
+            or empty, every employed agent is reported as idle.
 
     Returns:
         Tuple of (active_count, idle_count).
     """
-    if app_state.has_agent_registry:
-        try:
-            active = await app_state.agent_registry.list_active()
-            total = await app_state.agent_registry.agent_count()
-            return len(active), max(total - len(active), 0)
-        except MemoryError, RecursionError:
-            raise
-        except Exception:
-            logger.warning(
-                API_REQUEST_ERROR,
-                endpoint="analytics.resolve_agent_counts",
-                error="agent_registry_query_failed",
-                exc_info=True,
+    if not app_state.has_agent_registry:
+        if not all_tasks:
+            logger.debug(
+                ANALYTICS_OVERVIEW_QUERIED,
+                note="no agent registry -- all agents reported as idle",
+                config_agent_count=config_agent_count,
             )
-    return config_agent_count, 0
+            return 0, config_agent_count
+        # Without the registry we cannot distinguish employed agents,
+        # but we can still count busy assignees from the task list.
+        active_ids: set[str] = set()
+        for task in all_tasks:
+            if task.status == TaskStatus.IN_PROGRESS and task.assigned_to:
+                active_ids.add(task.assigned_to)
+        active = len(active_ids)
+        idle = max(config_agent_count - active, 0)
+        logger.debug(
+            ANALYTICS_OVERVIEW_QUERIED,
+            note="no agent registry -- derived active from tasks",
+            active=active,
+            idle=idle,
+            config_agent_count=config_agent_count,
+        )
+        return active, idle
+    try:
+        employed = await app_state.agent_registry.list_active()
+    except MemoryError, RecursionError:
+        raise
+    except Exception:
+        logger.warning(
+            API_REQUEST_ERROR,
+            endpoint="analytics.resolve_agent_counts",
+            error="agent_registry_query_failed",
+            exc_info=True,
+        )
+        return 0, config_agent_count
+
+    employed_ids = {str(agent.id) for agent in employed}
+    # Both None (not provided) and [] (no tasks) yield 0 active.
+    if not all_tasks:
+        logger.debug(
+            ANALYTICS_OVERVIEW_QUERIED,
+            note="no tasks provided -- all employed agents reported as idle",
+            employed_count=len(employed_ids),
+        )
+        return 0, len(employed_ids)
+
+    busy_ids: set[str] = set()
+    for task in all_tasks:
+        if (
+            task.status == TaskStatus.IN_PROGRESS
+            and task.assigned_to
+            and task.assigned_to in employed_ids
+        ):
+            busy_ids.add(task.assigned_to)
+    active = len(busy_ids)
+    idle = max(len(employed_ids) - active, 0)
+    return active, idle
 
 
 def _bucket_task_metric_data(
@@ -348,8 +412,15 @@ async def _fetch_trend_data_points(
         )
 
     # ACTIVE_AGENTS: flat line -- no historical agent counts are
-    # tracked, so report the current snapshot across all buckets
-    active_count, _ = await _resolve_agent_counts(app_state, 0)
+    # tracked, so report the current snapshot across all buckets.
+    # Fetch the current task list so the runtime-state active count
+    # reflects genuinely busy agents (not the config count).
+    all_tasks = await app_state.persistence.tasks.list_tasks()
+    active_count, _ = await _resolve_agent_counts(
+        app_state,
+        0,
+        all_tasks=all_tasks,
+    )
     return tuple(
         TrendDataPoint(timestamp=bs, value=float(active_count))
         for bs in generate_bucket_starts(start, now, bucket_size)
@@ -398,7 +469,11 @@ async def _assemble_overview(  # noqa: PLR0913
         now,
         BucketSize.DAY,
     )
-    active, idle = await _resolve_agent_counts(app_state, len(agents))
+    active, idle = await _resolve_agent_counts(
+        app_state,
+        len(agents),
+        all_tasks=all_tasks,
+    )
 
     logger.debug(
         ANALYTICS_OVERVIEW_QUERIED,

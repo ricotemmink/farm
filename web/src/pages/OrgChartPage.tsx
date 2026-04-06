@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
   ReactFlow,
   ReactFlowProvider,
   Background,
+  MiniMap,
   useReactFlow,
   type Node,
   type Edge,
@@ -19,17 +20,21 @@ import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import { useToastStore } from '@/stores/toast'
 import { useCompanyStore } from '@/stores/company'
-import { prefersReducedMotion } from '@/lib/motion'
+import { useOrgChartPrefs } from '@/stores/org-chart-prefs'
+import { useLiveEdgeActivity } from '@/hooks/useLiveEdgeActivity'
+import { prefersReducedMotion, TRANSITION_SLOW_MS } from '@/lib/motion'
 import { findDropTarget, type DepartmentBounds } from './org/drop-target'
 import { AgentNode } from './org/AgentNode'
 import { CeoNode } from './org/CeoNode'
 import { DepartmentGroupNode } from './org/DepartmentGroupNode'
+import { OwnerNode } from './org/OwnerNode'
 import { HierarchyEdge } from './org/HierarchyEdge'
 import { CommunicationEdge } from './org/CommunicationEdge'
 import { OrgChartToolbar, type ViewMode } from './org/OrgChartToolbar'
 import { OrgChartSkeleton } from './org/OrgChartSkeleton'
+import { OrgChartSearchOverlay } from './org/OrgChartSearchOverlay'
 import { NodeContextMenu } from './org/NodeContextMenu'
-import type { AgentNodeData, DepartmentGroupData } from './org/build-org-tree'
+import type { AgentNodeData, DepartmentGroupData, OwnerNodeData } from './org/build-org-tree'
 import { ROUTES } from '@/router/routes'
 
 const log = createLogger('OrgChart')
@@ -43,17 +48,11 @@ function getNodeLabel(node: Node): string {
       return (node.data as AgentNodeData).name
     case 'department':
       return (node.data as DepartmentGroupData).displayName
+    case 'owner':
+      return (node.data as OwnerNodeData).displayName
     default:
       return node.id
   }
-}
-
-function getAgentName(node: Node): string | undefined {
-  if (node.type === 'agent' || node.type === 'ceo') {
-    const name = (node.data as AgentNodeData).name
-    return typeof name === 'string' ? name : undefined
-  }
-  return undefined
 }
 
 // Approximate agent node dimensions for center-point hit testing during drag
@@ -61,10 +60,24 @@ const AGENT_NODE_WIDTH = 160
 const AGENT_NODE_HEIGHT = 80
 
 // Declared outside component for stable reference identity
-const nodeTypes = { agent: AgentNode, ceo: CeoNode, department: DepartmentGroupNode }
+const nodeTypes = {
+  agent: AgentNode,
+  ceo: CeoNode,
+  department: DepartmentGroupNode,
+  owner: OwnerNode,
+}
 const edgeTypes = { hierarchy: HierarchyEdge, communication: CommunicationEdge }
 
 const VIEWPORT_KEY = 'synthorg:orgchart:viewport'
+const COLLAPSED_DEPTS_KEY = 'synthorg:orgchart:collapsed-depts'
+
+// NOTE: the MiniMap no longer renders text labels inside the dept
+// rectangles.  At the scale the minimap displays (~240x180 px for
+// the full org) the available font size is ~2-3 px tall which is
+// unreadable regardless of font weight -- the labels ended up
+// as visual clutter the user couldn't actually use.  Shapes +
+// colors alone convey position well enough, and a default-off
+// toggle lets users opt in or out entirely.
 
 interface ViewportState {
   x: number
@@ -80,29 +93,17 @@ function saveViewport(viewport: ViewportState) {
   }
 }
 
-function loadViewport(): ViewportState | undefined {
-  try {
-    const stored = localStorage.getItem(VIEWPORT_KEY)
-    if (!stored) return undefined
-    const parsed: unknown = JSON.parse(stored)
-    const rec = parsed as Record<string, unknown>
-    if (
-      typeof parsed === 'object' && parsed !== null &&
-      typeof rec.x === 'number' && Number.isFinite(rec.x) &&
-      typeof rec.y === 'number' && Number.isFinite(rec.y) &&
-      typeof rec.zoom === 'number' && Number.isFinite(rec.zoom) && (rec.zoom as number) > 0
-    ) {
-      return parsed as ViewportState
-    }
-  } catch (err) {
-    log.warn('Failed to load viewport:', err)
-  }
-  return undefined
-}
+// NOTE: loadViewport() was removed -- the chart used to load a persisted
+// viewport from localStorage on mount, which could point at empty space
+// if the org had been restructured between sessions and leave the chart
+// looking blank on first load.  We now rely on ReactFlow's `fitView`
+// prop to centre the camera on whatever nodes are actually present;
+// saveViewport() is still called from onMoveEnd so pan/zoom state
+// survives in-session refreshes if a user clears + rezooms.
 
 // ── View transition animation ─────────────────────────────────
 
-const TRANSITION_DURATION_MS = 400
+const TRANSITION_DURATION_MS = TRANSITION_SLOW_MS
 
 function tweenSlowEase(t: number): number {
   if (t <= 0) return 0
@@ -180,8 +181,6 @@ interface ContextMenuState {
 
 function OrgChartInner() {
   const [viewMode, setViewMode] = useState<ViewMode>('hierarchy')
-  const { nodes, edges, loading, error, commLoading, commError, commTruncated, wsConnected, wsSetupError } =
-    useOrgChartData(viewMode)
 
   const [transition, dispatch] = useReducer(transitionReducer, {
     displayNodes: [],
@@ -192,7 +191,57 @@ function OrgChartInner() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<{ nodeId: string; label: string } | null>(null)
   const [dragOverDeptId, setDragOverDeptId] = useState<string | null>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [collapsedDepts, setCollapsedDepts] = useState<Set<string>>(() => {
+    // Persist user's collapse/expand preferences across sessions so
+    // they do not have to re-toggle every visit.
+    try {
+      const stored = localStorage.getItem(COLLAPSED_DEPTS_KEY)
+      if (stored) return new Set<string>(JSON.parse(stored))
+    } catch (err) {
+      log.warn('Failed to load collapsed depts from localStorage:', err)
+    }
+    return new Set()
+  })
   const dragOverDeptIdRef = useRef<string | null>(null)
+
+  const toggleDeptCollapsed = useCallback((deptId: string) => {
+    setCollapsedDepts((prev) => {
+      const next = new Set(prev)
+      if (next.has(deptId)) next.delete(deptId)
+      else next.add(deptId)
+      try {
+        localStorage.setItem(COLLAPSED_DEPTS_KEY, JSON.stringify([...next]))
+      } catch (err) {
+        log.warn('Failed to persist collapsed depts:', err)
+      }
+      return next
+    })
+  }, [])
+
+  const { nodes, edges, allNodes, loading, error, commLoading, commError, commTruncated, wsConnected, wsSetupError } =
+    useOrgChartData(viewMode, collapsedDepts)
+
+  const particleFlowMode = useOrgChartPrefs((s) => s.particleFlowMode)
+  const showMinimap = useOrgChartPrefs((s) => s.showMinimap)
+
+  // Map of `sender::target` agent pair → edge ID, used by the live
+  // activity hook to look up which edge to flash when a new message
+  // arrives.  Only populated in `live` mode to avoid the subscription
+  // cost in the other two modes.
+  const edgeIdByAgentPair = useMemo(() => {
+    const map = new Map<string, string>()
+    if (particleFlowMode !== 'live') return map
+    for (const edge of edges) {
+      if (edge.hidden) continue
+      map.set(`${edge.source}::${edge.target}`, edge.id)
+    }
+    return map
+  }, [edges, particleFlowMode])
+
+  const liveActiveEdgeIds = useLiveEdgeActivity(edgeIdByAgentPair)
+
   const { fitView, zoomIn, zoomOut } = useReactFlow()
   const addToast = useToastStore((s) => s.add)
   const navigate = useNavigate()
@@ -201,7 +250,13 @@ function OrgChartInner() {
   const announceRef = useRef<HTMLDivElement>(null)
   const dragOriginalDeptRef = useRef<string | null>(null)
 
-  const defaultViewport = useMemo(() => loadViewport(), [])
+  // NOTE: loadViewport() is intentionally NOT called here.  We used to
+  // pass the persisted viewport as `defaultViewport` to ReactFlow, but
+  // stale persisted viewports from a previous session can point at
+  // empty space and make the chart look blank on first load.  The
+  // `onMoveEnd` handler still persists the live viewport so pan/zoom
+  // state survives in-session refreshes; `fitView` on mount centers
+  // whatever nodes are actually present.
 
   const announce = useCallback((msg: string) => {
     if (announceRef.current) announceRef.current.textContent = msg
@@ -221,20 +276,36 @@ function OrgChartInner() {
       }))
   }, [transition.displayNodes])
 
-  useRegisterCommands([
-    {
-      id: 'org-fit-view',
-      label: 'Fit to View',
-      description: 'Reset zoom to fit all nodes',
-      icon: GitBranch,
-      action: () => fitView({ padding: 0.2 }),
-      group: 'Org Chart',
-      scope: 'local',
-    },
-  ])
+  // Memoized so the registration effect inside useRegisterCommands does not
+  // tear down and re-create the command on every render (which would thrash
+  // the command palette's subscriber set and trigger cascading re-renders).
+  const orgChartCommands = useMemo(
+    () => [
+      {
+        id: 'org-fit-view',
+        label: 'Fit to View',
+        description: 'Reset zoom to fit all nodes',
+        icon: GitBranch,
+        action: () => fitView({ padding: 0.2 }),
+        group: 'Org Chart',
+        scope: 'local' as const,
+      },
+    ],
+    [fitView],
+  )
+  useRegisterCommands(orgChartCommands)
 
-  // Animate transitions between view modes using reducer (avoids set-state-in-effect)
-  useEffect(() => {
+  // Animate transitions between view modes using a reducer.  This is
+  // deliberately a `useLayoutEffect`, not `useEffect`, so the snap
+  // dispatch on initial load runs synchronously after the render that
+  // resolved `nodes` (via `useOrgChartData`'s memo) and BEFORE the
+  // browser paints.  With `useEffect`, there was a visible flash
+  // between the "data loaded, but `transition.displayNodes` is still
+  // empty" render and the subsequent dispatch+rerender -- the chart
+  // briefly showed the empty-state UI or an empty canvas.  Layout
+  // effects block the commit phase, so the user only sees the
+  // post-snap state on the first paint.
+  useLayoutEffect(() => {
     // Cancel any in-flight animation
     if (animFrameRef.current !== null) {
       cancelAnimationFrame(animFrameRef.current)
@@ -298,9 +369,10 @@ function OrgChartInner() {
 
   const handleNodeClick = useCallback(
     (_event: ReactMouseEvent, node: Node) => {
-      const name = getAgentName(node)
-      if (name) {
-        navigate(`/agents/${encodeURIComponent(name)}`)
+      // Navigate by agent id (which is `node.id` in React Flow) --
+      // ids are URL-safe by construction, names are not.
+      if (node.type === 'agent' || node.type === 'ceo') {
+        navigate(`/agents/${encodeURIComponent(node.id)}`)
       }
     },
     [navigate],
@@ -310,9 +382,8 @@ function OrgChartInner() {
     (nodeId: string) => {
       const node = transition.displayNodes.find((n) => n.id === nodeId)
       if (!node) return
-      const name = getAgentName(node)
-      if (name) {
-        navigate(`/agents/${encodeURIComponent(name)}`)
+      if (node.type === 'agent' || node.type === 'ceo') {
+        navigate(`/agents/${encodeURIComponent(node.id)}`)
       }
     },
     [transition.displayNodes, navigate],
@@ -346,6 +417,29 @@ function OrgChartInner() {
 
   const handlePaneClick = useCallback(() => {
     setContextMenu(null)
+  }, [])
+
+  // Ctrl+F / Cmd+F opens the search overlay.  Escape closes it.
+  // We preventDefault() so the browser's native find-in-page doesn't
+  // fire on top of our overlay.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault()
+        setSearchOpen(true)
+      } else if (e.key === 'Escape' && searchOpen) {
+        e.preventDefault()
+        setSearchOpen(false)
+        setSearchQuery('')
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [searchOpen])
+
+  const handleSearchClose = useCallback(() => {
+    setSearchOpen(false)
+    setSearchQuery('')
   }, [])
 
   // ── Drag-drop handlers (hierarchy view only) ────────────────
@@ -425,21 +519,148 @@ function OrgChartInner() {
     [deptBounds, addToast, announce],
   )
 
-  // Apply isDropTarget highlighting to department nodes during drag
-  const renderedNodes = useMemo(() => {
-    if (!dragOverDeptId) return transition.displayNodes
-    return transition.displayNodes.map((n) =>
-      n.type === 'department'
-        ? { ...n, data: { ...n.data, isDropTarget: n.id === dragOverDeptId } }
-        : n,
-    )
-  }, [transition.displayNodes, dragOverDeptId])
+  // Apply isDropTarget highlighting to department nodes during drag.
+  //
+  // Fallback to the directly-computed `nodes` memo when the reducer
+  // hasn't caught up yet.  The snap dispatch runs in a useLayoutEffect
+  // so it is nearly always in sync, but using `nodes` as the fallback
+  // makes the first render defensive against any race where
+  // `transition.displayNodes` is still `[]` while the memo has already
+  // produced a populated array -- the chart would otherwise appear
+  // empty for one frame even with fresh data in hand.
+  const sourceNodes = transition.displayNodes.length > 0 ? transition.displayNodes : nodes
 
-  if (loading && transition.displayNodes.length === 0) {
+  // Search query normalisation: trimmed and lowercased once here so
+  // the predicate in the match set loop is a cheap string includes.
+  const normalisedQuery = searchOpen ? searchQuery.trim().toLowerCase() : ''
+
+  // Nodes matching the active search query.  Only populated while
+  // the search overlay is open AND the query is non-empty -- an
+  // empty query matches nothing (rather than everything) so the
+  // user sees zero matches until they start typing.
+  //
+  // The search indexes `allNodes` (the full pre-collapse tree) so
+  // agents inside collapsed departments are still discoverable.
+  // Matched nodes that are not currently visible in `sourceNodes`
+  // still contribute to the match count so the operator knows
+  // results exist even if the department is collapsed.
+  const searchMatchIds = useMemo<Set<string> | null>(() => {
+    if (!normalisedQuery) return null
+    const matches = new Set<string>()
+    for (const n of allNodes) {
+      const label = getNodeLabel(n).toLowerCase()
+      if (label.includes(normalisedQuery)) {
+        matches.add(n.id)
+        continue
+      }
+      // Agents also match on role text.
+      if (n.type === 'agent' || n.type === 'ceo') {
+        const role = (n.data as AgentNodeData).role?.toLowerCase() ?? ''
+        if (role.includes(normalisedQuery)) {
+          matches.add(n.id)
+        }
+      }
+    }
+    return matches
+  }, [normalisedQuery, allNodes])
+
+  // Dim-other-nodes highlighting fires ONLY when the search
+  // overlay is open and has matches.  Earlier iterations also
+  // dimmed on hover-chain, but users reported that as "everything
+  // else goes dark which is weird and flickery" -- every mouse
+  // move between cards retriggered opacity transitions.  Search
+  // is an explicit deliberate action so the dim makes sense there;
+  // hover is not and should stay stable.
+  // O(1) lookup for all (pre-collapse) nodes -- used by the
+  // highlight memo to resolve parent departments for matched
+  // agents that may still be in collapsed groups.
+  const allNodeById = useMemo(() => {
+    const map = new Map<string, (typeof allNodes)[number]>()
+    for (const n of allNodes) map.set(n.id, n)
+    return map
+  }, [allNodes])
+
+  const highlightedNodeIds = useMemo<Set<string> | null>(() => {
+    if (!searchMatchIds) return null
+    const expanded = new Set<string>(searchMatchIds)
+    for (const id of searchMatchIds) {
+      const node = allNodeById.get(id)
+      if (node?.parentId) expanded.add(node.parentId)
+    }
+    return expanded
+  }, [allNodeById, searchMatchIds])
+
+  const renderedNodes = useMemo(() => {
+    return sourceNodes.map((n) => {
+      const isDropTarget = dragOverDeptId !== null && n.type === 'department' && n.id === dragOverDeptId
+      const isDeptNode = n.type === 'department'
+      // Dim non-matches only when the search overlay is open and
+      // has matches.  No dimming on hover -- that produced
+      // flicker as the mouse moved between cards.
+      const dimmed = highlightedNodeIds !== null && !highlightedNodeIds.has(n.id)
+      const next = { ...n }
+
+      if (isDeptNode) {
+        next.data = { ...n.data, onToggleCollapsed: toggleDeptCollapsed }
+      }
+      if (isDropTarget) {
+        next.data = { ...next.data, isDropTarget: true }
+      }
+      if (dimmed) {
+        next.style = { ...n.style, opacity: 0.25, transition: `opacity var(--so-transition-dim) ease` }
+      } else if (n.style && typeof (n.style as { opacity?: number }).opacity === 'number') {
+        const rest = { ...n.style } as Record<string, unknown>
+        delete rest['opacity']
+        next.style = rest
+      }
+      return next
+    })
+  }, [sourceNodes, dragOverDeptId, highlightedNodeIds, toggleDeptCollapsed])
+
+  const renderedEdges = useMemo(() => {
+    return transition.displayEdges.map((e) => {
+      // Resolve whether particles animate on this edge, based on
+      // the user's particle flow mode.  In live mode the edge has
+      // to have had recent activity; in always mode every edge has
+      // particles; in off mode none do.
+      const particlesVisible =
+        particleFlowMode === 'always'
+          ? true
+          : particleFlowMode === 'live'
+            ? liveActiveEdgeIds.has(e.id)
+            : false
+      return {
+        ...e,
+        data: { ...(e.data as object), particlesVisible },
+      }
+    })
+  }, [transition.displayEdges, particleFlowMode, liveActiveEdgeIds])
+
+  // Diagnostic: log once per meaningful shape change so an empty chart
+  // in the wild can be traced to which layer is producing zero nodes.
+  // Logged at debug level so production builds strip it.
+  useLayoutEffect(() => {
+    log.debug('OrgChart render sizes', {
+      memoNodes: nodes.length,
+      memoEdges: edges.length,
+      reducerDisplayNodes: transition.displayNodes.length,
+      rendered: renderedNodes.length,
+      loading,
+      hasError: !!error,
+    })
+  }, [nodes.length, edges.length, transition.displayNodes.length, renderedNodes.length, loading, error])
+
+  // Use the memo's `nodes` for gating, not `transition.displayNodes`.
+  // The memo updates synchronously in the same render cycle that
+  // receives fresh data from the company store, whereas the reducer is
+  // updated via a layout-effect dispatch one render later.  Gating the
+  // skeleton / empty-state on the memo makes sure we never hide a
+  // populated chart for a frame while the reducer catches up.
+  if (loading && nodes.length === 0) {
     return <OrgChartSkeleton />
   }
 
-  if (!loading && transition.displayNodes.length === 0 && !error) {
+  if (!loading && nodes.length === 0 && !error) {
     return (
       <EmptyState
         icon={GitBranch}
@@ -497,47 +718,85 @@ function OrgChartInner() {
       </div>
 
       <div className="relative flex-1 rounded-lg border border-border">
-        {/* Drag-drop visual feedback styles */}
-        <style>{`
-          .react-flow__node.dragging {
-            opacity: var(--so-opacity-dragging, 0.6);
-            transform: scale(1.02);
-            z-index: 1000 !important;
-          }
-          .react-flow__node.dragging > div {
-            box-shadow: var(--so-shadow-card-hover);
-          }
-          .react-flow__node {
-            transition: transform 0.4s cubic-bezier(0.17, 0.67, 0.29, 1.01);
-          }
-          @media (prefers-reduced-motion: reduce) {
-            .react-flow__node { transition: none; }
-          }
-        `}</style>
         <ReactFlow
           aria-label="Organization chart"
           nodes={renderedNodes}
-          edges={transition.displayEdges}
+          edges={renderedEdges}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
-          defaultViewport={defaultViewport}
-          fitView={!defaultViewport}
+          // Always `fitView` on mount so the camera centers on whatever
+          // nodes are currently present.  A stale `defaultViewport`
+          // persisted to localStorage from a previous session can
+          // otherwise point at empty space -- if the org was restructured,
+          // or if the user panned off-canvas before their previous
+          // reload, the new nodes land outside the saved window and the
+          // chart looks empty even though the nodes exist.  fitView
+          // re-applies on every mount; the saved viewport is still
+          // honoured for in-session pan/zoom persistence via the
+          // onMoveEnd handler below.
+          fitView
           fitViewOptions={{ padding: 0.2 }}
           onMoveEnd={handleMoveEnd}
           onNodeClick={handleNodeClick}
           onNodeContextMenu={handleNodeContextMenu}
+          // Drag-drop agent reassignment is disabled until the backend
+          // CRUD endpoints land -- see #1081.  `updateAgentOrg` (the
+          // PATCH /agents/{name} call wired into handleNodeDragStop)
+          // does not exist on the backend yet, so dropping an agent
+          // onto another department would roll back with a 405.  We
+          // set `nodesDraggable={false}` to block dragging entirely;
+          // the drag handlers stay wired so the code path is still
+          // exercised by tests and easy to re-enable once #1081 lands
+          // -- just flip `nodesDraggable` back to `viewMode === 'hierarchy'`.
           onNodeDragStart={viewMode === 'hierarchy' ? handleNodeDragStart : undefined}
           onNodeDrag={viewMode === 'hierarchy' ? handleNodeDrag : undefined}
           onNodeDragStop={viewMode === 'hierarchy' ? handleNodeDragStop : undefined}
           onPaneClick={handlePaneClick}
           nodesConnectable={false}
-          nodesDraggable={viewMode === 'hierarchy'}
+          nodesDraggable={false}
           minZoom={0.1}
           maxZoom={2}
           proOptions={{ hideAttribution: true }}
         >
           <Background color="var(--color-border)" gap={24} size={1} />
+          {showMinimap && (
+            <MiniMap
+              pannable
+              zoomable
+              ariaLabel="Org chart minimap"
+              position="bottom-right"
+              bgColor="var(--so-minimap-bg)"
+              maskColor="var(--so-minimap-mask)"
+              maskStrokeColor="var(--so-minimap-stroke)"
+              maskStrokeWidth={1.5}
+              style={{
+                width: 260,
+                height: 200,
+                resize: 'both',
+                overflow: 'hidden',
+                border: '1px solid var(--so-minimap-border)',
+                borderRadius: '10px',
+                boxShadow: 'var(--so-minimap-shadow)',
+              }}
+              nodeColor={(n) => {
+                if (n.type === 'owner') return 'var(--so-minimap-node-owner)'
+                if (n.type === 'department') return 'var(--so-minimap-node-dept)'
+                return 'var(--so-minimap-node-agent)'
+              }}
+              nodeStrokeColor={(n) => (n.type === 'department' ? 'var(--so-minimap-stroke)' : 'transparent')}
+              nodeStrokeWidth={1.5}
+              nodeBorderRadius={4}
+            />
+          )}
         </ReactFlow>
+
+        <OrgChartSearchOverlay
+          open={searchOpen}
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          onClose={handleSearchClose}
+          matchCount={searchMatchIds?.size ?? 0}
+        />
 
         {/* ARIA live region for drag-drop announcements */}
         <div ref={announceRef} className="sr-only" aria-live="assertive" />

@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { Dialog } from 'radix-ui'
+import { Dialog } from '@base-ui/react/dialog'
 import { Loader2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -8,6 +8,7 @@ import { SelectField } from '@/components/ui/select-field'
 import { getErrorMessage } from '@/utils/errors'
 import type { AgentConfig, CreateAgentOrgRequest, Department, SeniorityLevel } from '@/api/types'
 import { SENIORITY_LEVEL_VALUES } from '@/api/types'
+import { ORG_EDIT_COMING_SOON_DESCRIPTION, ORG_EDIT_COMING_SOON_TOOLTIP } from './coming-soon'
 
 export interface AgentCreateDialogProps {
   open: boolean
@@ -84,27 +85,34 @@ export function AgentCreateDialog({ open, onOpenChange, departments, onCreate }:
   )
 
   return (
-    <Dialog.Root open={open} onOpenChange={(v) => { if (!submitting) onOpenChange(v) }}>
+    <Dialog.Root open={open} onOpenChange={(v: boolean) => { if (!submitting) onOpenChange(v) }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content
+        <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity duration-200 ease-out data-[closed]:opacity-0 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
+        <Dialog.Popup
           className={cn(
             'fixed top-1/2 left-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2',
-            'rounded-xl border border-border-bright bg-surface p-6 shadow-lg',
-            'data-[state=open]:animate-in data-[state=closed]:animate-out',
-            'data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
-            'data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
+            'rounded-xl border border-border-bright bg-surface p-card shadow-[var(--so-shadow-card-hover)]',
+            'transition-[opacity,translate,scale] duration-200 ease-out',
+            'data-[closed]:opacity-0 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0',
+            'data-[closed]:scale-95 data-[starting-style]:scale-95 data-[ending-style]:scale-95',
           )}
         >
           <div className="flex items-center justify-between mb-4">
             <Dialog.Title className="text-base font-semibold text-foreground">
               New Agent
             </Dialog.Title>
-            <Dialog.Close asChild>
-              <Button variant="ghost" size="icon" aria-label="Close">
-                <X className="size-4" />
-              </Button>
-            </Dialog.Close>
+            <Dialog.Close
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Close"
+                  disabled={submitting}
+                >
+                  <X className="size-4" />
+                </Button>
+              }
+            />
           </div>
 
           <div className="space-y-4">
@@ -149,16 +157,31 @@ export function AgentCreateDialog({ open, onOpenChange, departments, onCreate }:
             )}
 
             <div className="flex justify-end gap-3 pt-2">
-              <Dialog.Close asChild>
-                <Button variant="outline" disabled={submitting}>Cancel</Button>
-              </Dialog.Close>
-              <Button disabled={submitting} onClick={handleSubmit}>
+              <Dialog.Close
+                render={
+                  <Button variant="outline" disabled={submitting}>Cancel</Button>
+                }
+              />
+              {/*
+               * Create is disabled until the backend CRUD endpoints
+               * land -- see #1081.  The trigger button on AgentsTab is
+               * also disabled so this dialog should rarely be
+               * reachable; the extra gate here is a defense-in-depth
+               * safety net.
+               */}
+              <Button
+                disabled
+                aria-disabled="true"
+                title={ORG_EDIT_COMING_SOON_TOOLTIP}
+                onClick={handleSubmit}
+              >
                 {submitting && <Loader2 className="mr-2 size-4 animate-spin" />}
                 Create Agent
               </Button>
             </div>
+            <p className="text-xs text-text-muted">{ORG_EDIT_COMING_SOON_DESCRIPTION}</p>
           </div>
-        </Dialog.Content>
+        </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>
   )

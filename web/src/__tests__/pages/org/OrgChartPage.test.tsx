@@ -17,6 +17,10 @@ function MockBackground() {
   return <div data-testid="react-flow-background" />
 }
 
+function MockMiniMap() {
+  return <div data-testid="react-flow-minimap" />
+}
+
 function mockUseReactFlow() {
   return { fitView: vi.fn(), zoomIn: vi.fn(), zoomOut: vi.fn() }
 }
@@ -38,6 +42,7 @@ function mockUseOrgChartData() {
   return {
     nodes: mockNodes,
     edges: EMPTY_EDGES,
+    allNodes: mockNodes,
     loading: mockLoading,
     error: mockError,
     commLoading: mockCommLoading,
@@ -54,6 +59,7 @@ vi.mock('@xyflow/react', () => ({
   ReactFlow: MockReactFlow,
   ReactFlowProvider: MockReactFlowProvider,
   Background: MockBackground,
+  MiniMap: MockMiniMap,
   useReactFlow: mockUseReactFlow,
   Handle: () => null,
   Position: { Top: 'top', Bottom: 'bottom' },
@@ -70,9 +76,13 @@ vi.mock('@/hooks/useOrgChartData', () => ({
   useOrgChartData: mockUseOrgChartData,
 }))
 
-vi.mock('@/lib/motion', () => ({
-  prefersReducedMotion: () => true,
-}))
+vi.mock('@/lib/motion', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/motion')>()
+  return {
+    ...actual,
+    prefersReducedMotion: () => true,
+  }
+})
 
 // Import after mocks
 import OrgChartPage from '@/pages/OrgChartPage'

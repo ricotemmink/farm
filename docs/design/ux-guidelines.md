@@ -45,7 +45,7 @@ Metric cards, sparklines, and trend indicators assign color by data direction:
 | Data state | Color token | Visual meaning |
 |------------|-------------|----------------|
 | Improving / rising | `success` | Green -- things getting better |
-| Stable / nominal | `accent` or `text-muted` | Neutral -- no action needed |
+| Stable / normal | `accent` or `text-muted` | Neutral -- no action needed |
 | Declining / degrading | `warning` | Amber -- attention warranted |
 | Critical / threshold | `danger` | Red -- act now |
 
@@ -331,7 +331,7 @@ For task board kanban columns and org chart hierarchy view:
 
 ### 3.5 Command Palette (Cmd+K)
 
-Built with the `cmdk` library.
+Built with the `cmdk-base` library (cmdk port on Base UI Dialog).
 
 | Property | Spec |
 |----------|------|

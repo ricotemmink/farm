@@ -1,5 +1,5 @@
-import { useCallback, useState } from 'react'
-import { Dialog } from 'radix-ui'
+import { cloneElement, isValidElement, useCallback, useId, useRef, useState } from 'react'
+import { Dialog } from '@base-ui/react/dialog'
 import { Loader2, X } from 'lucide-react'
 import { cn, FOCUS_RING } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -94,6 +94,17 @@ export function TaskCreateDialog({ open, onOpenChange, onCreate }: TaskCreateDia
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
+  // Reset form state on close (render-phase check mirroring AgentCreateDialog /
+  // DepartmentCreateDialog / PackSelectionDialog so reopening does not show
+  // stale input from the previous session).
+  const prevOpenRef = useRef(open)
+  if (!open && prevOpenRef.current) {
+    setForm(INITIAL_FORM)
+    setErrors({})
+    setSubmitError(null)
+  }
+  prevOpenRef.current = open
+
   function updateField<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }))
     setErrors((prev) => ({ ...prev, [key]: undefined }))
@@ -142,16 +153,24 @@ export function TaskCreateDialog({ open, onOpenChange, onCreate }: TaskCreateDia
   }, [form, onCreate, onOpenChange])
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next: boolean) => {
+        // Prevent backdrop click / Escape from closing the dialog while a
+        // create request is in flight, matching the guard pattern used by
+        // the other create dialogs.
+        if (!submitting) onOpenChange(next)
+      }}
+    >
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content
+        <Dialog.Backdrop className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity duration-200 ease-out data-[closed]:opacity-0 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
+        <Dialog.Popup
           className={cn(
             'fixed top-1/2 left-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2',
-            'rounded-xl border border-border-bright bg-surface p-6 shadow-lg',
-            'data-[state=open]:animate-in data-[state=closed]:animate-out',
-            'data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
-            'data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
+            'rounded-xl border border-border-bright bg-surface p-card shadow-[var(--so-shadow-card-hover)]',
+            'transition-[opacity,translate,scale] duration-200 ease-out',
+            'data-[closed]:opacity-0 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0',
+            'data-[closed]:scale-95 data-[starting-style]:scale-95 data-[ending-style]:scale-95',
             'max-h-[85vh] overflow-y-auto',
           )}
         >
@@ -159,17 +178,24 @@ export function TaskCreateDialog({ open, onOpenChange, onCreate }: TaskCreateDia
             <Dialog.Title className="text-base font-semibold text-foreground">
               New Task
             </Dialog.Title>
-            <Dialog.Close asChild>
-              <Button variant="ghost" size="icon" aria-label="Close">
-                <X className="size-4" />
-              </Button>
-            </Dialog.Close>
+            <Dialog.Close
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Close"
+                  disabled={submitting}
+                >
+                  <X className="size-4" />
+                </Button>
+              }
+            />
           </div>
 
           <div className="space-y-4">
             {/* Template suggestions */}
             <div>
-              <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+              <label className="mb-1 block text-compact font-semibold uppercase tracking-wider text-text-muted">
                 Start from template
               </label>
               <div className="flex flex-wrap gap-1.5">
@@ -178,7 +204,7 @@ export function TaskCreateDialog({ open, onOpenChange, onCreate }: TaskCreateDia
                     key={tpl.label}
                     type="button"
                     onClick={() => setForm((prev) => ({ ...prev, ...tpl.defaults }))}
-                    className="rounded-full border border-border bg-surface px-2.5 py-1 text-[11px] text-text-secondary transition-colors hover:border-accent hover:text-foreground"
+                    className="rounded-full border border-border bg-surface px-2.5 py-1 text-compact text-text-secondary transition-colors hover:border-accent hover:text-foreground"
                     title={tpl.description}
                   >
                     {tpl.label}
@@ -208,7 +234,7 @@ export function TaskCreateDialog({ open, onOpenChange, onCreate }: TaskCreateDia
               />
             </FormField>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-grid-gap">
               <FormField label="Type">
                 <select value={form.type} onChange={(e) => updateField('type', e.target.value as TaskType)} className={INPUT_CLASSES}>
                   {TASK_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
@@ -222,7 +248,7 @@ export function TaskCreateDialog({ open, onOpenChange, onCreate }: TaskCreateDia
               </FormField>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-grid-gap">
               <FormField label="Project" error={errors.project} required>
                 <input type="text" value={form.project} onChange={(e) => updateField('project', e.target.value)} className={INPUT_CLASSES} placeholder="Project name" />
               </FormField>
@@ -232,7 +258,7 @@ export function TaskCreateDialog({ open, onOpenChange, onCreate }: TaskCreateDia
               </FormField>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-2 gap-grid-gap">
               <FormField label="Assigned To">
                 <input type="text" value={form.assigned_to} onChange={(e) => updateField('assigned_to', e.target.value)} className={INPUT_CLASSES} placeholder="Agent name (optional)" />
               </FormField>
@@ -253,32 +279,63 @@ export function TaskCreateDialog({ open, onOpenChange, onCreate }: TaskCreateDia
             )}
 
             <div className="flex justify-end gap-3 pt-2">
-              <Dialog.Close asChild>
-                <Button variant="outline" disabled={submitting}>Cancel</Button>
-              </Dialog.Close>
+              <Dialog.Close
+                render={
+                  <Button variant="outline" disabled={submitting}>Cancel</Button>
+                }
+              />
               <Button disabled={submitting} onClick={handleSubmit}>
                 {submitting && <Loader2 className="mr-2 size-4 animate-spin" />}
                 Create Task
               </Button>
             </div>
           </div>
-        </Dialog.Content>
+        </Dialog.Popup>
       </Dialog.Portal>
     </Dialog.Root>
   )
 }
 
-const INPUT_CLASSES = cn('w-full h-8 rounded-md border border-border bg-surface px-2 text-[13px] text-foreground outline-none', FOCUS_RING)
-const TEXTAREA_CLASSES = cn('w-full rounded-md border border-border bg-surface px-2 py-1.5 text-[13px] text-foreground outline-none resize-y', FOCUS_RING)
+const INPUT_CLASSES = cn('w-full h-8 rounded-md border border-border bg-surface px-2 text-body-sm text-foreground outline-none', FOCUS_RING)
+const TEXTAREA_CLASSES = cn('w-full rounded-md border border-border bg-surface px-2 py-1.5 text-body-sm text-foreground outline-none resize-y', FOCUS_RING)
 
 function FormField({ label, error, required, children }: { label: string; error?: string; required?: boolean; children: React.ReactNode }) {
+  // Accessibility:
+  // - The <label> wraps only the visible text and the form control so
+  //   screen readers resolve label-to-input via implicit association
+  //   without the error text leaking into the control's accessible name.
+  // - The error <p> is rendered as a sibling of the label (outside it)
+  //   with a stable id, and the form control is cloned with an
+  //   `aria-describedby` pointing at that id so AT announces the error
+  //   as separate help text rather than as part of the label.
+  const errorId = useId()
+  // Inject aria-describedby / aria-invalid onto the wrapped form control
+  // when an error is present so AT announces the error as separate help
+  // text. cloneElement is the only way to do this for an arbitrary
+  // children prop without binding every call site to a specific input
+  // component; the wrapping `isValidElement` guard keeps the clone safe
+  // for the single-element case this FormField is actually used for.
+  const controlWithAria =
+    error && isValidElement<{ 'aria-describedby'?: string; 'aria-invalid'?: boolean }>(children)
+      ? // eslint-disable-next-line @eslint-react/no-clone-element -- see comment above
+        cloneElement(children, {
+          'aria-describedby': errorId,
+          'aria-invalid': true,
+        })
+      : children
   return (
-    <div>
-      <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-text-muted">
-        {label}{required && <span className="text-danger"> *</span>}
+    <div className="block">
+      <label className="block">
+        <span className="mb-1 block text-compact font-semibold uppercase tracking-wider text-text-muted">
+          {label}{required && <span className="text-danger"> *</span>}
+        </span>
+        {controlWithAria}
       </label>
-      {children}
-      {error && <p className="mt-0.5 text-[10px] text-danger">{error}</p>}
+      {error && (
+        <p id={errorId} className="mt-0.5 text-micro text-danger">
+          {error}
+        </p>
+      )}
     </div>
   )
 }

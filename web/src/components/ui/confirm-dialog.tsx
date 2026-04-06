@@ -1,7 +1,12 @@
-import { AlertDialog } from 'radix-ui'
+import { useState } from 'react'
+import { AlertDialog } from '@base-ui/react/alert-dialog'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { createLogger } from '@/lib/logger'
+import { sanitizeForLog } from '@/utils/logging'
 import { Button } from './button'
+
+const log = createLogger('ConfirmDialog')
 
 export interface ConfirmDialogProps {
   open: boolean
@@ -35,19 +40,34 @@ export function ConfirmDialog({
   className,
   children,
 }: ConfirmDialogProps) {
+  const [submitting, setSubmitting] = useState(false)
+  const busy = loading || submitting
+
   return (
-    <AlertDialog.Root open={open} onOpenChange={onOpenChange}>
+    <AlertDialog.Root
+      open={open}
+      onOpenChange={(nextOpen: boolean) => {
+        // Lock the dialog while a confirm action is in flight: without this,
+        // Escape and backdrop clicks flow straight through to `onOpenChange`
+        // and callers that clear state on close (e.g. ApprovalDetailDrawer
+        // resetting its `comment` state) would drop the user's retry context
+        // mid-operation, even though this component's intent is to stay open
+        // on failure so the caller can retry from the same surface.
+        if (busy && !nextOpen) return
+        onOpenChange(nextOpen)
+      }}
+    >
       <AlertDialog.Portal>
-        <AlertDialog.Overlay
-          className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
+        <AlertDialog.Backdrop
+          className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity duration-200 ease-out data-[closed]:opacity-0 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0"
         />
-        <AlertDialog.Content
+        <AlertDialog.Popup
           className={cn(
             'fixed top-1/2 left-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2',
-            'rounded-xl border border-border-bright bg-surface p-6 shadow-lg',
-            'data-[state=open]:animate-in data-[state=closed]:animate-out',
-            'data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0',
-            'data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
+            'rounded-xl border border-border-bright bg-surface p-card shadow-[var(--so-shadow-card-hover)]',
+            'transition-[opacity,translate,scale] duration-200 ease-out',
+            'data-[closed]:opacity-0 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0',
+            'data-[closed]:scale-95 data-[starting-style]:scale-95 data-[ending-style]:scale-95',
             className,
           )}
         >
@@ -61,31 +81,40 @@ export function ConfirmDialog({
           )}
           {children}
           <div className="mt-6 flex justify-end gap-3">
-            <AlertDialog.Cancel asChild>
-              <Button variant="outline" disabled={loading}>
-                {cancelLabel}
-              </Button>
-            </AlertDialog.Cancel>
+            <AlertDialog.Close
+              render={
+                <Button variant="outline" disabled={busy}>
+                  {cancelLabel}
+                </Button>
+              }
+            />
             <Button
               variant={variant === 'destructive' ? 'destructive' : 'default'}
-              disabled={loading}
-              onClick={async (e) => {
-                e.preventDefault()
+              data-variant={variant}
+              disabled={busy}
+              onClick={async () => {
+                if (busy) return
+                setSubmitting(true)
                 try {
                   await onConfirm()
                   onOpenChange(false)
-                } catch {
-                  // Dialog stays open on error -- caller can surface the error.
+                } catch (err) {
+                  // Dialog stays open on error so the caller can retry from
+                  // the same surface. Log the cause so the failure is not
+                  // invisible if the caller forgets to toast its own error.
+                  log.warn('ConfirmDialog onConfirm threw', { title: sanitizeForLog(title) }, err)
+                } finally {
+                  setSubmitting(false)
                 }
               }}
             >
-              {loading && (
+              {busy && (
                 <Loader2 className="mr-2 size-4 animate-spin" aria-hidden="true" />
               )}
               {confirmLabel}
             </Button>
           </div>
-        </AlertDialog.Content>
+        </AlertDialog.Popup>
       </AlertDialog.Portal>
     </AlertDialog.Root>
   )

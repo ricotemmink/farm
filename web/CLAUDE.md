@@ -1,6 +1,8 @@
 # Web Dashboard
 
-React 19 + shadcn/ui + Radix UI + Tailwind CSS 4 + Framer Motion + Zustand
+React 19 + shadcn/ui + Base UI + Tailwind CSS 4 + Framer Motion + Zustand
+
+`App.tsx` wraps the app in `<CSPProvider nonce={getCspNonce()}>` + `<MotionConfig nonce>` so every inline `<style>` tag injected by Base UI and Framer Motion carries the per-request CSP nonce. See `docs/security.md` → CSP Nonce Infrastructure for the full flow. Base UI's `render` prop is the polymorphism primitive used throughout the dashboard; the local `<Slot>` helper in `components/ui/slot.tsx` uses `@base-ui/react/merge-props` to support the `<Button asChild>` ergonomic (the only component that uses this helper -- all other primitives use Base UI's native `render` prop directly).
 
 ## Quick Commands
 
@@ -67,8 +69,8 @@ web/src/
 | `Skeleton` / `SkeletonCard` / `SkeletonMetric` / `SkeletonTable` / `SkeletonText` | `@/components/ui/skeleton` | Loading placeholders matching component shapes (shimmer animation, respects `prefers-reduced-motion`) |
 | `EmptyState` | `@/components/ui/empty-state` | No-data / no-results placeholder with icon, title, description, optional action button |
 | `ErrorBoundary` | `@/components/ui/error-boundary` | React error boundary with retry -- `level` prop: `page` / `section` / `component` |
-| `ConfirmDialog` | `@/components/ui/confirm-dialog` | Confirmation modal (Radix AlertDialog) with `default` / `destructive` variants and `loading` state |
-| `CommandPalette` | `@/components/ui/command-palette` | Global Cmd+K search (cmdk + React Router) -- mount once in AppLayout, register commands via `useCommandPalette` hook |
+| `ConfirmDialog` | `@/components/ui/confirm-dialog` | Confirmation modal (Base UI AlertDialog) with `default` / `destructive` variants and `loading` state |
+| `CommandPalette` | `@/components/ui/command-palette` | Global Cmd+K search (cmdk-base + Base UI Dialog + React Router) -- mount once in AppLayout, register commands via `useCommandPalette` hook |
 | `InlineEdit` | `@/components/ui/inline-edit` | Click-to-edit text with Enter/Escape, validation, optimistic save with rollback |
 | `AnimatedPresence` | `@/components/ui/animated-presence` | Page transition wrapper (Framer Motion AnimatePresence keyed by route) |
 | `StaggerGroup` / `StaggerItem` | `@/components/ui/stagger-group` | Card entrance stagger container with configurable delay |
@@ -83,7 +85,7 @@ web/src/
 | `TokenUsageBar` | `@/components/ui/token-usage-bar` | Segmented horizontal meter bar for token usage (multi-segment with auto-colors, `role="meter"`, animated transitions) |
 | `CodeMirrorEditor` | `@/components/ui/code-mirror-editor` | CodeMirror 6 editor with JSON/YAML modes, design-token dark theme, line numbers, bracket matching, `readOnly` support |
 | `SegmentedControl` | `@/components/ui/segmented-control` | Accessible radiogroup with keyboard navigation, size variants (`sm`/`md`), generic `<T extends string>` typing |
-| `ThemeToggle` | `@/components/ui/theme-toggle` | Radix Popover with 5-axis theme controls (color, density, typography, animation, sidebar), rendered in StatusBar |
+| `ThemeToggle` | `@/components/ui/theme-toggle` | Base UI Popover with 5-axis theme controls (color, density, typography, animation, sidebar), rendered in StatusBar |
 | `LiveRegion` | `@/components/ui/live-region` | Debounced ARIA live region wrapper (`polite`/`assertive`) for real-time WS updates without overwhelming screen readers |
 | `MobileUnsupportedOverlay` | `@/components/ui/mobile-unsupported` | Full-screen overlay at `<768px` viewports directing users to desktop or CLI; self-manages visibility via `useBreakpoint` |
 | `LazyCodeMirrorEditor` | `@/components/ui/lazy-code-mirror-editor` | Suspense-wrapped lazy-loaded `CodeMirrorEditor` (drop-in replacement, defers ~200KB+ CodeMirror bundle) |
@@ -109,6 +111,13 @@ When a new shared component is needed (not covered by the inventory above):
 3. Export props as a TypeScript interface
 4. Use design tokens exclusively -- no hardcoded colors, fonts, or spacing
 5. Import `cn` from `@/lib/utils` for conditional class merging
+6. **For primitives backed by Base UI** (Dialog, AlertDialog, Popover, Menu, Tabs -- see the Adoption Decisions table below for the canonical list; `Select`, `Toast`, `Drawer`, `Meter`, `Combobox`, `Tooltip` are intentionally **not** adopted):
+   - Import from the specific subpath: `import { Dialog } from '@base-ui/react/dialog'`
+   - Use the component's `render` prop for polymorphism: `<Dialog.Trigger render={<Button>Open</Button>} />`. Never spread props manually.
+   - For Dialog/AlertDialog/Popover: compose with `Portal` + `Backdrop` + `Popup`. Popover and Menu additionally require a `Positioner` wrapper that owns `side` / `align` / `sideOffset`.
+   - Animation state attributes are `data-[open]`, `data-[closed]`, `data-[starting-style]`, `data-[ending-style]` (not `data-[state=open]` / `data-[state=closed]`). Tabs Tab uses `data-[active]` (not `data-[state=active]`).
+   - In Tailwind v4, `translate-*` and `scale-*` compile to the dedicated CSS `translate:` and `scale:` properties, not `transform:`. Transition property lists must name each one explicitly: `transition-[opacity,translate]` or `transition-[opacity,scale]`, not just `transition-[opacity,transform]`.
+   - The local `<Slot>` helper in `components/ui/slot.tsx` is reserved for `<Button asChild>` -- all other polymorphism goes through Base UI's `render` prop.
 
 ### What NOT to Do
 
@@ -130,6 +139,23 @@ A PostToolUse hook (`scripts/check_web_design_system.py`) runs automatically on 
 - Complex `.map()` blocks that should be extracted
 
 Fix all violations before proceeding -- do not suppress or ignore hook output.
+
+## Base UI Adoption Decisions
+
+The dashboard's primitive layer is [Base UI](https://base-ui.com).  `components.json` is set to the `base-vega` shadcn style so that any component generated via the shadcn CLI targets Base UI internals, but the adopted primitives below are **imported directly** from `@base-ui/react/*` subpaths (for example `import { Dialog } from '@base-ui/react/dialog'`) with no shadcn wrapper layer in between.  When adding a new primitive, prefer the direct-import path -- do not introduce a shadcn wrapper unless there is a concrete reason to diverge.
+
+| Component | Decision | Rationale |
+|-----------|----------|-----------|
+| `Dialog`, `AlertDialog`, `Popover`, `Tabs`, `Menu` | **Adopted** | Imported directly from `@base-ui/react/*` subpaths across the dashboard's primitive files and page-level dialogs. |
+| `CSPProvider` | **Adopted** | Wired in `App.tsx` alongside `MotionConfig` for end-to-end nonce propagation. |
+| `merge-props` | **Adopted** | Powers the local `<Slot>` helper in `components/ui/slot.tsx` (preserves the `asChild` ergonomic for `<Button>`). |
+| `Toast` | **Not adopted** | Our custom `components/ui/toast.tsx` is a Zustand-backed queue that integrates with the rest of the state stack; Base UI's Toast doesn't couple to external stores. |
+| `Drawer` | **Not adopted** | Our custom `components/ui/drawer.tsx` is Framer Motion-based and uses the `@/lib/motion` design-token presets enforced by the PostToolUse hook. Switching would break the motion-token enforcement. |
+| `Meter` | **Not adopted** | `ProgressGauge` already emits `role="meter"` + `aria-valuenow`/`valuemin`/`valuemax`. Base UI's Meter is a raw primitive without the styled circular/linear variants we need. |
+| `Select` | **Not adopted** | `SelectField` is a native `<select>` -- we intentionally keep the native mobile picker for iOS/Android UX. Replacing with a custom dropdown would lose that. |
+| `Combobox`, `Autocomplete` | **Not adopted (for now)** | No current typeahead call sites in the dashboard that would benefit. Re-evaluate when filterable selects become a feature requirement. |
+
+When adding new dashboard primitives, prefer Base UI components for accessibility (Dialog, AlertDialog, Popover, Tabs, Menu) and keep the existing custom components (`SelectField`, `Drawer`, `Toast`, `ProgressGauge`, animations) where they are -- see the Adoption Decisions table above for the canonical rationale.  Tooltip is not yet adopted; reach for an existing primitive first and add a row to the table above if a real Tooltip requirement appears.
 
 ## Post-Training Reference (TypeScript 6 & Storybook 10)
 

@@ -7,6 +7,7 @@ lifecycle hooks (startup/shutdown).
 
 import asyncio
 import contextlib
+import functools
 import os
 import sys
 import time
@@ -34,6 +35,7 @@ from synthorg.api.auto_wire import (
 )
 from synthorg.api.bus_bridge import MessageBusBridge
 from synthorg.api.channels import (
+    CHANNEL_AGENTS,
     CHANNEL_APPROVALS,
     CHANNEL_MEETINGS,
     create_channels_plugin,
@@ -64,6 +66,10 @@ from synthorg.communication.meeting.scheduler import MeetingScheduler  # noqa: T
 from synthorg.config import bootstrap_logging
 from synthorg.config.schema import RootConfig
 from synthorg.core.approval import ApprovalItem  # noqa: TC001
+from synthorg.engine.agent_engine import (  # noqa: TC001
+    PersonalityTrimNotifier,
+    PersonalityTrimPayload,
+)
 from synthorg.engine.coordination.service import MultiAgentCoordinator  # noqa: TC001
 from synthorg.engine.review_gate import ReviewGateService
 from synthorg.engine.task_engine import TaskEngine  # noqa: TC001
@@ -82,6 +88,9 @@ from synthorg.observability.events.api import (
     API_SESSION_CLEANUP,
     API_WS_SEND_FAILED,
     API_WS_TICKET_CLEANUP,
+)
+from synthorg.observability.events.prompt import (
+    PROMPT_PERSONALITY_NOTIFY_FAILED,
 )
 from synthorg.observability.events.setup import (
     SETUP_AGENT_BOOTSTRAP_FAILED,
@@ -206,6 +215,88 @@ def _make_meeting_publisher(
             )
 
     return _on_meeting_event
+
+
+def make_personality_trim_notifier(
+    channels_plugin: ChannelsPlugin,
+) -> PersonalityTrimNotifier:
+    """Create an async callback that publishes ``personality.trimmed`` events.
+
+    The returned callback matches the
+    :data:`~synthorg.engine.agent_engine.PersonalityTrimNotifier` contract and
+    can be passed to ``AgentEngine`` via the ``personality_trim_notifier``
+    constructor parameter.  It publishes a ``WsEvent(event_type=
+    WsEventType.PERSONALITY_TRIMMED, channel=agents)`` so the dashboard can
+    render a live toast when personality trimming fires.
+
+    External engine runners (CLI workers, Kubernetes jobs, etc.) that host an
+    ``AgentEngine`` should call this factory with their ``ChannelsPlugin``
+    instance and wire the result into the engine constructor.  ``create_app``
+    itself does not instantiate ``AgentEngine`` and therefore does not call
+    this factory -- it exists as a public wiring utility for downstream
+    consumers.
+
+    The callback is declared ``async`` to match the
+    :data:`PersonalityTrimNotifier` contract.  The underlying
+    :meth:`ChannelsPlugin.publish` call is synchronous -- a fire-and-forget
+    enqueue onto the channels backlog that normally completes in
+    microseconds.  We wrap it in :func:`asyncio.to_thread` so that:
+    (a) a pathological channels-plugin implementation cannot block the
+    event loop, and (b) the engine-side :func:`asyncio.timeout` has an
+    actual ``await`` point to cancel at.  Without the ``to_thread`` hop a
+    synchronous stall would bypass the timeout entirely.
+
+    Best-effort error handling distinguishes ordinary transport failures
+    from system-level or cancellation conditions:
+
+    * Ordinary ``Exception`` subclasses raised during the publish (broken
+      channel, serialization error, backend unavailable) are logged via
+      ``PROMPT_PERSONALITY_NOTIFY_FAILED`` and **swallowed** so a broken
+      notification pipeline never blocks task execution.
+    * :class:`MemoryError` and :class:`RecursionError` are re-raised so the
+      enclosing task can tear down cleanly under resource exhaustion.
+    * :class:`asyncio.CancelledError` propagates naturally because it is a
+      :class:`BaseException` subclass and is not caught by ``except
+      Exception``, preserving structured cancellation.
+
+    Args:
+        channels_plugin: Litestar channels plugin for WebSocket delivery.
+
+    Returns:
+        Async callback accepting a ``PersonalityTrimPayload``.
+    """
+
+    async def _on_personality_trimmed(payload: PersonalityTrimPayload) -> None:
+        event = WsEvent(
+            event_type=WsEventType.PERSONALITY_TRIMMED,
+            channel=CHANNEL_AGENTS,
+            timestamp=datetime.now(UTC),
+            payload=dict(payload),
+        )
+        try:
+            await asyncio.to_thread(
+                functools.partial(
+                    channels_plugin.publish,
+                    event.model_dump_json(),
+                    channels=[CHANNEL_AGENTS],
+                ),
+            )
+        except MemoryError, RecursionError:
+            raise
+        except Exception:
+            logger.warning(
+                PROMPT_PERSONALITY_NOTIFY_FAILED,
+                reason="failed to publish personality.trimmed WebSocket event",
+                agent_id=payload.get("agent_id"),
+                agent_name=payload.get("agent_name"),
+                task_id=payload.get("task_id"),
+                trim_tier=payload.get("trim_tier"),
+                before_tokens=payload.get("before_tokens"),
+                after_tokens=payload.get("after_tokens"),
+                exc_info=True,
+            )
+
+    return _on_personality_trimmed
 
 
 async def _ticket_cleanup_loop(app_state: AppState) -> None:

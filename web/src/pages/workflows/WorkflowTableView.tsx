@@ -1,6 +1,6 @@
 import { Link, useNavigate } from 'react-router'
 import { Workflow, MoreHorizontal, Copy, Trash2, Pencil } from 'lucide-react'
-import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
+import { Menu } from '@base-ui/react/menu'
 import { useState } from 'react'
 import { ROUTES } from '@/router/routes'
 import { EmptyState } from '@/components/ui/empty-state'
@@ -9,7 +9,7 @@ import type { WorkflowDefinition } from '@/api/types'
 
 interface WorkflowTableViewProps {
   workflows: readonly WorkflowDefinition[]
-  onDelete: (id: string) => void
+  onDelete: (id: string) => void | Promise<void>
   onDuplicate: (id: string) => void
 }
 
@@ -78,46 +78,46 @@ export function WorkflowTableView({ workflows, onDelete, onDuplicate }: Workflow
                   <td className="px-4 py-2.5 text-right text-muted-foreground">v{w.version}</td>
                   <td className="px-4 py-2.5 text-muted-foreground">{formatDate(w.updated_at)}</td>
                   <td className="px-2 py-2.5">
-                    <DropdownMenu.Root>
-                      <DropdownMenu.Trigger asChild>
-                        <button
-                          type="button"
-                          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-                          aria-label={`Actions for ${w.name}`}
-                        >
-                          <MoreHorizontal className="size-4" />
-                        </button>
-                      </DropdownMenu.Trigger>
-                      <DropdownMenu.Portal>
-                        <DropdownMenu.Content
-                          align="end"
-                          sideOffset={4}
-                          className="z-50 min-w-36 rounded-md border border-border bg-popover p-1 shadow-[var(--so-shadow-card-hover)]"
-                        >
-                          <DropdownMenu.Item
-                            className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-foreground outline-none hover:bg-accent/10 focus:bg-accent/10"
-                            onSelect={() => navigate(editorUrl)}
+                    <Menu.Root>
+                      <Menu.Trigger
+                        render={
+                          <button
+                            type="button"
+                            className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                            aria-label={`Actions for ${w.name}`}
                           >
-                            <Pencil className="size-3.5" />
-                            Edit
-                          </DropdownMenu.Item>
-                          <DropdownMenu.Item
-                            className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-foreground outline-none hover:bg-accent/10 focus:bg-accent/10"
-                            onSelect={() => onDuplicate(w.id)}
-                          >
-                            <Copy className="size-3.5" />
-                            Duplicate
-                          </DropdownMenu.Item>
-                          <DropdownMenu.Item
-                            className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-danger outline-none hover:bg-danger/10 focus:bg-danger/10"
-                            onSelect={() => setConfirmDeleteId(w.id)}
-                          >
-                            <Trash2 className="size-3.5" />
-                            Delete
-                          </DropdownMenu.Item>
-                        </DropdownMenu.Content>
-                      </DropdownMenu.Portal>
-                    </DropdownMenu.Root>
+                            <MoreHorizontal className="size-4" />
+                          </button>
+                        }
+                      />
+                      <Menu.Portal>
+                        <Menu.Positioner align="end" sideOffset={4}>
+                          <Menu.Popup className="z-50 min-w-36 rounded-lg border border-border bg-card py-1 shadow-[var(--so-shadow-card-hover)] transition-[opacity,translate,scale] duration-150 ease-out data-[closed]:opacity-0 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0 data-[closed]:scale-95 data-[starting-style]:scale-95 data-[ending-style]:scale-95">
+                            <Menu.Item
+                              className="flex w-full cursor-default items-center gap-2 px-3 py-1.5 text-sm text-foreground outline-none data-[highlighted]:bg-surface"
+                              onClick={() => { void navigate(editorUrl) }}
+                            >
+                              <Pencil className="size-3.5" />
+                              Edit
+                            </Menu.Item>
+                            <Menu.Item
+                              className="flex w-full cursor-default items-center gap-2 px-3 py-1.5 text-sm text-foreground outline-none data-[highlighted]:bg-surface"
+                              onClick={() => onDuplicate(w.id)}
+                            >
+                              <Copy className="size-3.5" />
+                              Duplicate
+                            </Menu.Item>
+                            <Menu.Item
+                              className="flex w-full cursor-default items-center gap-2 px-3 py-1.5 text-sm text-danger outline-none data-[highlighted]:bg-surface"
+                              onClick={() => setConfirmDeleteId(w.id)}
+                            >
+                              <Trash2 className="size-3.5" />
+                              Delete
+                            </Menu.Item>
+                          </Menu.Popup>
+                        </Menu.Positioner>
+                      </Menu.Portal>
+                    </Menu.Root>
                   </td>
                 </tr>
               )
@@ -130,8 +130,10 @@ export function WorkflowTableView({ workflows, onDelete, onDuplicate }: Workflow
         open={confirmDeleteId !== null}
         onOpenChange={(open) => { if (!open) setConfirmDeleteId(null) }}
         onConfirm={() => {
-          if (confirmDeleteId) onDelete(confirmDeleteId)
-          setConfirmDeleteId(null)
+          // Forward the promise so ConfirmDialog's onConfirm handler can
+          // observe rejection and keep the dialog open for retry.
+          if (confirmDeleteId) return onDelete(confirmDeleteId)
+          return undefined
         }}
         title="Delete workflow"
         description="This action cannot be undone. The workflow definition will be permanently deleted."

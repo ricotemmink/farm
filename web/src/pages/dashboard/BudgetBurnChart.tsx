@@ -71,10 +71,11 @@ function getTodayLabel(): string {
   return new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
-function ChartTooltipContent({ active, payload, label }: {
+function ChartTooltipContent({ active, payload, label, currency }: {
   active?: boolean
   payload?: Array<{ value: number; dataKey: string }>
   label?: string
+  currency?: string
 }) {
   if (!active || !payload?.length) return null
   return (
@@ -83,7 +84,7 @@ function ChartTooltipContent({ active, payload, label }: {
       {payload.map((entry) => (
         <p key={entry.dataKey} className="font-mono text-foreground">
           {entry.dataKey === 'projected' ? 'Forecast: ' : 'Spend: '}
-          {formatCurrency(entry.value)}
+          {formatCurrency(entry.value, currency)}
         </p>
       ))}
     </div>
@@ -123,7 +124,18 @@ export function BudgetBurnChart({ trendData, forecast, budgetTotal, budgetRemain
         />
       ) : (
         <div className="h-48 w-full" data-testid="budget-burn-chart" role="img" aria-label="Budget spend over time chart">
-          <ResponsiveContainer width="100%" height="100%">
+          {/*
+           * `initialDimension` is recharts' first-paint size for the
+           * chart, used before ResizeObserver fires with real
+           * measurements.  The library default is `{width: -1, height:
+           * -1}`, which fails its own `width > 0 && height > 0` sanity
+           * check and logs the "width(-1) height(-1) of chart should
+           * be greater than 0" warning on every first render.  A
+           * positive placeholder silences the warning without
+           * affecting layout -- recharts swaps to the real measured
+           * size on the next animation frame.
+           */}
+          <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 1, height: 1 }}>
             <AreaChart data={chartData} margin={{ top: 20, right: 8, bottom: 0, left: 0 }}>
               <CartesianGrid
                 strokeDasharray="3 3"
@@ -143,7 +155,7 @@ export function BudgetBurnChart({ trendData, forecast, budgetTotal, budgetRemain
                 tickFormatter={(v: number) => formatCurrencyCompact(v, currency)}
                 width={48}
               />
-              <Tooltip content={<ChartTooltipContent />} />
+              <Tooltip content={<ChartTooltipContent currency={currency} />} />
 
               {budgetTotal > 0 && (
                 <ReferenceLine
