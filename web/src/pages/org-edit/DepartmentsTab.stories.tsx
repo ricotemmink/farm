@@ -28,7 +28,7 @@ const mockConfig: CompanyConfig = {
     },
   ],
   departments: [
-    { name: 'engineering', display_name: 'Engineering', teams: [{ name: 'backend', members: ['alice'] }] },
+    { name: 'engineering', display_name: 'Engineering', teams: [{ name: 'backend', lead: 'alice', members: ['alice'] }] },
     { name: 'product', display_name: 'Product', teams: [] },
   ],
 }
@@ -53,6 +53,18 @@ const meta = {
     onDeleteDepartment: async () => {},
     onReorderDepartments: async () => {},
     optimisticReorderDepartments: () => () => {},
+    onCreateTeam: async (_d, data) => ({
+      name: data.name ?? 'New Team',
+      lead: data.lead ?? 'Unassigned',
+      members: data.members ?? [data.lead ?? 'Unassigned'],
+    }),
+    onUpdateTeam: async (_d, _t, data) => ({
+      name: data.name ?? _t,
+      lead: data.lead ?? 'Unassigned',
+      members: data.members ?? [data.lead ?? 'Unassigned'],
+    }),
+    onDeleteTeam: async () => {},
+    onReorderTeams: async () => {},
   },
 } satisfies Meta<typeof DepartmentsTab>
 

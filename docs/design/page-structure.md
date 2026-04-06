@@ -35,9 +35,9 @@ Living org visualization with real-time agent status. Two view modes toggled via
 
 Click agent nodes to open Agent Detail panel.
 
-"Edit Organization" button enters form-based edit mode (`/org/edit`) with sub-tabs: General (name, autonomy level, monthly budget, communication pattern), Agents (card grid with add/edit/delete), Departments (card grid with CRUD and read-only teams summary; nested teams/reporting/policies editing is deferred). This is the former Company page merged into the Org Chart -- same data domain, one destination.
+"Edit Organization" button enters form-based edit mode (`/org/edit`) with sub-tabs: General (name, autonomy level, monthly budget, communication pattern), Agents (card grid with add/edit/delete), Departments (card grid with CRUD; nested team editing via the Department Edit drawer with create/rename/delete/reorder teams using @dnd-kit; reporting/policies editing remains deferred). This is the former Company page merged into the Org Chart -- same data domain, one destination.
 
-**API endpoints**: `GET /company`, `GET /company/departments`, `GET /departments`, `GET /departments/{name}`, `GET /departments/{name}/health`, `GET /agents`, `GET /agents/{name}`, `GET /messages` (communication view), `PATCH /agents/{name}` (drag-drop reassignment in hierarchy view). Edit mode adds: `PATCH /company`, `POST /departments`, `PATCH /departments/{name}`, `DELETE /departments/{name}`, `POST /company/reorder-departments`, `POST /agents`, `DELETE /agents/{name}`, `POST /departments/{name}/reorder-agents` (stub -- backend not yet implemented).
+**API endpoints**: `GET /company`, `GET /company/departments`, `GET /departments`, `GET /departments/{name}`, `GET /departments/{name}/health`, `GET /agents`, `GET /agents/{name}`, `GET /messages` (communication view), `PATCH /agents/{name}` (drag-drop reassignment in hierarchy view). Edit mode adds: `PATCH /company`, `POST /departments`, `PATCH /departments/{name}`, `DELETE /departments/{name}`, `POST /company/reorder-departments`, `POST /agents`, `DELETE /agents/{name}`, `POST /departments/{name}/reorder-agents`, `POST /departments/{name}/teams`, `PATCH /departments/{name}/teams/{team_name}`, `DELETE /departments/{name}/teams/{team_name}`, `PATCH /departments/{name}/teams/reorder`.
 **WS channels**: `agents` (status changes, hired/fired). Communication view uses REST polling for message data (not WS).
 
 #### Task Board (`/tasks`)
@@ -81,9 +81,9 @@ Agent profiles as card grid. Each card shows name, role, department, status dot,
 - **Task history**: Gantt-style horizontal bars sorted by time, type-colored, pulse on in-progress tasks, duration labels
 - **Activity log**: Paginated chronological event list with type icons, descriptions, timestamps
 
-**Deferred to future iteration**: Collaboration score/calibration endpoints, autonomy editing, spending breakdown, and tabbed layout (Access tab).
+**Deferred to future iteration**: Spending breakdown and tabbed layout (Access tab).
 
-**API endpoints**: `GET /agents`, `GET /agents/{name}`, `GET /agents/{name}/performance`, `GET /agents/{name}/activity`, `GET /agents/{name}/history`
+**API endpoints**: `GET /agents`, `GET /agents/{name}`, `GET /agents/{name}/performance`, `GET /agents/{name}/activity`, `GET /agents/{name}/history`, `GET /agents/{name}/collaboration/score`, `GET /agents/{name}/collaboration/override`, `POST /agents/{name}/collaboration/override`, `DELETE /agents/{name}/collaboration/override`, `GET /agents/{name}/autonomy`, `POST /agents/{name}/autonomy`
 **WS channels**: `agents`, `tasks` (detail page)
 
 #### Projects (`/projects`)
