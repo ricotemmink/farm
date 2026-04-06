@@ -13,6 +13,7 @@ that the caller can inject into the conversation.
 
 from typing import TYPE_CHECKING
 
+from synthorg.notifications.dispatcher import NotificationDispatcher  # noqa: TC001
 from synthorg.observability import get_logger
 from synthorg.observability.events.approval_gate import (
     APPROVAL_GATE_CONTEXT_PARK_FAILED,
@@ -21,6 +22,7 @@ from synthorg.observability.events.approval_gate import (
     APPROVAL_GATE_ESCALATION_DETECTED,
     APPROVAL_GATE_INITIALIZED,
     APPROVAL_GATE_NO_PARKED_CONTEXT,
+    APPROVAL_GATE_NOTIFICATION_FAILED,
     APPROVAL_GATE_RESUME_DELETE_FAILED,
     APPROVAL_GATE_RESUME_FAILED,
     APPROVAL_GATE_RESUME_STARTED,
@@ -52,9 +54,11 @@ class ApprovalGate:
         *,
         park_service: ParkService,
         parked_context_repo: ParkedContextRepository | None = None,
+        notification_dispatcher: NotificationDispatcher | None = None,
     ) -> None:
         self._park_service = park_service
         self._parked_context_repo = parked_context_repo
+        self._notification_dispatcher = notification_dispatcher
         logger.debug(
             APPROVAL_GATE_INITIALIZED,
             has_parked_context_repo=parked_context_repo is not None,
@@ -119,7 +123,47 @@ class ApprovalGate:
             task_id,
         )
         await self._persist_parked(parked, escalation)
+        await self._notify_approval_required(escalation, agent_id, task_id)
         return parked
+
+    async def _notify_approval_required(
+        self,
+        escalation: EscalationInfo,
+        agent_id: str,
+        task_id: str | None,
+    ) -> None:
+        """Best-effort notification that a context was parked."""
+        if self._notification_dispatcher is None:
+            return
+        from synthorg.notifications.models import (  # noqa: PLC0415
+            Notification,
+            NotificationCategory,
+            NotificationSeverity,
+        )
+
+        try:
+            await self._notification_dispatcher.dispatch(
+                Notification(
+                    category=NotificationCategory.APPROVAL,
+                    severity=NotificationSeverity.WARNING,
+                    title=f"Approval required: {escalation.approval_id}",
+                    body=escalation.reason or "",
+                    source="engine.approval_gate",
+                    metadata={
+                        "approval_id": escalation.approval_id,
+                        "agent_id": agent_id,
+                        "task_id": task_id,
+                    },
+                ),
+            )
+        except MemoryError, RecursionError:
+            raise
+        except Exception:
+            logger.warning(
+                APPROVAL_GATE_NOTIFICATION_FAILED,
+                approval_id=escalation.approval_id,
+                exc_info=True,
+            )
 
     def _serialize_context(
         self,

@@ -1,6 +1,7 @@
-import { Suspense, useCallback, useMemo, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router'
 import {
+  Bell,
   BookOpen,
   Cpu,
   DollarSign,
@@ -37,6 +38,7 @@ import { ErrorBoundary } from '@/components/ui/error-boundary'
 import { MobileUnsupportedOverlay } from '@/components/ui/mobile-unsupported'
 import { SkeletonCard } from '@/components/ui/skeleton'
 import { ToastContainer } from '@/components/ui/toast'
+import { NotificationDrawer } from '@/components/notifications/NotificationDrawer'
 import { Sidebar } from './Sidebar'
 import { StatusBar } from './StatusBar'
 
@@ -58,10 +60,62 @@ export default function AppLayout() {
   const location = useLocation()
   const navigate = useNavigate()
   const [sidebarOverlayOpen, setSidebarOverlayOpen] = useState(false)
+  const [notificationDrawerOpen, setNotificationDrawerOpen] = useState(false)
 
   // Global WebSocket subscription for app-wide notifications (e.g. personality
   // trimming toasts) so they render regardless of the current page.
   useGlobalNotifications()
+
+  // Listen for toggle-notification-drawer events (dispatched by Shift+N and
+  // by the NotificationBell button). Handled here in AppLayout so the
+  // listener stays mounted even when the sidebar is hidden at tablet.
+  useEffect(() => {
+    function handleToggle() {
+      setNotificationDrawerOpen((prev) => !prev)
+    }
+    window.addEventListener('toggle-notification-drawer', handleToggle)
+    return () => window.removeEventListener('toggle-notification-drawer', handleToggle)
+  }, [])
+
+  // Listen for open-notification-drawer events (one-directional open, used
+  // by the bell button click which should always open, not toggle).
+  useEffect(() => {
+    function handleOpen() {
+      setNotificationDrawerOpen(true)
+    }
+    window.addEventListener('open-notification-drawer', handleOpen)
+    return () => window.removeEventListener('open-notification-drawer', handleOpen)
+  }, [])
+
+  // Shift+N toggles the notification drawer via the custom event above.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.defaultPrevented || e.repeat) return
+      const tag = (e.target as HTMLElement)?.tagName
+      const el = e.target as HTMLElement
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable || el?.closest('[role="combobox"]')) return
+      if (e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'N') {
+        e.preventDefault()
+        window.dispatchEvent(new CustomEvent('toggle-notification-drawer'))
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [])
+
+  // Click-to-focus from browser notifications navigates via React Router
+  useEffect(() => {
+    function handleNav(e: Event) {
+      const detail = (e as CustomEvent<{ href: string }>).detail
+      const href = detail?.href
+      if (typeof href === 'string' && href.startsWith('/') && !href.startsWith('//')) {
+        void navigate(href)
+      }
+    }
+    window.addEventListener('notification-navigate', handleNav)
+    return () => window.removeEventListener('notification-navigate', handleNav)
+  }, [navigate])
+
   const openSidebarOverlay = useCallback(() => setSidebarOverlayOpen(true), [])
   const closeSidebarOverlay = useCallback(() => setSidebarOverlayOpen(false), [])
 
@@ -80,6 +134,7 @@ export default function AppLayout() {
       // Full-page navigation -- /docs/ is static HTML served by nginx, not an SPA route
       { id: 'nav-docs', label: 'Documentation', icon: BookOpen, action: () => { window.location.href = ROUTES.DOCUMENTATION }, group: 'Navigation', keywords: ['docs', 'help', 'guide', 'reference'] },
       { id: 'nav-settings', label: 'Settings', icon: Settings, action: () => navigate(ROUTES.SETTINGS), group: 'Navigation', shortcut: ['ctrl', ','] },
+      { id: 'notifications-open', label: 'Notifications', icon: Bell, action: () => window.dispatchEvent(new CustomEvent('open-notification-drawer')), group: 'Navigation', shortcut: ['shift', 'N'] },
     ],
     [navigate],
   )
@@ -145,6 +200,10 @@ export default function AppLayout() {
           </ErrorBoundary>
         </main>
       </div>
+      <NotificationDrawer
+        open={notificationDrawerOpen}
+        onClose={() => setNotificationDrawerOpen(false)}
+      />
       <ToastContainer />
       <CommandPalette />
       <MobileUnsupportedOverlay />

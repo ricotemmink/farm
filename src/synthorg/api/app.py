@@ -11,15 +11,21 @@ import functools
 import os
 import sys
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Any
 
-from litestar import Litestar, Router
+from litestar import Litestar, Request, Router
 from litestar.config.compression import CompressionConfig
 from litestar.config.cors import CORSConfig
 from litestar.datastructures import State
-from litestar.middleware.rate_limit import RateLimitConfig as LitestarRateLimitConfig
+from litestar.middleware.rate_limit import (
+    RateLimitConfig as LitestarRateLimitConfig,
+)
+from litestar.middleware.rate_limit import (
+    get_remote_address,
+)
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.plugins import ScalarRenderPlugin
 
@@ -79,12 +85,14 @@ from synthorg.hr.performance.quality_protocol import (
 )
 from synthorg.hr.performance.tracker import PerformanceTracker
 from synthorg.hr.registry import AgentRegistryService  # noqa: TC001
+from synthorg.notifications.factory import build_notification_dispatcher
 from synthorg.observability import get_logger
 from synthorg.observability.config import DEFAULT_SINKS, LogConfig
 from synthorg.observability.events.api import (
     API_APP_SHUTDOWN,
     API_APP_STARTUP,
     API_APPROVAL_PUBLISH_FAILED,
+    API_NETWORK_EXPOSURE_WARNING,
     API_SESSION_CLEANUP,
     API_WS_SEND_FAILED,
     API_WS_TICKET_CLEANUP,
@@ -124,6 +132,7 @@ if TYPE_CHECKING:
     from litestar.channels import ChannelsPlugin
     from litestar.types import Middleware
 
+    from synthorg.api.auth.config import AuthConfig
     from synthorg.api.config import ApiConfig
     from synthorg.settings.service import SettingsService
     from synthorg.settings.subscriber import SettingsSubscriber
@@ -546,6 +555,12 @@ def _build_lifecycle(  # noqa: PLR0913, C901
             persistence,
             performance_tracker=app_state._performance_tracker,  # noqa: SLF001
         )
+        if app_state.has_notification_dispatcher:
+            await _try_stop(
+                app_state.notification_dispatcher.close(),
+                API_APP_SHUTDOWN,
+                "Failed to stop notification dispatcher",
+            )
 
     return [on_startup], [on_shutdown]
 
@@ -880,6 +895,10 @@ def create_app(  # noqa: PLR0913, PLR0915
             perf_config=effective_config.performance,
         )
 
+    notification_dispatcher = build_notification_dispatcher(
+        effective_config.notifications,
+    )
+
     app_state = AppState(
         config=effective_config,
         persistence=persistence,
@@ -900,6 +919,7 @@ def create_app(  # noqa: PLR0913, PLR0915
         tool_invocation_tracker=tool_invocation_tracker,
         delegation_record_store=delegation_record_store,
         artifact_storage=artifact_storage,
+        notification_dispatcher=notification_dispatcher,
         startup_time=time.monotonic(),
     )
 
@@ -1044,22 +1064,72 @@ def _build_settings_dispatcher(
     )
 
 
-def _build_middleware(api_config: ApiConfig) -> list[Middleware]:
-    """Build the middleware stack from configuration."""
-    rl = api_config.rate_limit
-    prefix = api_config.api_prefix
-    ws_path = f"^{prefix}/ws$"
+def _build_unauth_identifier(
+    trusted: frozenset[str],
+) -> Callable[[Request[Any, Any, Any]], str]:
+    """Build a proxy-aware client IP extractor for the unauth tier.
 
-    # Exclude the WS path from rate limiting -- rate limiting
-    # HTTP-style makes no sense for persistent WebSocket connections.
-    rl_exclude = list(rl.exclude_paths)
-    if ws_path not in rl_exclude:
-        rl_exclude.append(ws_path)
-    rate_limit = LitestarRateLimitConfig(
-        rate_limit=(rl.time_unit, rl.max_requests),  # type: ignore[arg-type]
-        exclude=rl_exclude,
-    )
-    auth = api_config.auth
+    When ``trusted_proxies`` is configured, extracts the real client
+    IP from the ``X-Forwarded-For`` header (rightmost untrusted hop).
+    Without trusted proxies, falls back to ``request.client.host``.
+
+    Args:
+        trusted: Frozen set of trusted proxy IPs/CIDRs.
+
+    Returns:
+        Callable that extracts a rate-limit key from a request.
+    """
+    if not trusted:
+        return get_remote_address
+
+    def _extract_forwarded_ip(
+        request: Request[Any, Any, Any],
+    ) -> str:
+        # Only trust X-Forwarded-For when the immediate peer is a
+        # known proxy. Otherwise any client can spoof the header.
+        peer_ip = get_remote_address(request)
+        if peer_ip not in trusted:
+            return peer_ip
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            # X-Forwarded-For: client, proxy1, proxy2
+            # Walk from the right, skip trusted proxies.
+            hops = [h.strip() for h in forwarded.split(",")]
+            for hop in reversed(hops):
+                if hop not in trusted:
+                    return hop
+        return peer_ip
+
+    return _extract_forwarded_ip
+
+
+def _auth_identifier_for_request(
+    request: Request[Any, Any, Any],
+) -> str:
+    """Return the authenticated user's ID as the rate limit key.
+
+    Falls back to client IP when the user is not set in scope
+    (e.g. auth-excluded paths that are not excluded from the
+    auth rate limiter).
+
+    Args:
+        request: The incoming request.
+
+    Returns:
+        User ID string or client IP as fallback.
+    """
+    user = request.scope.get("user")
+    if user is not None and hasattr(user, "user_id"):
+        return str(user.user_id)
+    return get_remote_address(request)
+
+
+def _build_auth_exclude_paths(
+    auth: AuthConfig,
+    prefix: str,
+    ws_path: str,
+) -> tuple[str, ...]:
+    """Compute auth middleware exclude paths with fail-safe defaults."""
     setup_status_path = f"^{prefix}/setup/status$"
     exclude_paths = (
         auth.exclude_paths
@@ -1073,19 +1143,73 @@ def _build_middleware(api_config: ApiConfig) -> list[Middleware]:
             setup_status_path,
         )
     )
-    # Always ensure the setup status endpoint is publicly accessible
-    # even when custom exclude_paths are provided via config.
     if setup_status_path not in exclude_paths:
         exclude_paths = (*exclude_paths, setup_status_path)
-    # Always ensure the WS upgrade path is excluded -- the WS handler
-    # performs its own ticket-based auth, so the JWT middleware must
-    # not run on the upgrade request.
     if ws_path not in exclude_paths:
         exclude_paths = (*exclude_paths, ws_path)
-    auth = auth.model_copy(update={"exclude_paths": exclude_paths})
+    return exclude_paths
+
+
+def _build_middleware(api_config: ApiConfig) -> list[Middleware]:
+    """Build the middleware stack from configuration.
+
+    Two rate-limit tiers are stacked around the auth middleware:
+
+    1. **Unauth tier** (outermost) -- keyed by client IP, low budget.
+    2. Auth middleware -- populates ``scope["user"]``.
+    3. Request logging.
+    4. **Auth tier** (innermost) -- keyed by user ID, high budget.
+
+    When ``trusted_proxies`` is configured, the unauth tier reads
+    ``X-Forwarded-For`` to extract the real client IP. Without it,
+    all clients behind a proxy share one IP-based rate limit bucket.
+    """
+    rl = api_config.rate_limit
+    prefix = api_config.api_prefix
+    ws_path = f"^{prefix}/ws$"
+    trusted = frozenset(api_config.server.trusted_proxies)
+
+    if not trusted and api_config.server.host not in ("127.0.0.1", "localhost", "::1"):
+        logger.warning(
+            API_NETWORK_EXPOSURE_WARNING,
+            note=(
+                "No trusted_proxies configured. If this server is behind "
+                "a reverse proxy or load balancer, all proxied clients "
+                "will share a single unauth rate-limit bucket. Set "
+                "api.server.trusted_proxies to the proxy IPs."
+            ),
+        )
+
+    rl_exclude = list(rl.exclude_paths)
+    if ws_path not in rl_exclude:
+        rl_exclude.append(ws_path)
+
+    unauth_identifier = _build_unauth_identifier(trusted)
+    unauth_rate_limit = LitestarRateLimitConfig(
+        rate_limit=(rl.time_unit, rl.unauth_max_requests),  # type: ignore[arg-type]
+        exclude=rl_exclude,
+        identifier_for_request=unauth_identifier,
+        store="rate_limit_unauth",
+    )
+    auth_rate_limit = LitestarRateLimitConfig(
+        rate_limit=(rl.time_unit, rl.auth_max_requests),  # type: ignore[arg-type]
+        exclude=rl_exclude,
+        identifier_for_request=_auth_identifier_for_request,
+        store="rate_limit_auth",
+    )
+
+    exclude_paths = _build_auth_exclude_paths(
+        api_config.auth,
+        prefix,
+        ws_path,
+    )
+    auth = api_config.auth.model_copy(
+        update={"exclude_paths": exclude_paths},
+    )
     auth_middleware = create_auth_middleware_class(auth)
     return [
+        unauth_rate_limit.middleware,
         auth_middleware,
         RequestLoggingMiddleware,
-        rate_limit.middleware,
+        auth_rate_limit.middleware,
     ]

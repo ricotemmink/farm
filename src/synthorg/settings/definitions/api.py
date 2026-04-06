@@ -1,9 +1,10 @@
 """API namespace setting definitions.
 
-Registers 15 settings covering server, TLS, CORS, rate limiting,
-authentication, and setup.  Five are runtime-editable; ten are
+Registers 16 settings covering server, TLS, CORS, rate limiting,
+authentication, and setup.  Three are runtime-editable; thirteen are
 bootstrap-only (``restart_required=True``) because Litestar bakes
-middleware and CORS into the application at construction time.
+middleware, rate-limit budgets, and CORS into the application at
+construction time.
 """
 
 from synthorg.settings.enums import SettingLevel, SettingNamespace, SettingType
@@ -141,15 +142,32 @@ _r.register(
 _r.register(
     SettingDefinition(
         namespace=SettingNamespace.API,
-        key="rate_limit_max_requests",
+        key="rate_limit_unauth_max_requests",
         type=SettingType.INTEGER,
-        default="100",
-        description="Maximum requests per time window",
+        default="20",
+        description="Maximum unauthenticated requests per time window (by IP)",
         group="Rate Limiting",
         level=SettingLevel.ADVANCED,
+        restart_required=True,
         min_value=1,
         max_value=10000,
-        yaml_path="api.rate_limit.max_requests",
+        yaml_path="api.rate_limit.unauth_max_requests",
+    )
+)
+
+_r.register(
+    SettingDefinition(
+        namespace=SettingNamespace.API,
+        key="rate_limit_auth_max_requests",
+        type=SettingType.INTEGER,
+        default="6000",
+        description="Maximum authenticated requests per time window (by user ID)",
+        group="Rate Limiting",
+        level=SettingLevel.ADVANCED,
+        restart_required=True,
+        min_value=1,
+        max_value=100000,
+        yaml_path="api.rate_limit.auth_max_requests",
     )
 )
 
@@ -164,6 +182,7 @@ _r.register(
         level=SettingLevel.ADVANCED,
         enum_values=("second", "minute", "hour", "day"),
         yaml_path="api.rate_limit.time_unit",
+        restart_required=True,
     )
 )
 

@@ -544,15 +544,21 @@ class ConfigResolver:
     async def get_api_config(self) -> ApiConfig:
         """Assemble an ``ApiConfig`` with runtime-editable overrides.
 
-        Resolves the four runtime-editable API settings (rate-limit
-        max requests, rate-limit time unit, JWT expiry, min password
-        length) and merges them onto the YAML-loaded base config.
+        Resolves the five runtime-relevant API settings (rate-limit
+        max requests for both tiers, rate-limit time unit, JWT expiry,
+        min password length) and merges them onto the YAML-loaded base
+        config.
 
         Bootstrap-only settings (``server_host``, ``server_port``,
-        ``api_prefix``, ``cors_allowed_origins``,
+        ``api_prefix``, ``ssl_certfile``, ``ssl_keyfile``,
+        ``ssl_ca_certs``, ``trusted_proxies``,
+        ``cors_allowed_origins``,
         ``rate_limit_exclude_paths``, ``auth_exclude_paths``) are
         **not** resolved -- they are baked into the Litestar app at
-        construction and require a restart to take effect.
+        construction and require a restart to take effect.  The two
+        rate-limit max-request settings are also bootstrap-only
+        (``restart_required=True``) but are resolved here so the
+        assembled ``ApiConfig`` reflects DB/env overrides at startup.
 
         Uses ``asyncio.TaskGroup`` to resolve all settings in parallel.
 
@@ -571,8 +577,11 @@ class ConfigResolver:
 
         try:
             async with asyncio.TaskGroup() as tg:
-                t_max_req = tg.create_task(
-                    self.get_int("api", "rate_limit_max_requests")
+                t_unauth = tg.create_task(
+                    self.get_int("api", "rate_limit_unauth_max_requests")
+                )
+                t_auth = tg.create_task(
+                    self.get_int("api", "rate_limit_auth_max_requests")
                 )
                 t_time_unit = tg.create_task(
                     self.get_enum("api", "rate_limit_time_unit", RateLimitTimeUnit)
@@ -593,7 +602,8 @@ class ConfigResolver:
             update={
                 "rate_limit": base.rate_limit.model_copy(
                     update={
-                        "max_requests": t_max_req.result(),
+                        "unauth_max_requests": t_unauth.result(),
+                        "auth_max_requests": t_auth.result(),
                         "time_unit": t_time_unit.result(),
                     },
                 ),

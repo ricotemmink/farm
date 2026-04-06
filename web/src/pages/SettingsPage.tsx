@@ -34,6 +34,7 @@ import {
   SETTINGS_ADVANCED_WARNED_KEY,
 } from '@/utils/constants'
 import { AdvancedModeBanner } from './settings/AdvancedModeBanner'
+import { NotificationsSection } from './settings/NotificationsSection'
 import { CodeEditorPanel } from './settings/CodeEditorPanel'
 import { FloatingSaveBar } from './settings/FloatingSaveBar'
 import { NamespaceSection } from './settings/NamespaceSection'
@@ -346,11 +347,14 @@ export default function SettingsPage() {
       <RestartBanner count={restartBannerCount} onDismiss={() => setRestartBannerCount(0)} />
 
       {error && (
-        <div className={cn(
-          'flex items-center gap-2 rounded-lg',
-          'border border-danger/30 bg-danger/5',
-          'p-card text-sm text-danger',
-        )}>
+        <div
+          role="alert"
+          className={cn(
+            'flex items-center gap-2 rounded-lg',
+            'border border-danger/30 bg-danger/5',
+            'p-card text-sm text-danger',
+          )}
+        >
           <AlertTriangle className="size-4 shrink-0" />
           {error}
         </div>
@@ -438,6 +442,9 @@ export default function SettingsPage() {
           </StaggerGroup>
           </motion.div>
           </AnimatePresence>
+
+          {/* Notifications preferences (client-side, not backend settings) */}
+          <NotificationsSection />
 
           <FloatingSaveBar
             dirtyCount={dirtyValues.size}

@@ -1,0 +1,107 @@
+"""Slack notification sink -- webhook POST."""
+
+from typing import TYPE_CHECKING
+
+import httpx
+
+from synthorg.notifications.adapters.ntfy import _validate_outbound_url
+from synthorg.observability import get_logger
+from synthorg.observability.events.notification import (
+    NOTIFICATION_SLACK_DELIVERED,
+    NOTIFICATION_SLACK_FAILED,
+)
+
+if TYPE_CHECKING:
+    from synthorg.notifications.models import Notification
+
+logger = get_logger(__name__)
+
+
+def _escape_mrkdwn(text: str) -> str:
+    """Escape text for Slack mrkdwn to prevent injection of mentions."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _build_slack_payload(notification: Notification) -> dict[str, object]:
+    """Build the Slack Block Kit payload for a notification."""
+    safe_title = _escape_mrkdwn(notification.title)
+    safe_body = _escape_mrkdwn(notification.body) if notification.body else ""
+    safe_category = _escape_mrkdwn(notification.category)
+    safe_source = _escape_mrkdwn(notification.source)
+    header = f"*[{notification.severity.value.upper()}]* {safe_title}"
+    body_text = f"{header}\n{safe_body}" if safe_body else header
+    return {
+        "text": header,
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": body_text},
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (f"Category: {safe_category} | Source: {safe_source}"),
+                    },
+                ],
+            },
+        ],
+    }
+
+
+class SlackNotificationSink:
+    """Notification sink that posts to a Slack incoming webhook.
+
+    Args:
+        webhook_url: Slack incoming webhook URL.
+
+    Raises:
+        ValueError: If *webhook_url* targets a private/loopback host.
+    """
+
+    __slots__ = ("_client", "_webhook_url")
+
+    def __init__(self, *, webhook_url: str) -> None:
+        _validate_outbound_url(webhook_url, "webhook_url")
+        self._webhook_url = webhook_url
+        self._client = httpx.AsyncClient(
+            timeout=10.0,
+            follow_redirects=False,
+        )
+
+    @property
+    def sink_name(self) -> str:
+        """Return the sink identifier."""
+        return "slack"
+
+    async def send(self, notification: Notification) -> None:
+        """Post the notification to Slack.
+
+        Args:
+            notification: The notification to deliver.
+        """
+        payload = _build_slack_payload(notification)
+        try:
+            response = await self._client.post(
+                self._webhook_url,
+                json=payload,
+            )
+            response.raise_for_status()
+            logger.info(
+                NOTIFICATION_SLACK_DELIVERED,
+                notification_id=notification.id,
+            )
+        except MemoryError, RecursionError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                NOTIFICATION_SLACK_FAILED,
+                notification_id=notification.id,
+                error=str(exc),
+            )
+            raise
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client."""
+        await self._client.aclose()

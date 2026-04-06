@@ -254,6 +254,30 @@ Global search overlay: navigate to any page, search agents by name, search tasks
 **Trigger**: Bell icon in sidebar bottom + unread badge
 Slide-in drawer aggregating system notifications: budget alerts, approval arrivals, agent status changes, system errors. Sources from WS `system`, `approvals`, and `budget` channels.
 
+**Category taxonomy** -- 17 notification categories with routing defaults and severity mappings:
+
+| Category | Default Route | Severity |
+|----------|--------------|----------|
+| `approvals.pending` | toast + drawer + browser | warning |
+| `approvals.expiring` | toast + drawer | warning |
+| `approvals.decided` | drawer only | info |
+| `budget.threshold` | toast + drawer | warning |
+| `budget.exhausted` | toast + drawer + browser | critical |
+| `system.error` | toast + drawer | error |
+| `system.restart_required` | toast + drawer | warning |
+| `system.shutdown` | toast + drawer + browser | critical |
+| `agents.personality_trimmed` | toast only | info |
+| `agents.hired` | drawer only | info |
+| `agents.fired` | drawer only | info |
+| `tasks.failed` | toast + drawer | error |
+| `tasks.blocked` | drawer only | warning |
+| `providers.down` | toast + drawer + browser | error |
+| `providers.degraded` | toast + drawer | warning |
+| `connection.lost` | toast only | critical |
+| `connection.exhausted` | toast + drawer + browser | error |
+
+"toast + drawer" categories trigger a brief toast notification in addition to appearing in the drawer. "drawer only" categories appear silently in the drawer and increment the unread badge. Categories with "browser" also fire a browser Notification when the tab is backgrounded. Users can override routing defaults per category via the Notifications section in Settings (per-category toggles for toast, drawer, and browser routes).
+
 #### Agent Detail Page
 
 **Trigger**: Click agent in Agents list, Org Chart node, or any agent name link
