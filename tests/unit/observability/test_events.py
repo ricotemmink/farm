@@ -136,6 +136,7 @@ from synthorg.observability.events.workspace import (
     WORKSPACE_TEARDOWN_FAILED,
     WORKSPACE_TEARDOWN_START,
 )
+from tests.conftest import DISALLOWED_VENDOR_NAMES
 
 pytestmark = pytest.mark.unit
 _DOT_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
@@ -252,6 +253,7 @@ class TestEventConstants:
             "database",
             "sub_constraint",
             "terminal",
+            "versioning",
             "web",
         }
         discovered = {info.name for info in pkgutil.iter_modules(events.__path__)}
@@ -745,3 +747,30 @@ class TestEventConstants:
         assert SHIPPING_HTTP_FLUSHER_STOPPED == "shipping.http.flusher_stopped"
         assert SHIPPING_COMPRESSION_COMPLETED == "shipping.compression.completed"
         assert SHIPPING_COMPRESSION_FAILED == "shipping.compression.failed"
+
+    def test_no_event_constant_contains_vendor_name(self) -> None:
+        """No event constant value may contain real vendor names.
+
+        The disallowed vendor identifiers are loaded from
+        ``conftest.DISALLOWED_VENDOR_NAMES`` to keep vendor-specific
+        literals out of test source.
+        """
+        vendor_names = DISALLOWED_VENDOR_NAMES
+        violations: list[str] = []
+        for _finder, module_name, _is_pkg in pkgutil.walk_packages(
+            events.__path__, prefix=events.__name__ + "."
+        ):
+            mod = importlib.import_module(module_name)
+            for attr in dir(mod):
+                value = getattr(mod, attr)
+                if not isinstance(value, str) or not attr.isupper():
+                    continue
+                value_lower = value.lower()
+                violations.extend(
+                    f"{module_name}.{attr} = {value!r}"
+                    for vendor in vendor_names
+                    if vendor in value_lower
+                )
+        assert not violations, "Event constants contain vendor names:\n" + "\n".join(
+            violations
+        )

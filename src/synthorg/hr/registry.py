@@ -19,12 +19,14 @@ from synthorg.observability.events.hr import (
     HR_REGISTRY_IDENTITY_UPDATED,
     HR_REGISTRY_STATUS_UPDATED,
 )
+from synthorg.observability.events.versioning import VERSION_SNAPSHOT_FAILED
 
 if TYPE_CHECKING:
     from typing import Any
 
     from synthorg.core.agent import AgentIdentity
     from synthorg.core.types import NotBlankStr
+    from synthorg.versioning.service import VersioningService
 
 logger = get_logger(__name__)
 
@@ -36,15 +38,26 @@ class AgentRegistryService:
     Stores agent identities keyed by agent ID (string form of UUID).
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        versioning: VersioningService[AgentIdentity] | None = None,
+    ) -> None:
         self._agents: dict[str, AgentIdentity] = {}
         self._lock = asyncio.Lock()
+        self._versioning = versioning
 
-    async def register(self, identity: AgentIdentity) -> None:
+    async def register(
+        self,
+        identity: AgentIdentity,
+        *,
+        saved_by: str = "system",
+    ) -> None:
         """Register a new agent.
 
         Args:
             identity: The agent identity to register.
+            saved_by: Actor triggering the registration (recorded in
+                version history).  Defaults to ``"system"``.
 
         Raises:
             AgentAlreadyRegisteredError: If the agent is already registered.
@@ -67,6 +80,7 @@ class AgentRegistryService:
             agent_name=str(identity.name),
             status=identity.status.value,
         )
+        await self._snapshot(identity, saved_by=saved_by)
 
     async def unregister(self, agent_id: NotBlankStr) -> AgentIdentity:
         """Remove an agent from the registry.
@@ -196,9 +210,9 @@ class AgentRegistryService:
         return updated
 
     # Allowlist of fields that may be updated via update_identity.
-    # This prevents mass assignment of security-sensitive fields
-    # (e.g. authority, status, tools.access_level) through the
-    # generic update path.
+    # Only fields listed here are accepted; all others (authority,
+    # status, tools.access_level, etc.) are rejected to prevent
+    # mass assignment of security-sensitive fields.
     _UPDATABLE_FIELDS: frozenset[str] = frozenset({"level", "model"})
 
     async def update_identity(
@@ -254,9 +268,40 @@ class AgentRegistryService:
             agent_id=key,
             updated_fields=sorted(updates.keys()),
         )
+        await self._snapshot(updated, saved_by=f"update_identity:{key}")
         return updated
 
     async def agent_count(self) -> int:
         """Number of agents currently in the registry."""
         async with self._lock:
             return len(self._agents)
+
+    async def _snapshot(self, identity: AgentIdentity, *, saved_by: str) -> None:
+        """Snapshot identity via versioning service (best-effort, no-op if absent).
+
+        Called **outside** the registry lock in both ``register`` and
+        ``update_identity`` -- this is intentional: holding the lock during
+        I/O would block all concurrent reads for the duration of the DB write.
+        The versioning call is awaited here, but failures are best-effort:
+        a ``PersistenceError`` is logged and never re-raised so that registry
+        operations always succeed even when the versioning back-end is
+        unavailable.
+        """
+        if self._versioning is None:
+            return
+        # Local import breaks a circular dependency:
+        # persistence.__init__ -> workflow_definition_repo -> engine.workflow
+        # -> communication -> hr.registry
+        from synthorg.persistence.errors import PersistenceError  # noqa: PLC0415
+
+        try:
+            await self._versioning.snapshot_if_changed(
+                str(identity.id), identity, saved_by
+            )
+        except PersistenceError as exc:
+            logger.warning(
+                VERSION_SNAPSHOT_FAILED,
+                agent_id=str(identity.id),
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
