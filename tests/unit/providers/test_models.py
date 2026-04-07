@@ -380,7 +380,7 @@ class TestCompletionResponse:
             tool_calls=(ToolCall(id="c1", name="ping", arguments={}),),
             finish_reason=FinishReason.TOOL_USE,
             usage=sample_token_usage,
-            model="test",
+            model="test-small-001",
         )
         assert resp.content is None
         assert len(resp.tool_calls) == 1
@@ -403,7 +403,7 @@ class TestCompletionResponse:
                 content=None,
                 finish_reason=FinishReason.STOP,
                 usage=sample_token_usage,
-                model="test",
+                model="test-small-001",
             )
 
     def test_empty_response_rejected_for_max_tokens(
@@ -415,7 +415,7 @@ class TestCompletionResponse:
                 content=None,
                 finish_reason=FinishReason.MAX_TOKENS,
                 usage=sample_token_usage,
-                model="test",
+                model="test-small-001",
             )
 
     def test_empty_response_rejected_for_tool_use(
@@ -427,7 +427,7 @@ class TestCompletionResponse:
                 content=None,
                 finish_reason=FinishReason.TOOL_USE,
                 usage=sample_token_usage,
-                model="test",
+                model="test-small-001",
             )
 
     def test_empty_response_allowed_for_content_filter(
@@ -438,7 +438,7 @@ class TestCompletionResponse:
             content=None,
             finish_reason=FinishReason.CONTENT_FILTER,
             usage=sample_token_usage,
-            model="test",
+            model="test-small-001",
         )
         assert resp.content is None
 
@@ -450,7 +450,7 @@ class TestCompletionResponse:
             content=None,
             finish_reason=FinishReason.ERROR,
             usage=sample_token_usage,
-            model="test",
+            model="test-small-001",
         )
         assert resp.finish_reason == FinishReason.ERROR
 
@@ -461,6 +461,56 @@ class TestCompletionResponse:
     def test_factory(self) -> None:
         resp = CompletionResponseFactory.build()
         assert isinstance(resp, CompletionResponse)
+
+    def test_provider_metadata_default_empty(
+        self,
+        sample_token_usage: TokenUsage,
+    ) -> None:
+        """provider_metadata defaults to empty dict."""
+        resp = CompletionResponse(
+            content="hi",
+            finish_reason=FinishReason.STOP,
+            usage=sample_token_usage,
+            model="test-small-001",
+        )
+        assert resp.provider_metadata == {}
+
+    def test_provider_metadata_accepts_arbitrary_keys(
+        self,
+        sample_token_usage: TokenUsage,
+    ) -> None:
+        """provider_metadata stores arbitrary string-keyed values."""
+        resp = CompletionResponse(
+            content="hi",
+            finish_reason=FinishReason.STOP,
+            usage=sample_token_usage,
+            model="test-small-001",
+            provider_metadata={
+                "_synthorg_latency_ms": 123.4,
+                "_synthorg_retry_count": 2,
+            },
+        )
+        assert resp.provider_metadata["_synthorg_latency_ms"] == 123.4
+        assert resp.provider_metadata["_synthorg_retry_count"] == 2
+
+    def test_provider_metadata_independent_between_instances(
+        self,
+        sample_token_usage: TokenUsage,
+    ) -> None:
+        """Two responses with default metadata don't share the same dict."""
+        resp1 = CompletionResponse(
+            content="a",
+            finish_reason=FinishReason.STOP,
+            usage=sample_token_usage,
+            model="test-small-001",
+        )
+        resp2 = CompletionResponse(
+            content="b",
+            finish_reason=FinishReason.STOP,
+            usage=sample_token_usage,
+            model="test-small-001",
+        )
+        assert resp1.provider_metadata is not resp2.provider_metadata
 
 
 # ── StreamChunk ───────────────────────────────────────────────────

@@ -22,9 +22,13 @@ class TestCoordinationMetricName:
         assert CoordinationMetricName.ERROR_AMPLIFICATION.value == "error_amplification"
         assert CoordinationMetricName.MESSAGE_DENSITY.value == "message_density"
         assert CoordinationMetricName.REDUNDANCY.value == "redundancy"
+        assert CoordinationMetricName.AMDAHL_CEILING.value == "amdahl_ceiling"
+        assert CoordinationMetricName.STRAGGLER_GAP.value == "straggler_gap"
+        assert CoordinationMetricName.TOKEN_SPEEDUP_RATIO.value == "token_speedup_ratio"
+        assert CoordinationMetricName.MESSAGE_OVERHEAD.value == "message_overhead"
 
     def test_member_count(self) -> None:
-        assert len(CoordinationMetricName) == 5
+        assert len(CoordinationMetricName) == 9
 
 
 @pytest.mark.unit
@@ -135,7 +139,7 @@ class TestCoordinationMetricsConfig:
     def test_defaults(self) -> None:
         config = CoordinationMetricsConfig()
         assert config.enabled is False
-        assert len(config.collect) == 5
+        assert len(config.collect) == 9
         assert config.baseline_window == 50
         assert config.error_taxonomy.enabled is False
         assert config.orchestration_alerts.info == 0.30
