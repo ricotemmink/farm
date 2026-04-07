@@ -1,6 +1,7 @@
 """Auth controller -- setup, login, password change, me, ws-ticket, sessions."""
 
 import math
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Self
@@ -13,6 +14,15 @@ from litestar.middleware.rate_limit import RateLimitConfig as LitestarRateLimitC
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from synthorg.api.auth.config import AuthConfig
+from synthorg.api.auth.cookies import (
+    generate_csrf_token,
+    make_clear_csrf_cookie,
+    make_clear_refresh_cookie,
+    make_clear_session_cookie,
+    make_csrf_cookie,
+    make_refresh_cookie,
+    make_session_cookie,
+)
 from synthorg.api.auth.models import AuthenticatedUser, AuthMethod, User
 from synthorg.api.auth.service import AuthService  # noqa: TC001
 from synthorg.api.auth.session import Session
@@ -20,6 +30,7 @@ from synthorg.api.auth.system_user import SYSTEM_USERNAME, is_system_user
 from synthorg.api.auth.ticket_store import TicketLimitExceededError
 from synthorg.api.dto import ApiResponse
 from synthorg.api.errors import (
+    AccountLockedError,
     ApiValidationError,
     ConflictError,
     NotFoundError,
@@ -135,18 +146,20 @@ class ChangePasswordRequest(BaseModel):
 # ── Response DTOs ─────────────────────────────────────────────
 
 
-class TokenResponse(BaseModel):
-    """JWT token response.
+class CookieSessionResponse(BaseModel):
+    """Cookie-based session response.
+
+    The JWT is delivered via an HttpOnly ``Set-Cookie`` header,
+    not in the response body.  This DTO contains only the
+    metadata the frontend needs.
 
     Attributes:
-        token: Encoded JWT string.
-        expires_in: Token lifetime in seconds.
+        expires_in: Session lifetime in seconds.
         must_change_password: Whether password change is required.
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
-    token: NotBlankStr
     expires_in: int = Field(gt=0)
     must_change_password: bool
 
@@ -213,6 +226,92 @@ class SessionResponse(BaseModel):
     last_active_at: AwareDatetime
     expires_at: AwareDatetime
     is_current: bool = False
+
+
+async def _make_session_cookies(  # noqa: PLR0913
+    token: str,
+    expires_in: int,
+    config: AuthConfig,
+    *,
+    app_state: AppState | None = None,
+    session_id: str = "",
+    user_id: str = "",
+) -> list[Any]:
+    """Build the cookie list for a login/setup response.
+
+    Returns session cookie + CSRF cookie, plus a refresh
+    cookie when ``jwt_refresh_enabled`` is ``True``.  When
+    refresh is enabled the token is also persisted to the
+    refresh store for single-use validation.
+
+    Args:
+        token: Encoded JWT string.
+        expires_in: Cookie lifetime in seconds.
+        config: Auth configuration.
+        app_state: App state (needed for refresh store persistence).
+        session_id: JWT session ID (``jti``) for refresh binding.
+        user_id: Token owner's user ID for refresh binding.
+
+    Returns:
+        List of ``Cookie`` objects to attach to the response.
+    """
+    cookies: list[Any] = [
+        make_session_cookie(token, expires_in, config),
+        make_csrf_cookie(generate_csrf_token(), expires_in, config),
+    ]
+    if config.jwt_refresh_enabled:
+        refresh_token = secrets.token_urlsafe(32)
+        refresh_max_age = config.jwt_refresh_expiry_minutes * 60
+        # Persist hashed refresh token BEFORE setting the cookie.
+        # Only append the cookie if persistence succeeds.
+        refresh_persisted = False
+        if app_state is not None and session_id and user_id:
+            try:
+                from synthorg.api.auth.refresh_store import (  # noqa: PLC0415, TC001
+                    RefreshStore,
+                )
+
+                auth_service: AuthService = app_state.auth_service
+                token_hash = auth_service.hash_api_key(refresh_token)
+                refresh_expiry = datetime.now(UTC) + timedelta(
+                    seconds=refresh_max_age,
+                )
+                # Access refresh store from app_state if available.
+                store: RefreshStore | None = getattr(app_state, "_refresh_store", None)
+                if store is not None:
+                    await store.create(
+                        token_hash=token_hash,
+                        session_id=session_id,
+                        user_id=user_id,
+                        expires_at=refresh_expiry,
+                    )
+                    refresh_persisted = True
+                else:
+                    logger.warning(
+                        API_AUTH_FAILED,
+                        reason="refresh_store_not_available",
+                    )
+            except MemoryError, RecursionError:
+                raise
+            except Exception:
+                logger.warning(
+                    API_AUTH_FAILED,
+                    reason="refresh_token_persist_failed",
+                    exc_info=True,
+                )
+        else:
+            logger.warning(
+                API_AUTH_FAILED,
+                reason="refresh_token_persist_skipped",
+                has_app_state=app_state is not None,
+                has_session_id=bool(session_id),
+                has_user_id=bool(user_id),
+            )
+        if refresh_persisted:
+            cookies.append(
+                make_refresh_cookie(refresh_token, refresh_max_age, config),
+            )
+    return cookies
 
 
 _PWD_CHANGE_EXEMPT_SUFFIXES = ("/auth/change-password", "/auth/me")
@@ -324,13 +423,20 @@ async def _create_session(
 
 
 def _extract_jti(request: Request[Any, Any, Any]) -> str | None:
-    """Extract the JWT ``jti`` claim from the current request."""
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return None
-    token = auth_header[7:]
+    """Extract the JWT ``jti`` claim from cookie or header."""
+    app_state = request.app.state["app_state"]
+    auth_config = _get_auth_config(app_state)
+
+    # Try session cookie first (primary auth path)
+    token = request.cookies.get(auth_config.cookie_name)
+    if not token:
+        # Fall back to Authorization header (system user, API key)
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return None
+        token = auth_header[7:]
+
     try:
-        app_state = request.app.state["app_state"]
         claims = app_state.auth_service.decode_token(token)
     except jwt.InvalidTokenError:
         logger.debug(
@@ -348,6 +454,24 @@ def _extract_jti(request: Request[Any, Any, Any]) -> str | None:
     else:
         jti: str | None = claims.get("jti")
         return jti
+
+
+def _get_auth_config(app_state: AppState) -> AuthConfig:
+    """Return the auth config from app state.
+
+    Falls back to default ``AuthConfig`` when the config
+    is not available.
+
+    Args:
+        app_state: Application state container.
+
+    Returns:
+        Auth configuration.
+    """
+    try:
+        return app_state.config.api.auth
+    except AttributeError, TypeError:
+        return AuthConfig()
 
 
 # ── Controller ────────────────────────────────────────────────
@@ -393,11 +517,12 @@ class AuthController(Controller):
         self,
         data: SetupRequest,
         request: Request[Any, Any, Any],
-    ) -> Response[ApiResponse[TokenResponse]]:
+    ) -> Response[ApiResponse[CookieSessionResponse]]:
         """Create the first admin account (CEO).
 
         Only available when no users exist. Returns 409 after
-        the first account is created.
+        the first account is created.  The JWT is delivered via
+        an HttpOnly ``Set-Cookie`` header.
         """
         app_state = request.app.state["app_state"]
         auth_service: AuthService = app_state.auth_service
@@ -449,6 +574,13 @@ class AuthController(Controller):
             expires_in,
         )
 
+        auth_config = _get_auth_config(app_state)
+        if app_state.has_session_store:
+            await app_state.session_store.enforce_session_limit(
+                user.id,
+                auth_config.max_concurrent_sessions,
+            )
+
         logger.info(
             API_AUTH_SETUP_COMPLETE,
             user_id=user.id,
@@ -457,13 +589,20 @@ class AuthController(Controller):
 
         return Response(
             content=ApiResponse(
-                data=TokenResponse(
-                    token=token,
+                data=CookieSessionResponse(
                     expires_in=expires_in,
                     must_change_password=user.must_change_password,
                 ),
             ),
             status_code=201,
+            cookies=await _make_session_cookies(
+                token,
+                expires_in,
+                auth_config,
+                app_state=app_state,
+                session_id=session_id,
+                user_id=user.id,
+            ),
         )
 
     @post(
@@ -476,11 +615,25 @@ class AuthController(Controller):
         self,
         data: LoginRequest,
         request: Request[Any, Any, Any],
-    ) -> Response[ApiResponse[TokenResponse]]:
-        """Validate credentials and return a JWT."""
+    ) -> Response[ApiResponse[CookieSessionResponse]]:
+        """Validate credentials and set session cookie."""
         app_state = request.app.state["app_state"]
         auth_service: AuthService = app_state.auth_service
         persistence = app_state.persistence
+
+        # Account lockout check (still run dummy hash for timing safety)
+        if app_state.has_lockout_store and app_state.lockout_store.is_locked(
+            data.username,
+        ):
+            await auth_service.verify_password_async(data.password, _DUMMY_ARGON2_HASH)
+            logger.warning(
+                API_AUTH_FAILED,
+                reason="account_locked",
+                username=data.username,
+            )
+            raise AccountLockedError(
+                retry_after=app_state.lockout_store.lockout_duration_seconds,
+            )
 
         user = await persistence.users.get_by_username(data.username)
         if user is not None and is_system_user(user.id):
@@ -499,12 +652,27 @@ class AuthController(Controller):
             password_valid = False
 
         if not password_valid:
+            # Record failure for lockout tracking
+            if app_state.has_lockout_store:
+                client = request.client
+                ip = client.host if client else ""
+                locked = await app_state.lockout_store.record_failure(
+                    data.username, ip_address=ip
+                )
+                if locked:
+                    raise AccountLockedError(
+                        retry_after=app_state.lockout_store.lockout_duration_seconds,
+                    )
             logger.warning(
                 API_AUTH_FAILED,
                 reason="invalid_credentials",
             )
             msg = "Invalid credentials"
             raise UnauthorizedError(msg)
+
+        # Clear lockout on success
+        if app_state.has_lockout_store:
+            await app_state.lockout_store.record_success(data.username)
 
         token, expires_in, session_id = auth_service.create_token(user)
 
@@ -516,6 +684,13 @@ class AuthController(Controller):
             expires_in,
         )
 
+        auth_config = _get_auth_config(app_state)
+        if app_state.has_session_store:
+            await app_state.session_store.enforce_session_limit(
+                user.id,
+                auth_config.max_concurrent_sessions,
+            )
+
         logger.info(
             API_AUTH_TOKEN_ISSUED,
             user_id=user.id,
@@ -524,11 +699,18 @@ class AuthController(Controller):
 
         return Response(
             content=ApiResponse(
-                data=TokenResponse(
-                    token=token,
+                data=CookieSessionResponse(
                     expires_in=expires_in,
                     must_change_password=user.must_change_password,
                 ),
+            ),
+            cookies=await _make_session_cookies(
+                token,
+                expires_in,
+                auth_config,
+                app_state=app_state,
+                session_id=session_id,
+                user_id=user.id,
             ),
         )
 
@@ -598,6 +780,24 @@ class AuthController(Controller):
         )
         await persistence.users.save(updated_user)
 
+        # Revoke the old session before issuing a new one.
+        old_jti = _extract_jti(request)
+        if old_jti and app_state.has_session_store:
+            await app_state.session_store.revoke(old_jti)
+
+        # Rotate session cookie so the new pwd_sig is embedded.
+        token, expires_in, session_id = auth_service.create_token(
+            updated_user,
+        )
+        await _create_session(
+            request,
+            app_state,
+            session_id,
+            updated_user,
+            expires_in,
+        )
+        auth_config = _get_auth_config(app_state)
+
         logger.info(
             API_AUTH_PASSWORD_CHANGED,
             user_id=user.id,
@@ -614,6 +814,14 @@ class AuthController(Controller):
                     org_roles=tuple(r.value for r in updated_user.org_roles),
                     scoped_departments=updated_user.scoped_departments,
                 ),
+            ),
+            cookies=await _make_session_cookies(
+                token,
+                expires_in,
+                auth_config,
+                app_state=app_state,
+                session_id=session_id,
+                user_id=updated_user.id,
             ),
         )
 
@@ -832,8 +1040,8 @@ class AuthController(Controller):
     async def logout(
         self,
         request: Request[Any, Any, Any],
-    ) -> None:
-        """Revoke the current session's JWT."""
+    ) -> Response[None]:
+        """Revoke the current session and clear cookies."""
         auth_user = request.scope.get("user")
         if not isinstance(auth_user, AuthenticatedUser):
             logger.warning(
@@ -843,20 +1051,26 @@ class AuthController(Controller):
             msg = "Authentication required"
             raise UnauthorizedError(msg)
 
+        app_state = request.app.state["app_state"]
         jti = _extract_jti(request)
-        if not jti:
-            logger.debug(
-                API_AUTH_FAILED,
-                reason="logout_no_jti",
+        if jti and app_state.has_session_store:
+            await app_state.session_store.revoke(jti)
+            logger.info(
+                API_SESSION_FORCE_LOGOUT,
+                session_id=jti,
                 user_id=auth_user.user_id,
             )
-            return
 
-        app_state = request.app.state["app_state"]
-        store = app_state.session_store
-        await store.revoke(jti)
-        logger.info(
-            API_SESSION_FORCE_LOGOUT,
-            session_id=jti,
-            user_id=auth_user.user_id,
+        auth_config = _get_auth_config(
+            app_state,
+        )
+        return Response(
+            content=None,
+            status_code=204,
+            cookies=[
+                make_clear_session_cookie(auth_config),
+                make_clear_csrf_cookie(auth_config),
+                make_clear_refresh_cookie(auth_config),
+            ],
+            headers={"Clear-Site-Data": '"cookies"'},
         )

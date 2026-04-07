@@ -32,6 +32,7 @@ from litestar.openapi.plugins import ScalarRenderPlugin
 from synthorg import __version__
 from synthorg.api.approval_store import ApprovalStore
 from synthorg.api.auth.controller import require_password_changed
+from synthorg.api.auth.csrf import create_csrf_middleware_class
 from synthorg.api.auth.middleware import create_auth_middleware_class
 from synthorg.api.auth.service import AuthService  # noqa: TC001
 from synthorg.api.auto_wire import (
@@ -92,6 +93,7 @@ from synthorg.observability.events.api import (
     API_APP_SHUTDOWN,
     API_APP_STARTUP,
     API_APPROVAL_PUBLISH_FAILED,
+    API_AUTH_LOCKOUT_CLEANUP,
     API_NETWORK_EXPOSURE_WARNING,
     API_SESSION_CLEANUP,
     API_WS_SEND_FAILED,
@@ -332,6 +334,18 @@ async def _ticket_cleanup_loop(app_state: AppState) -> None:
             logger.warning(
                 API_SESSION_CLEANUP,
                 error="Periodic session cleanup failed",
+                exc_info=True,
+            )
+        # Lockout cleanup.
+        try:
+            if app_state.has_lockout_store:
+                await app_state.lockout_store.cleanup_expired()
+        except MemoryError, RecursionError:
+            raise
+        except Exception:
+            logger.warning(
+                API_AUTH_LOCKOUT_CLEANUP,
+                error="Periodic lockout cleanup failed",
                 exc_info=True,
             )
 
@@ -1263,8 +1277,24 @@ def _build_middleware(api_config: ApiConfig) -> list[Middleware]:
         update={"exclude_paths": exclude_paths},
     )
     auth_middleware = create_auth_middleware_class(auth)
+
+    # CSRF middleware: exempt login/setup (they set the cookie, client
+    # cannot carry a CSRF token on the first request) and health.
+    csrf_exempt = frozenset(
+        {
+            f"{prefix}/auth/login",
+            f"{prefix}/auth/setup",
+            f"{prefix}/health",
+        }
+    )
+    csrf_middleware = create_csrf_middleware_class(
+        auth,
+        exempt_paths=csrf_exempt,
+    )
+
     return [
         unauth_rate_limit.middleware,
+        csrf_middleware,
         auth_middleware,
         RequestLoggingMiddleware,
         auth_rate_limit.middleware,

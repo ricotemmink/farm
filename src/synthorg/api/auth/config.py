@@ -4,7 +4,14 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from synthorg.core.types import NotBlankStr  # noqa: TC001
+
 MIN_SECRET_LENGTH = 32
+DEFAULT_COOKIE_NAME = "session"
+DEFAULT_CSRF_COOKIE_NAME = "csrf_token"
+DEFAULT_CSRF_HEADER_NAME = "x-csrf-token"
+DEFAULT_REFRESH_COOKIE_NAME = "refresh_token"
+DEFAULT_REFRESH_COOKIE_PATH = "/api/v1/auth/refresh"
 
 
 def _require_valid_secret(secret: str) -> None:
@@ -38,15 +45,6 @@ class AuthConfig(BaseModel):
 
     At construction time the secret may be empty -- it is populated
     before the first request is served.
-
-    Attributes:
-        jwt_secret: HMAC signing key for JWT tokens and API key
-            hashing (resolved at startup, repr-hidden).  Rotating
-            this invalidates all stored API key hashes.
-        jwt_algorithm: JWT signing algorithm (HMAC family only).
-        jwt_expiry_minutes: Token lifetime in minutes.
-        min_password_length: Minimum password length for setup/change.
-        exclude_paths: URL paths excluded from auth middleware.
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -88,10 +86,131 @@ class AuthConfig(BaseModel):
         ),
     )
 
+    # Cookie settings
+    cookie_name: NotBlankStr = Field(
+        default=DEFAULT_COOKIE_NAME,
+        description="Session cookie name",
+    )
+    cookie_secure: bool = Field(
+        default=True,
+        description="Secure flag on session cookies (HTTPS-only)",
+    )
+    cookie_samesite: Literal["strict", "lax", "none"] = Field(
+        default="strict",
+        description="SameSite attribute for session cookies",
+    )
+    cookie_path: NotBlankStr = Field(
+        default="/api",
+        description="Path scope for session cookies",
+    )
+    cookie_domain: NotBlankStr | None = Field(
+        default=None,
+        description="Domain for session cookies (None = current host)",
+    )
+
+    # CSRF
+    csrf_cookie_name: NotBlankStr = Field(
+        default=DEFAULT_CSRF_COOKIE_NAME,
+        description="CSRF token cookie name (non-HttpOnly, JS-readable)",
+    )
+    csrf_header_name: NotBlankStr = Field(
+        default=DEFAULT_CSRF_HEADER_NAME,
+        description="Header name for CSRF token submission",
+    )
+
+    # Concurrent sessions
+    max_concurrent_sessions: int = Field(
+        default=5,
+        ge=0,
+        le=100,
+        description="Max concurrent sessions per user (0 = unlimited)",
+    )
+
+    # Refresh tokens
+    jwt_refresh_enabled: bool = Field(
+        default=False,
+        description="Enable refresh token rotation",
+    )
+    jwt_refresh_expiry_minutes: int = Field(
+        default=10080,
+        ge=1,
+        le=43200,
+        description="Refresh token lifetime in minutes (default 7 days)",
+    )
+    refresh_cookie_name: NotBlankStr = Field(
+        default=DEFAULT_REFRESH_COOKIE_NAME,
+        description="Refresh token cookie name",
+    )
+    refresh_cookie_path: NotBlankStr = Field(
+        default=DEFAULT_REFRESH_COOKIE_PATH,
+        description="Path scope for refresh token cookie (narrow)",
+    )
+
+    # Account lockout
+    lockout_threshold: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Failed login attempts before account lockout",
+    )
+    lockout_window_minutes: int = Field(
+        default=15,
+        ge=1,
+        le=1440,
+        description="Sliding window for counting failed attempts",
+    )
+    lockout_duration_minutes: int = Field(
+        default=15,
+        ge=1,
+        le=1440,
+        description="Auto-unlock duration after lockout",
+    )
+
     @model_validator(mode="after")
     def _validate_secret_length(self) -> Self:
         """Reject non-empty secrets shorter than the minimum."""
         _require_valid_secret(self.jwt_secret)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_refresh_expiry(self) -> Self:
+        """Ensure refresh token outlives the access token."""
+        if (
+            self.jwt_refresh_enabled
+            and self.jwt_refresh_expiry_minutes <= self.jwt_expiry_minutes
+        ):
+            msg = (
+                "jwt_refresh_expiry_minutes must be greater than "
+                "jwt_expiry_minutes when refresh tokens are enabled"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_cookie_settings(self) -> Self:
+        """Reject invalid cookie configuration combinations.
+
+        - ``SameSite=None`` requires ``Secure=True`` (browser
+          requirement).
+        - Cookie names must be distinct to avoid collisions.
+        """
+        if self.cookie_samesite == "none" and not self.cookie_secure:
+            msg = (
+                "cookie_secure must be True when "
+                "cookie_samesite is 'none' (browser requirement)"
+            )
+            raise ValueError(msg)
+        names = [
+            self.cookie_name,
+            self.csrf_cookie_name,
+            self.refresh_cookie_name,
+        ]
+        if len(set(names)) != len(names):
+            msg = (
+                "cookie_name, csrf_cookie_name, and "
+                "refresh_cookie_name must all be distinct"
+            )
+            raise ValueError(msg)
         return self
 
     def with_secret(self, secret: str) -> AuthConfig:

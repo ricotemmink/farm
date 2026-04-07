@@ -497,3 +497,32 @@ CREATE INDEX IF NOT EXISTS idx_dr_executing_agent_recorded
     ON decision_records(executing_agent_id, recorded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_dr_reviewer_agent_recorded
     ON decision_records(reviewer_agent_id, recorded_at DESC);
+
+-- ── Login Attempts (account lockout) ─────────────────────────
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    attempted_at TEXT NOT NULL,
+    ip_address TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_la_username_attempted
+    ON login_attempts(username, attempted_at);
+CREATE INDEX IF NOT EXISTS idx_la_attempted_at
+    ON login_attempts(attempted_at);
+
+-- ── Refresh Tokens ───────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    token_hash TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL
+        REFERENCES sessions(session_id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL
+        REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0 CHECK(used IN (0, 1)),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rt_user_id ON refresh_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_rt_session_id ON refresh_tokens(session_id);
+CREATE INDEX IF NOT EXISTS idx_rt_expires_at ON refresh_tokens(expires_at);
