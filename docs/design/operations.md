@@ -1301,6 +1301,7 @@ future CLI tool are thin clients that call the API -- they contain no business l
 | Endpoint | Purpose |
 |----------|---------|
 | `/api/v1/health` | Health check, readiness |
+| `/api/v1/metrics` | Prometheus metrics scrape endpoint (unauthenticated). 9 metric families: `synthorg_app` (Info -- version), `synthorg_active_agents_total` (Gauge -- status, trust_level labels), `synthorg_tasks_total` (Gauge -- status, agent labels), `synthorg_cost_total` (Gauge), `synthorg_budget_used_percent` (Gauge), `synthorg_budget_monthly_usd` (Gauge), `synthorg_coordination_efficiency` (Gauge -- push-updated), `synthorg_coordination_overhead_percent` (Gauge -- push-updated), `synthorg_security_evaluations_total` (Counter -- verdict label). Most refreshed per-scrape; coordination and security metrics are push-updated. |
 | `/api/v1/auth` | Authentication: setup, login (HttpOnly cookie sessions, CSRF double-submit), password change (rotates session cookie), ws-ticket, session management (list/revoke, concurrent session limits), logout, account lockout (429 with Retry-After), refresh token rotation (tiered rate limiting: 20 req/min unauth by IP, 6,000 req/min auth by user ID -- see `docs/security.md`) |
 | `/api/v1/company` | CRUD company config |
 | `/api/v1/agents` | List, hire, fire, modify agents |
@@ -1541,13 +1542,14 @@ Eleven default sinks, activated at startup via `bootstrap_logging()`:
 | `configuration.log` | File | INFO | JSON | `synthorg.settings.*`, `synthorg.config.*` | Settings resolution, config loading |
 | `backup.log` | File | INFO | JSON | `synthorg.backup.*` | Backup/restore lifecycle |
 
-In addition to the 11 default sinks, two shipping sink types are available for centralized
-log aggregation:
+In addition to the 11 default sinks, three shipping sink types are available for centralized
+log aggregation and telemetry export:
 
 | Sink Type | Transport | Format | Description |
 |-----------|-----------|--------|-------------|
 | Syslog | UDP or TCP to a configurable endpoint | JSON | Ship structured logs to rsyslog, syslog-ng, or Graylog |
 | HTTP | Batched POST to a configurable URL | JSON array | Ship log batches to any JSON-accepting endpoint |
+| OTLP | HTTP POST to an OpenTelemetry collector | OTLP JSON | Map structlog events to OTLP log records with correlation IDs as trace context |
 
 The HTTP sink sends raw JSON arrays.  Backends that expect different payload formats
 (e.g., Grafana Loki's `/loki/api/v1/push`, Elasticsearch's `/_bulk`) require a
@@ -1847,21 +1849,19 @@ them is required to support the full control-plane positioning claim.
 
 | # | Gap | Severity | Recommendation |
 |---|-----|----------|----------------|
-| G1 | No telemetry export (Prometheus `/metrics` or OTLP) | High | Add `/metrics` route + metrics aggregator. The 82+ structured events provide all raw data. |
+| G1 | ~~No telemetry export (Prometheus `/metrics` or OTLP)~~ | ~~High~~ | **Closed.** `PrometheusCollector` instantiated in `on_startup()`, `/metrics` returns 200 with 9 metric families, OTLP HTTP/JSON sink type implemented. Deviation: OTLP uses HTTP/JSON (not protobuf); gRPC rejected at config validation (approved). |
 | G2 | ~~No per-agent health endpoint~~ | ~~Medium~~ | **Implemented** -- `GET /agents/{name}/health` composites performance, trust, and lifecycle status. (Issue #1118 scoped as `{id}` but implemented as `{name}` for consistency with existing agent routes.) |
 | G3 | ~~No policy-as-code export/import~~ | ~~Medium~~ | **Implemented** -- `GET /settings/security/export` and `POST /settings/security/import` (persists registered settings; code-defined policies require matching Python code). |
 | G4 | ~~No coordination metrics API~~ | ~~Medium~~ | **Implemented** -- `GET /coordination/metrics` exposes the 9 Kim et al. metrics with filtering. |
 | G5 | ~~No audit log query API~~ | ~~Medium~~ | **Implemented** -- `GET /security/audit` with agent_id, tool_name, verdict, action_type, and time-range filters. |
 | G6 | Budget history granularity | Low | `CostTracker` is in-memory with TTL eviction. Multi-dimensional queries (provider X, agent Y, period Z) require persistence layer investigation. |
 
-Priority for closing gaps: G1 (telemetry export) is the most significant remaining gap
-for enterprise positioning. G2-G5 were closed in v0.6.4 (control-plane API endpoints
-batch). G6 remains low-priority.
+All gaps G1-G5 are now closed. G6 (budget history granularity) remains low-priority.
 
 ### Recommended Framing
 
 SynthOrg should be positioned as an **orchestrated agent control plane**: policy-as-code,
 metered coordination, and observable agent behavior -- all enforced from a single control
 surface. This framing is accurate today for inventory, policy enforcement, and token
-metering. Telemetry export (G1) is the primary gap between internal capability and the
-external claim.
+metering. With G1 closed (Prometheus `/metrics` + OTLP HTTP/JSON), the remaining gaps
+are G3 (policy-as-code) and G4 (coordination metrics API) for full control-plane coverage.

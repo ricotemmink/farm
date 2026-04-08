@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from synthorg.core.types import NotBlankStr  # noqa: TC001
 from synthorg.observability.enums import (
     LogLevel,
+    OtlpProtocol,
     RotationStrategy,
     SinkType,
     SyslogFacility,
@@ -30,6 +31,9 @@ _DEFAULT_HTTP_BATCH_SIZE: Final[int] = 100
 _DEFAULT_HTTP_FLUSH_INTERVAL: Final[float] = 5.0
 _DEFAULT_HTTP_TIMEOUT: Final[float] = 10.0
 _DEFAULT_HTTP_MAX_RETRIES: Final[int] = 3
+_DEFAULT_OTLP_EXPORT_INTERVAL: Final[float] = 5.0
+_DEFAULT_OTLP_BATCH_SIZE: Final[int] = 100
+_DEFAULT_OTLP_TIMEOUT: Final[float] = 10.0
 
 
 class RotationConfig(BaseModel):
@@ -73,6 +77,76 @@ class RotationConfig(BaseModel):
         default=False,
         description="Gzip-compress rotated backup files",
     )
+
+
+def _is_private_ip(addr_str: str) -> bool:
+    """Check whether an IP address string is private/loopback/link-local."""
+    import ipaddress  # noqa: PLC0415
+
+    try:
+        addr = ipaddress.ip_address(addr_str)
+    except ValueError:
+        return False
+    return bool(addr.is_private or addr.is_loopback or addr.is_link_local)
+
+
+def _validate_otlp_endpoint_safety(
+    endpoint: str,
+    hostname: str,
+    *,
+    has_headers: bool,
+) -> None:
+    """Reject private IPs (SSRF) and warn on unencrypted HTTP.
+
+    Checks both IP literals and DNS-resolved addresses (best-effort).
+    Localhost (127.0.0.1, ::1, ``localhost``) is always allowed as a
+    standard local OTLP collector endpoint.
+    """
+    localhost_names = {"localhost", "127.0.0.1", "::1"}
+
+    # Allow localhost/loopback -- standard for local collectors.
+    if hostname in localhost_names:
+        return
+
+    # Direct IP literal check (non-localhost private IPs).
+    if _is_private_ip(hostname):
+        msg = (
+            f"otlp_endpoint must not target private/loopback IP addresses ({hostname})"
+        )
+        raise ValueError(msg)
+
+    # DNS resolution check for hostnames (best-effort).
+    if not _is_private_ip(hostname):
+        import socket  # noqa: PLC0415
+
+        try:
+            addrs = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+        except socket.gaierror:
+            # DNS resolution failed -- skip check (hostname may be valid
+            # at runtime even if not resolvable at config-load time).
+            return
+        for _family, _type, _proto, _canonname, sockaddr in addrs:
+            resolved_ip = str(sockaddr[0])
+            if _is_private_ip(resolved_ip):
+                msg = (
+                    f"otlp_endpoint hostname {hostname!r} resolves to "
+                    f"private/loopback address {resolved_ip}"
+                )
+                raise ValueError(msg)
+
+    if (
+        endpoint.startswith("http://")
+        and hostname not in ("localhost", "127.0.0.1", "::1")
+        and has_headers
+    ):
+        import warnings  # noqa: PLC0415
+
+        warnings.warn(
+            "OTLP endpoint uses unencrypted HTTP with headers "
+            "that may contain secrets; prefer https://",
+            UserWarning,
+            stacklevel=4,
+        )
 
 
 class SinkConfig(BaseModel):
@@ -166,6 +240,34 @@ class SinkConfig(BaseModel):
         ge=0,
         description="Retry count on HTTP failure",
     )
+    # OTLP fields
+    otlp_endpoint: str | None = Field(
+        default=None,
+        description="OTLP collector endpoint URL",
+    )
+    otlp_protocol: OtlpProtocol = Field(
+        default=OtlpProtocol.HTTP_JSON,
+        description="OTLP transport protocol",
+    )
+    otlp_headers: tuple[tuple[str, str], ...] = Field(
+        default=(),
+        description="Extra OTLP headers as (name, value) pairs",
+    )
+    otlp_export_interval_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="Seconds between OTLP export batches",
+    )
+    otlp_batch_size: int = Field(
+        default=_DEFAULT_OTLP_BATCH_SIZE,
+        gt=0,
+        description="Records per OTLP export batch",
+    )
+    otlp_timeout_seconds: float = Field(
+        default=_DEFAULT_OTLP_TIMEOUT,
+        gt=0,
+        description="HTTP request timeout in seconds for OTLP export",
+    )
 
     @model_validator(mode="after")
     def _validate_sink_type_fields(self) -> Self:
@@ -173,20 +275,35 @@ class SinkConfig(BaseModel):
         match self.sink_type:
             case SinkType.FILE:
                 self._validate_file_fields()
+                self._reject_otlp_fields("FILE")
             case SinkType.CONSOLE:
                 self._reject_file_fields("CONSOLE")
                 self._reject_syslog_fields("CONSOLE")
                 self._reject_http_fields("CONSOLE")
+                self._reject_otlp_fields("CONSOLE")
             case SinkType.SYSLOG:
                 self._reject_file_fields("SYSLOG")
                 self._validate_syslog_fields()
                 self._reject_http_fields("SYSLOG")
                 self._require_json_format("SYSLOG")
+                self._reject_otlp_fields("SYSLOG")
             case SinkType.HTTP:
                 self._reject_file_fields("HTTP")
                 self._reject_syslog_fields("HTTP")
                 self._validate_http_fields()
                 self._require_json_format("HTTP")
+                self._reject_otlp_fields("HTTP")
+            case SinkType.PROMETHEUS:
+                self._reject_file_fields("PROMETHEUS")
+                self._reject_syslog_fields("PROMETHEUS")
+                self._reject_http_fields("PROMETHEUS")
+                self._reject_otlp_fields("PROMETHEUS")
+            case SinkType.OTLP:
+                self._reject_file_fields("OTLP")
+                self._reject_syslog_fields("OTLP")
+                self._reject_http_fields("OTLP")
+                self._validate_otlp_fields()
+                self._require_json_format("OTLP")
         return self
 
     def _validate_file_fields(self) -> None:
@@ -289,6 +406,73 @@ class SinkConfig(BaseModel):
     def _require_json_format(self, sink_label: str) -> None:
         if not self.json_format:
             msg = f"json_format must be True for {sink_label} sinks (always JSON)"
+            raise ValueError(msg)
+
+    def _validate_otlp_fields(self) -> None:
+        if self.otlp_protocol == OtlpProtocol.GRPC:
+            msg = "OTLP gRPC transport is not supported; use HTTP_JSON"
+            raise ValueError(msg)
+        if self.otlp_endpoint is None:
+            msg = "otlp_endpoint is required for OTLP sinks"
+            raise ValueError(msg)
+        if not self.otlp_endpoint.strip():
+            msg = "otlp_endpoint must not be blank"
+            raise ValueError(msg)
+        if not (
+            self.otlp_endpoint.startswith("http://")
+            or self.otlp_endpoint.startswith("https://")
+        ):
+            msg = "otlp_endpoint must start with http:// or https://"
+            raise ValueError(msg)
+        from urllib.parse import urlparse  # noqa: PLC0415
+
+        parsed = urlparse(self.otlp_endpoint)
+        if not parsed.hostname:
+            msg = "otlp_endpoint must include a host"
+            raise ValueError(msg)
+        _validate_otlp_endpoint_safety(
+            self.otlp_endpoint,
+            parsed.hostname,
+            has_headers=bool(self.otlp_headers),
+        )
+        for i, (name, value) in enumerate(self.otlp_headers):
+            if not name or not name.strip():
+                msg = f"otlp_headers[{i}] has an empty header name"
+                raise ValueError(msg)
+            if "\r" in name or "\n" in name:
+                msg = f"otlp_headers[{i}] name contains CRLF"
+                raise ValueError(msg)
+            if "\r" in value or "\n" in value:
+                msg = f"otlp_headers[{i}] value contains CRLF"
+                raise ValueError(msg)
+
+    def _reject_otlp_fields(self, sink_label: str) -> None:
+        if self.otlp_endpoint is not None:
+            msg = f"otlp_endpoint must be None for {sink_label} sinks"
+            raise ValueError(msg)
+        if self.otlp_headers != ():
+            msg = f"otlp_headers must be empty for {sink_label} sinks"
+            raise ValueError(msg)
+        if self.otlp_export_interval_seconds != _DEFAULT_OTLP_EXPORT_INTERVAL:
+            msg = (
+                "otlp_export_interval_seconds must be default (5.0) "
+                f"for {sink_label} sinks"
+            )
+            raise ValueError(msg)
+        if self.otlp_protocol != OtlpProtocol.HTTP_JSON:
+            msg = f"otlp_protocol must be default (http/json) for {sink_label} sinks"
+            raise ValueError(msg)
+        if self.otlp_batch_size != _DEFAULT_OTLP_BATCH_SIZE:
+            msg = (
+                f"otlp_batch_size must be default "
+                f"({_DEFAULT_OTLP_BATCH_SIZE}) for {sink_label} sinks"
+            )
+            raise ValueError(msg)
+        if self.otlp_timeout_seconds != _DEFAULT_OTLP_TIMEOUT:
+            msg = (
+                f"otlp_timeout_seconds must be default "
+                f"({_DEFAULT_OTLP_TIMEOUT}) for {sink_label} sinks"
+            )
             raise ValueError(msg)
 
 

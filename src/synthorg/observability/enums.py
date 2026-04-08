@@ -37,12 +37,28 @@ class SinkType(StrEnum):
         FILE: Write to a log file with optional rotation.
         SYSLOG: Ship structured JSON to a syslog endpoint.
         HTTP: POST JSON log batches to an HTTP endpoint.
+        PROMETHEUS: Prometheus metrics scrape endpoint (pull-based).
+        OTLP: OpenTelemetry Protocol log/trace exporter (push-based).
     """
 
     CONSOLE = "console"
     FILE = "file"
     SYSLOG = "syslog"
     HTTP = "http"
+    PROMETHEUS = "prometheus"
+    OTLP = "otlp"
+
+
+class OtlpProtocol(StrEnum):
+    """OpenTelemetry Protocol transport.
+
+    Attributes:
+        HTTP_JSON: HTTP with JSON encoding (the only implemented transport).
+        GRPC: gRPC transport (not implemented; rejected at handler init).
+    """
+
+    HTTP_JSON = "http/json"
+    GRPC = "grpc"
 
 
 class SyslogFacility(StrEnum):
