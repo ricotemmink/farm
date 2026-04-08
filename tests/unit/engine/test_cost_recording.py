@@ -316,3 +316,60 @@ class TestAnalyticsFieldPropagation:
         assert tracker.records[0].cache_hit is None
         assert tracker.records[0].retry_count is None
         assert tracker.records[0].retry_reason is None
+
+
+@pytest.mark.unit
+class TestProjectIdPropagation:
+    """Tests for project_id propagation through cost recording."""
+
+    @pytest.mark.parametrize(
+        ("turns", "project_id", "expected_count", "expected_ids"),
+        [
+            pytest.param(
+                (_turn(),),
+                "proj-100",
+                1,
+                ("proj-100",),
+                id="single-turn-with-project",
+            ),
+            pytest.param(
+                (_turn(),),
+                None,
+                1,
+                (None,),
+                id="single-turn-none-by-default",
+            ),
+            pytest.param(
+                (
+                    _turn(turn_number=1, cost_usd=0.01),
+                    _turn(turn_number=2, cost_usd=0.02),
+                ),
+                "proj-200",
+                2,
+                ("proj-200", "proj-200"),
+                id="multi-turn-all-tagged",
+            ),
+        ],
+    )
+    async def test_project_id_propagation(
+        self,
+        turns: tuple[TurnRecord, ...],
+        project_id: str | None,
+        expected_count: int,
+        expected_ids: tuple[str | None, ...],
+    ) -> None:
+        tracker = _FakeTracker()
+        kwargs: dict[str, object] = {
+            "tracker": tracker,
+        }
+        if project_id is not None:
+            kwargs["project_id"] = project_id
+        await record_execution_costs(
+            _result(turns),
+            _identity(),
+            "agent-1",
+            "task-1",
+            **kwargs,  # type: ignore[arg-type]
+        )
+        assert len(tracker.records) == expected_count
+        assert tuple(r.project_id for r in tracker.records) == expected_ids
