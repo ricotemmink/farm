@@ -1,13 +1,15 @@
 """Graceful shutdown strategy and manager.
 
 Implements the Graceful Shutdown section of the Engine design page --
-cooperative timeout strategy for clean process shutdown.
-When SIGINT/SIGTERM is received the framework signals
-agents to exit at turn boundaries, waits a grace period, force-cancels
-stragglers, and runs cleanup callbacks.  The *engine* layer is responsible
-for transitioning tasks to INTERRUPTED (see ``AgentEngine``).
+pluggable shutdown strategies for clean process shutdown.
+When SIGINT/SIGTERM is received the framework signals agents to exit at
+turn boundaries, waits a grace period, force-cancels stragglers, and
+runs cleanup callbacks.  The *engine* layer is responsible for
+transitioning tasks to INTERRUPTED or SUSPENDED (see ``AgentEngine``).
 
-The ``ShutdownStrategy`` protocol is pluggable for future strategies.
+Four strategies are provided: cooperative timeout, immediate cancel,
+finish current tool, and checkpoint-and-stop.  The
+``ShutdownStrategy`` protocol is pluggable for custom strategies.
 """
 
 import asyncio
@@ -41,6 +43,9 @@ logger = get_logger(__name__)
 CleanupCallback = Callable[[], Coroutine[Any, Any, None]]
 """Async callback invoked during shutdown cleanup phase."""
 
+CheckpointSaver = Callable[[str], Coroutine[Any, Any, bool]]
+"""Async callback: given task_id, save checkpoint. Returns True on success."""
+
 
 class ShutdownResult(BaseModel):
     """Outcome of a graceful shutdown sequence.
@@ -49,6 +54,8 @@ class ShutdownResult(BaseModel):
         strategy_type: Name of the strategy that executed the shutdown.
         tasks_interrupted: Number of tasks that were force-cancelled.
         tasks_completed: Number of tasks that exited cooperatively.
+        tasks_suspended: Number of tasks checkpointed before stop
+            (checkpoint strategy only, default 0).
         cleanup_completed: Whether all cleanup callbacks finished
             within the allowed time.
         duration_seconds: Wall-clock duration of the entire shutdown.
@@ -69,6 +76,13 @@ class ShutdownResult(BaseModel):
     tasks_completed: int = Field(
         ge=0,
         description="Number of tasks that exited cooperatively",
+    )
+    tasks_suspended: int = Field(
+        ge=0,
+        default=0,
+        description=(
+            "Number of tasks checkpointed before stop (checkpoint strategy only)"
+        ),
     )
     cleanup_completed: bool = Field(
         description="Whether all cleanup callbacks finished in time",
@@ -172,7 +186,7 @@ class CooperativeTimeoutStrategy:
             running_tasks,
         )
 
-        cleanup_completed = await self._run_cleanup(cleanup_callbacks)
+        cleanup_completed = await _run_cleanup(cleanup_callbacks, self._cleanup_seconds)
 
         duration = time.monotonic() - start
         result = ShutdownResult(
@@ -225,7 +239,7 @@ class CooperativeTimeoutStrategy:
             if exc is not None:
                 logger.warning(
                     EXECUTION_SHUTDOWN_TASK_ERROR,
-                    error=(f"Task raised during shutdown: {type(exc).__name__}"),
+                    error=f"Task raised during shutdown: {type(exc).__name__}: {exc}",
                 )
             else:
                 tasks_completed += 1
@@ -243,87 +257,89 @@ class CooperativeTimeoutStrategy:
                 pending,
                 timeout=self._CANCEL_PROPAGATION_TIMEOUT,
             )
-            self._log_post_cancel_exceptions(cancel_done)
+            _log_post_cancel_exceptions(cancel_done)
 
         return tasks_completed, len(pending)
 
-    def _log_post_cancel_exceptions(
-        self,
-        tasks: set[asyncio.Task[Any]],
-    ) -> None:
-        """Retrieve and log exceptions from post-cancel tasks.
 
-        Retrieving the exception prevents asyncio's "Task exception was
-        never retrieved" warning.  Non-cancelled tasks with exceptions
-        are logged at DEBUG.
-        """
-        for task in tasks:
-            if task.cancelled():
-                continue
-            try:
-                exc = task.exception()
-            except asyncio.InvalidStateError:
+# ── Shared helpers ───────────────────────────────────────────────
+
+
+def _log_post_cancel_exceptions(tasks: set[asyncio.Task[Any]]) -> None:
+    """Retrieve and log exceptions from post-cancel tasks.
+
+    Retrieving the exception prevents asyncio's "Task exception was
+    never retrieved" warning.  Non-cancelled tasks with exceptions
+    are logged at DEBUG.
+    """
+    for task in tasks:
+        if task.cancelled():
+            continue
+        try:
+            exc = task.exception()
+        except asyncio.InvalidStateError:
+            logger.debug(
+                EXECUTION_SHUTDOWN_TASK_ERROR,
+                error="Failed to inspect post-cancel task: InvalidStateError",
+                task_name=task.get_name(),
+            )
+        else:
+            if exc is not None:
                 logger.debug(
                     EXECUTION_SHUTDOWN_TASK_ERROR,
-                    error="Failed to inspect post-cancel task: InvalidStateError",
+                    error=(f"Post-cancel task exception: {type(exc).__name__}: {exc}"),
                     task_name=task.get_name(),
                 )
-            else:
-                if exc is not None:
-                    logger.debug(
-                        EXECUTION_SHUTDOWN_TASK_ERROR,
-                        error=(
-                            f"Post-cancel task exception: {type(exc).__name__}: {exc}"
-                        ),
-                        task_name=task.get_name(),
-                    )
 
-    async def _run_cleanup(
-        self,
-        callbacks: Sequence[CleanupCallback],
-    ) -> bool:
-        """Run cleanup callbacks sequentially within the time budget.
 
-        Returns:
-            ``True`` if all callbacks completed successfully within the
-            time budget, ``False`` otherwise.
-        """
-        if not callbacks:
-            return True
+async def _run_cleanup(
+    callbacks: Sequence[CleanupCallback],
+    cleanup_seconds: float,
+) -> bool:
+    """Run cleanup callbacks sequentially within the time budget.
 
-        logger.info(
-            EXECUTION_SHUTDOWN_CLEANUP,
-            callback_count=len(callbacks),
-            cleanup_seconds=self._cleanup_seconds,
+    Returns:
+        ``True`` if all callbacks completed successfully, ``False``
+        otherwise.
+    """
+    if not callbacks:
+        return True
+
+    logger.info(
+        EXECUTION_SHUTDOWN_CLEANUP,
+        callback_count=len(callbacks),
+        cleanup_seconds=cleanup_seconds,
+    )
+
+    all_succeeded = True
+
+    async def _run_all() -> None:
+        nonlocal all_succeeded
+        for i, callback in enumerate(callbacks):
+            try:
+                await callback()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                all_succeeded = False
+                logger.exception(
+                    EXECUTION_SHUTDOWN_CLEANUP_FAILED,
+                    callback_index=i,
+                    callback_count=len(callbacks),
+                )
+
+    try:
+        await asyncio.wait_for(
+            _run_all(),
+            timeout=cleanup_seconds,
         )
-
-        all_succeeded = True
-
-        async def _run_all() -> None:
-            nonlocal all_succeeded
-            for i, callback in enumerate(callbacks):
-                try:
-                    await callback()
-                except Exception:
-                    all_succeeded = False
-                    logger.exception(
-                        EXECUTION_SHUTDOWN_CLEANUP_FAILED,
-                        callback_index=i,
-                        callback_count=len(callbacks),
-                    )
-
-        try:
-            await asyncio.wait_for(
-                _run_all(),
-                timeout=self._cleanup_seconds,
-            )
-        except TimeoutError:
-            logger.warning(
-                EXECUTION_SHUTDOWN_CLEANUP_TIMEOUT,
-                cleanup_seconds=self._cleanup_seconds,
-            )
-            return False
-        return all_succeeded
+    except TimeoutError:
+        logger.warning(
+            EXECUTION_SHUTDOWN_CLEANUP_TIMEOUT,
+            cleanup_seconds=cleanup_seconds,
+        )
+        return False
+    return all_succeeded
 
 
 class ShutdownManager:

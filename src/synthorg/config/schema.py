@@ -1,7 +1,7 @@
 """Root configuration schema and config-level Pydantic models."""
 
 from collections import Counter
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
@@ -441,16 +441,21 @@ class GracefulShutdownConfig(BaseModel):
     """Configuration for graceful shutdown behaviour.
 
     Attributes:
-        strategy: Shutdown strategy name (e.g. ``"cooperative_timeout"``).
+        strategy: Shutdown strategy name (``"cooperative_timeout"``,
+            ``"immediate"``, ``"finish_tool"``, or ``"checkpoint"``).
         grace_seconds: Seconds to wait for cooperative agent exit
             before force-cancelling.
         cleanup_seconds: Seconds allowed for cleanup callbacks
             (persist costs, close connections, flush logs).
+        tool_timeout_seconds: Per-tool timeout for the
+            ``"finish_tool"`` strategy (seconds).
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
-    strategy: NotBlankStr = Field(
+    strategy: Literal[
+        "cooperative_timeout", "immediate", "finish_tool", "checkpoint"
+    ] = Field(
         default="cooperative_timeout",
         description="Shutdown strategy name",
     )
@@ -465,6 +470,12 @@ class GracefulShutdownConfig(BaseModel):
         gt=0,
         le=60,
         description="Seconds allowed for cleanup callbacks",
+    )
+    tool_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        le=300,
+        description="Per-tool timeout for finish_tool strategy",
     )
 
 

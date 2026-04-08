@@ -167,11 +167,18 @@ from synthorg.engine.routing import (
 )
 from synthorg.engine.run_result import AgentRunResult
 from synthorg.engine.shutdown import (
+    CheckpointSaver,
     CleanupCallback,
     CooperativeTimeoutStrategy,
     ShutdownManager,
     ShutdownResult,
     ShutdownStrategy,
+)
+from synthorg.engine.shutdown_strategies import (
+    CheckpointAndStopStrategy,
+    FinishCurrentToolStrategy,
+    ImmediateCancelStrategy,
+    build_shutdown_strategy,
 )
 from synthorg.engine.stagnation import (
     StagnationConfig,
@@ -246,9 +253,11 @@ __all__ = [
     "CancelTaskMutation",
     "CentralizedDispatcher",
     "Checkpoint",
+    "CheckpointAndStopStrategy",
     "CheckpointCallback",
     "CheckpointConfig",
     "CheckpointRecoveryStrategy",
+    "CheckpointSaver",
     "ClassificationResult",
     "CleanupCallback",
     "ContextDependentDispatcher",
@@ -286,10 +295,12 @@ __all__ = [
     "ExecutionResult",
     "ExecutionStateError",
     "FailAndReassignStrategy",
+    "FinishCurrentToolStrategy",
     "Heartbeat",
     "HierarchicalAssignmentStrategy",
     "HybridLoop",
     "HybridLoopConfig",
+    "ImmediateCancelStrategy",
     "InMemoryResourceLock",
     "LlmDecompositionConfig",
     "LlmDecompositionStrategy",
@@ -382,6 +393,7 @@ __all__ = [
     "add_token_usage",
     "build_execution_loop",
     "build_execution_waves",
+    "build_shutdown_strategy",
     "build_strategy_map",
     "build_system_prompt",
     "classify_execution_errors",

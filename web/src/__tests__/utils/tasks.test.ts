@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Priority, Task, TaskStatus } from '@/api/types'
 import {
   KANBAN_COLUMNS,
+  OFF_BOARD_STATUSES,
   STATUS_TO_COLUMN,
   VALID_TRANSITIONS,
   canTransitionTo,
@@ -23,7 +24,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 
 const ALL_STATUSES: TaskStatus[] = [
   'created', 'assigned', 'in_progress', 'in_review', 'completed',
-  'blocked', 'failed', 'interrupted', 'cancelled',
+  'blocked', 'failed', 'interrupted', 'suspended', 'cancelled',
 ]
 
 // ── getTaskStatusColor ──────────────────────────────────────
@@ -38,6 +39,7 @@ describe('getTaskStatusColor', () => {
     ['blocked', 'danger'],
     ['failed', 'danger'],
     ['interrupted', 'warning'],
+    ['suspended', 'warning'],
     ['cancelled', 'text-secondary'],
   ])('maps %s to %s', (status, expected) => {
     expect(getTaskStatusColor(status)).toBe(expected)
@@ -56,6 +58,7 @@ describe('getTaskStatusLabel', () => {
     ['blocked', 'Blocked'],
     ['failed', 'Failed'],
     ['interrupted', 'Interrupted'],
+    ['suspended', 'Suspended'],
     ['cancelled', 'Cancelled'],
   ])('maps %s to %s', (status, expected) => {
     expect(getTaskStatusLabel(status)).toBe(expected)
@@ -95,10 +98,11 @@ describe('KANBAN_COLUMNS', () => {
     expect(KANBAN_COLUMNS).toHaveLength(7)
   })
 
-  it('covers all 9 task statuses exactly once', () => {
+  it('covers all on-board task statuses exactly once', () => {
+    const onBoard = ALL_STATUSES.filter((s) => !OFF_BOARD_STATUSES.has(s))
     const allStatuses = KANBAN_COLUMNS.flatMap((col) => col.statuses)
-    expect(allStatuses).toHaveLength(ALL_STATUSES.length)
-    for (const status of ALL_STATUSES) {
+    expect(allStatuses).toHaveLength(onBoard.length)
+    for (const status of onBoard) {
       expect(allStatuses).toContain(status)
     }
   })
@@ -112,9 +116,13 @@ describe('KANBAN_COLUMNS', () => {
 // ── STATUS_TO_COLUMN ────────────────────────────────────────
 
 describe('STATUS_TO_COLUMN', () => {
-  it('maps every TaskStatus to a column', () => {
+  it('maps every on-board TaskStatus to a column', () => {
     for (const status of ALL_STATUSES) {
-      expect(STATUS_TO_COLUMN[status]).toBeDefined()
+      if (OFF_BOARD_STATUSES.has(status)) {
+        expect(STATUS_TO_COLUMN[status]).toBeNull()
+      } else {
+        expect(STATUS_TO_COLUMN[status]).toBeDefined()
+      }
     }
   })
 
@@ -164,13 +172,14 @@ describe('groupTasksByColumn', () => {
     }
   })
 
-  it('preserves all tasks (no task lost)', () => {
+  it('preserves all on-board tasks (off-board excluded)', () => {
     const tasks = ALL_STATUSES.map((status, i) =>
       makeTask({ id: `t${i}`, status }),
     )
     const grouped = groupTasksByColumn(tasks)
     const total = Object.values(grouped).reduce((sum, arr) => sum + arr.length, 0)
-    expect(total).toBe(ALL_STATUSES.length)
+    const onBoardCount = ALL_STATUSES.filter((s) => !OFF_BOARD_STATUSES.has(s)).length
+    expect(total).toBe(onBoardCount)
   })
 })
 

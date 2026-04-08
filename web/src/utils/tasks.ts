@@ -12,6 +12,7 @@ const TASK_STATUS_COLOR_MAP: Record<TaskStatus, SemanticColor | 'text-secondary'
   blocked: 'danger',
   failed: 'danger',
   interrupted: 'warning',
+  suspended: 'warning',
   cancelled: 'text-secondary',
 }
 
@@ -30,6 +31,7 @@ const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
   blocked: 'Blocked',
   failed: 'Failed',
   interrupted: 'Interrupted',
+  suspended: 'Suspended',
   cancelled: 'Cancelled',
 }
 
@@ -106,11 +108,17 @@ export const KANBAN_COLUMNS: readonly KanbanColumn[] = [
   { id: 'terminal', label: 'Terminal', statuses: ['failed', 'interrupted', 'cancelled'], color: 'text-secondary' },
 ] as const
 
-export const STATUS_TO_COLUMN: Record<TaskStatus, KanbanColumnId> = Object.fromEntries(
-  KANBAN_COLUMNS.flatMap((col) =>
-    col.statuses.map((status) => [status, col.id]),
+/** Off-board statuses not displayed on the Kanban board (resumable). */
+export const OFF_BOARD_STATUSES: ReadonlySet<TaskStatus> = new Set(['suspended'])
+
+export const STATUS_TO_COLUMN: Record<TaskStatus, KanbanColumnId | null> = {
+  ...Object.fromEntries(
+    KANBAN_COLUMNS.flatMap((col) =>
+      col.statuses.map((status) => [status, col.id]),
+    ),
   ),
-) as Record<TaskStatus, KanbanColumnId>
+  ...Object.fromEntries([...OFF_BOARD_STATUSES].map((s) => [s, null])),
+} as Record<TaskStatus, KanbanColumnId | null>
 
 // ── Group tasks by column ───────────────────────────────────
 
@@ -127,7 +135,9 @@ export function groupTasksByColumn(tasks: readonly Task[]): Record<KanbanColumnI
 
   for (const task of tasks) {
     const columnId = STATUS_TO_COLUMN[task.status]
-    grouped[columnId].push(task)
+    if (columnId) {
+      grouped[columnId].push(task)
+    }
   }
 
   return grouped
@@ -190,13 +200,14 @@ export function filterTasks(tasks: readonly Task[], filters: TaskBoardFilters): 
 
 export const VALID_TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   created: ['assigned'],
-  assigned: ['in_progress', 'failed', 'blocked', 'cancelled', 'interrupted'],
-  in_progress: ['in_review', 'failed', 'cancelled', 'interrupted'],
+  assigned: ['in_progress', 'failed', 'blocked', 'cancelled', 'interrupted', 'suspended'],
+  in_progress: ['in_review', 'failed', 'cancelled', 'interrupted', 'suspended'],
   in_review: ['completed', 'in_progress'],
   completed: [],
   blocked: ['assigned'],
   failed: ['assigned'],
   interrupted: ['assigned'],
+  suspended: ['assigned'],
   cancelled: [],
 }
 
