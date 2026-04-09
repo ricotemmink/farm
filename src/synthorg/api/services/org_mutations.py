@@ -9,7 +9,7 @@ for the single-process, single-event-loop Litestar deployment model.
 import asyncio
 import json
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from synthorg.api.concurrency import check_if_match, compute_etag
 from synthorg.api.dto_org import (  # noqa: TC001
@@ -23,7 +23,7 @@ from synthorg.api.dto_org import (  # noqa: TC001
 )
 from synthorg.api.errors import ApiValidationError, ConflictError, NotFoundError
 from synthorg.config.schema import AgentConfig
-from synthorg.core.company import Department
+from synthorg.core.company import Company, Department
 from synthorg.core.enums import SeniorityLevel
 from synthorg.observability import get_logger
 from synthorg.observability.events.api import (
@@ -40,9 +40,16 @@ from synthorg.observability.events.api import (
     API_RESOURCE_NOT_FOUND,
     API_VALIDATION_FAILED,
 )
+from synthorg.observability.events.versioning import VERSION_SNAPSHOT_FAILED
+from synthorg.persistence.errors import PersistenceError
 from synthorg.settings.errors import SettingNotFoundError
 from synthorg.settings.resolver import ConfigResolver  # noqa: TC001
 from synthorg.settings.service import SettingsService  # noqa: TC001
+from synthorg.versioning import VersioningService
+
+if TYPE_CHECKING:
+    from synthorg.budget.config import BudgetConfig
+    from synthorg.persistence.version_repo import VersionRepository
 
 logger = get_logger(__name__)
 
@@ -59,15 +66,91 @@ class OrgMutationService:
     Args:
         settings_service: Settings persistence layer.
         config_resolver: Config resolution (DB > env > YAML > code).
+        budget_config_versions: Optional repo for BudgetConfig
+            version snapshots.  When provided, budget mutations
+            automatically create version snapshots.
+        company_versions: Optional repo for Company version
+            snapshots.  When provided, company/department/agent
+            mutations automatically create version snapshots.
     """
 
     def __init__(
         self,
         settings_service: SettingsService,
         config_resolver: ConfigResolver,
+        *,
+        budget_config_versions: VersionRepository[BudgetConfig] | None = None,
+        company_versions: VersionRepository[Company] | None = None,
     ) -> None:
         self._settings = settings_service
         self._resolver = config_resolver
+        self._budget_versioning: VersioningService[BudgetConfig] | None = (
+            VersioningService(budget_config_versions)
+            if budget_config_versions is not None
+            else None
+        )
+        self._company_versioning: VersioningService[Company] | None = (
+            VersioningService(company_versions)
+            if company_versions is not None
+            else None
+        )
+
+    # ── Versioning helpers ────────────────────────────────────
+
+    async def _snapshot_budget_config(self, saved_by: str) -> None:
+        """Snapshot the current BudgetConfig if content changed.
+
+        Best-effort: versioning failures are logged but do not
+        block the mutation.
+
+        Args:
+            saved_by: Actor who triggered the mutation.
+        """
+        if self._budget_versioning is None:
+            return
+        try:
+            budget = await self._resolver.get_budget_config()
+            await self._budget_versioning.snapshot_if_changed(
+                entity_id="default",
+                snapshot=budget,
+                saved_by=saved_by,
+            )
+        except PersistenceError, SettingNotFoundError, ValueError:
+            logger.exception(
+                VERSION_SNAPSHOT_FAILED,
+                entity_type="BudgetConfig",
+                entity_id="default",
+            )
+
+    async def _snapshot_company(self, saved_by: str) -> None:
+        """Snapshot the current Company structure if content changed.
+
+        Best-effort: versioning failures are logged but do not
+        block the mutation.
+
+        Args:
+            saved_by: Actor who triggered the mutation.
+        """
+        if self._company_versioning is None:
+            return
+        try:
+            name = await self._get_str_safe("company", "company_name")
+            departments = await self._read_departments()
+            company = Company(
+                name=name or "unnamed",
+                departments=departments,
+            )
+            await self._company_versioning.snapshot_if_changed(
+                entity_id="default",
+                snapshot=company,
+                saved_by=saved_by,
+            )
+        except Exception:
+            logger.exception(
+                VERSION_SNAPSHOT_FAILED,
+                entity_type="Company",
+                entity_id="default",
+            )
 
     # ── Internal helpers ──────────────────────────────────────
 
@@ -192,12 +275,14 @@ class OrgMutationService:
         data: UpdateCompanyRequest,
         *,
         if_match: str | None = None,
+        saved_by: str = "api",
     ) -> tuple[dict[str, Any], str]:
         """Update individual company scalar settings.
 
         Args:
             data: Partial update request.
             if_match: If-Match header value for optimistic concurrency.
+            saved_by: Actor identity for version snapshot attribution.
 
         Returns:
             Tuple of (updated fields dict, new ETag for full snapshot).
@@ -238,6 +323,9 @@ class OrgMutationService:
                 updated["communication_pattern"] = data.communication_pattern
             # Compute new ETag from full snapshot while still under lock.
             new_etag = await self._company_snapshot_etag()
+            if "budget_monthly" in updated:
+                await self._snapshot_budget_config(saved_by=saved_by)
+            await self._snapshot_company(saved_by=saved_by)
         logger.info(API_COMPANY_UPDATED, fields=list(updated.keys()))
         return updated, new_etag
 
@@ -246,11 +334,14 @@ class OrgMutationService:
     async def create_department(
         self,
         data: CreateDepartmentRequest,
+        *,
+        saved_by: str = "api",
     ) -> Department:
         """Create a new department.
 
         Args:
             data: Department creation request.
+            saved_by: Actor identity for version snapshot attribution.
 
         Returns:
             The created Department model.
@@ -274,6 +365,7 @@ class OrgMutationService:
             new_departments = (*departments, dept)
             self._check_budget_sum(new_departments)
             await self._write_departments(new_departments)
+            await self._snapshot_company(saved_by=saved_by)
 
         logger.info(
             API_DEPARTMENT_CREATED,
@@ -288,6 +380,7 @@ class OrgMutationService:
         data: UpdateDepartmentRequest,
         *,
         if_match: str | None = None,
+        saved_by: str = "api",
     ) -> Department:
         """Update an existing department.
 
@@ -295,6 +388,7 @@ class OrgMutationService:
             name: Current department name.
             data: Partial update request.
             if_match: If-Match header value for optimistic concurrency.
+            saved_by: Actor identity for version snapshot attribution.
 
         Returns:
             The updated Department model.
@@ -332,6 +426,7 @@ class OrgMutationService:
             )
             self._check_budget_sum(new_departments)
             await self._write_departments(new_departments)
+            await self._snapshot_company(saved_by=saved_by)
 
         logger.info(
             API_DEPARTMENT_UPDATED,
@@ -340,11 +435,17 @@ class OrgMutationService:
         )
         return updated
 
-    async def delete_department(self, name: str) -> None:
+    async def delete_department(
+        self,
+        name: str,
+        *,
+        saved_by: str = "api",
+    ) -> None:
         """Delete a department.
 
         Args:
             name: Department name to delete.
+            saved_by: Actor identity for version snapshot attribution.
 
         Raises:
             NotFoundError: If the department does not exist.
@@ -378,17 +479,21 @@ class OrgMutationService:
                 d for d in departments if d.name.lower() != name.lower()
             )
             await self._write_departments(new_departments)
+            await self._snapshot_company(saved_by=saved_by)
 
         logger.info(API_DEPARTMENT_DELETED, department=name)
 
     async def reorder_departments(
         self,
         data: ReorderDepartmentsRequest,
+        *,
+        saved_by: str = "api",
     ) -> tuple[Department, ...]:
         """Reorder departments.
 
         Args:
             data: Ordered list of department names.
+            saved_by: Actor identity for version snapshot attribution.
 
         Returns:
             The reordered departments tuple.
@@ -408,6 +513,7 @@ class OrgMutationService:
             dept_by_lower = {d.name.lower(): d for d in departments}
             reordered = tuple(dept_by_lower[n.lower()] for n in data.department_names)
             await self._write_departments(reordered)
+            await self._snapshot_company(saved_by=saved_by)
 
         logger.info(
             API_DEPARTMENTS_REORDERED,

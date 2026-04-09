@@ -326,8 +326,23 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
         working-directory: web
-      - run: npm run storybook:build -- --disable-telemetry
+      - name: Run npm run storybook:build -- --disable-telemetry
+        run: npm run storybook:build -- --disable-telemetry
         working-directory: web
+        env:
+          # Prevent OOM-induced crashes on CI runners with limited RAM.
+          # --report-on-fatalerror captures Node.js-level crashes (OOM,
+          # assertions) but NOT native addon SIGSEGV -- those need OS
+          # core dumps. --report-directory ensures reports land in a
+          # predictable location for artifact upload.
+          NODE_OPTIONS: "--max-old-space-size=4096 --report-on-fatalerror --report-directory=."
+      - name: Upload Node.js crash report
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7
+        with:
+          name: storybook-crash-report
+          path: web/report.*.json
+          if-no-files-found: ignore
 
   # ── Gate: all required checks passed ──
   ci-pass:

@@ -7,9 +7,15 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import aiosqlite
+from pydantic import BaseModel
 
+from synthorg.budget.config import BudgetConfig
 from synthorg.core.agent import AgentIdentity
+from synthorg.core.company import Company
+from synthorg.core.role import Role
 from synthorg.core.types import NotBlankStr
+from synthorg.engine.workflow.definition import WorkflowDefinition
+from synthorg.hr.evaluation.config import EvaluationConfig
 from synthorg.observability import get_logger
 from synthorg.observability.events.persistence import (
     PERSISTENCE_BACKEND_ALREADY_CONNECTED,
@@ -88,9 +94,6 @@ from synthorg.persistence.sqlite.workflow_definition_repo import (
 from synthorg.persistence.sqlite.workflow_execution_repo import (
     SQLiteWorkflowExecutionRepository,
 )
-from synthorg.persistence.sqlite.workflow_version_repo import (
-    SQLiteWorkflowVersionRepository,
-)
 
 if TYPE_CHECKING:
     from synthorg.persistence.config import SQLiteConfig
@@ -141,8 +144,18 @@ class SQLitePersistenceBackend:
         self._custom_presets: SQLitePersonalityPresetRepository | None = None
         self._workflow_definitions: SQLiteWorkflowDefinitionRepository | None = None
         self._workflow_executions: SQLiteWorkflowExecutionRepository | None = None
-        self._workflow_versions: SQLiteWorkflowVersionRepository | None = None
+        self._workflow_versions: SQLiteVersionRepository[WorkflowDefinition] | None = (
+            None
+        )
         self._identity_versions: SQLiteVersionRepository[AgentIdentity] | None = None
+        self._evaluation_config_versions: (
+            SQLiteVersionRepository[EvaluationConfig] | None
+        ) = None
+        self._budget_config_versions: SQLiteVersionRepository[BudgetConfig] | None = (
+            None
+        )
+        self._company_versions: SQLiteVersionRepository[Company] | None = None
+        self._role_versions: SQLiteVersionRepository[Role] | None = None
         self._decision_records: SQLiteDecisionRepository | None = None
         self._risk_overrides: SQLiteRiskOverrideRepository | None = None
         self._ssrf_violations: SQLiteSsrfViolationRepository | None = None
@@ -175,6 +188,10 @@ class SQLitePersistenceBackend:
         self._workflow_executions = None
         self._workflow_versions = None
         self._identity_versions = None
+        self._evaluation_config_versions = None
+        self._budget_config_versions = None
+        self._company_versions = None
+        self._role_versions = None
         self._decision_records = None
         self._risk_overrides = None
         self._ssrf_violations = None
@@ -264,12 +281,46 @@ class SQLitePersistenceBackend:
         self._custom_presets = SQLitePersonalityPresetRepository(self._db)
         self._workflow_definitions = SQLiteWorkflowDefinitionRepository(self._db)
         self._workflow_executions = SQLiteWorkflowExecutionRepository(self._db)
-        self._workflow_versions = SQLiteWorkflowVersionRepository(self._db)
-        self._identity_versions = SQLiteVersionRepository(
-            self._db,
-            table_name="agent_identity_versions",
-            serialize_snapshot=lambda m: json.dumps(m.model_dump(mode="json")),
-            deserialize_snapshot=lambda s: AgentIdentity.model_validate(json.loads(s)),
+
+        def _ver_repo[T: BaseModel](
+            table: str,
+            model_cls: type[T],
+        ) -> SQLiteVersionRepository[T]:
+            assert self._db is not None  # noqa: S101
+            return SQLiteVersionRepository(
+                self._db,
+                table_name=table,
+                serialize_snapshot=lambda m: json.dumps(
+                    m.model_dump(mode="json"),
+                ),
+                deserialize_snapshot=lambda s: model_cls.model_validate(
+                    json.loads(s),
+                ),
+            )
+
+        self._workflow_versions = _ver_repo(
+            "workflow_definition_versions",
+            WorkflowDefinition,
+        )
+        self._identity_versions = _ver_repo(
+            "agent_identity_versions",
+            AgentIdentity,
+        )
+        self._evaluation_config_versions = _ver_repo(
+            "evaluation_config_versions",
+            EvaluationConfig,
+        )
+        self._budget_config_versions = _ver_repo(
+            "budget_config_versions",
+            BudgetConfig,
+        )
+        self._company_versions = _ver_repo(
+            "company_versions",
+            Company,
+        )
+        self._role_versions = _ver_repo(
+            "role_versions",
+            Role,
         )
         self._decision_records = SQLiteDecisionRepository(
             self._db, write_lock=self._shared_write_lock
@@ -601,7 +652,7 @@ class SQLitePersistenceBackend:
         )
 
     @property
-    def workflow_versions(self) -> SQLiteWorkflowVersionRepository:
+    def workflow_versions(self) -> SQLiteVersionRepository[WorkflowDefinition]:
         """Repository for workflow definition version persistence.
 
         Raises:
@@ -622,6 +673,62 @@ class SQLitePersistenceBackend:
         return self._require_connected(
             self._identity_versions,
             "identity_versions",
+        )
+
+    @property
+    def evaluation_config_versions(
+        self,
+    ) -> SQLiteVersionRepository[EvaluationConfig]:
+        """Repository for EvaluationConfig version snapshot persistence.
+
+        Raises:
+            PersistenceConnectionError: If not connected.
+        """
+        return self._require_connected(
+            self._evaluation_config_versions,
+            "evaluation_config_versions",
+        )
+
+    @property
+    def budget_config_versions(
+        self,
+    ) -> SQLiteVersionRepository[BudgetConfig]:
+        """Repository for BudgetConfig version snapshot persistence.
+
+        Raises:
+            PersistenceConnectionError: If not connected.
+        """
+        return self._require_connected(
+            self._budget_config_versions,
+            "budget_config_versions",
+        )
+
+    @property
+    def company_versions(
+        self,
+    ) -> SQLiteVersionRepository[Company]:
+        """Repository for Company version snapshot persistence.
+
+        Raises:
+            PersistenceConnectionError: If not connected.
+        """
+        return self._require_connected(
+            self._company_versions,
+            "company_versions",
+        )
+
+    @property
+    def role_versions(
+        self,
+    ) -> SQLiteVersionRepository[Role]:
+        """Repository for Role version snapshot persistence.
+
+        Raises:
+            PersistenceConnectionError: If not connected.
+        """
+        return self._require_connected(
+            self._role_versions,
+            "role_versions",
         )
 
     @property

@@ -227,7 +227,15 @@ jobs:
             echo "::error::Push step did not produce a digest -- cannot sign image"
             exit 1
           fi
-          cosign sign --yes ghcr.io/aureliolo/synthorg-backend@${DIGEST}
+          set -o pipefail
+          if ! cosign sign --yes ghcr.io/aureliolo/synthorg-backend@${DIGEST} 2>&1 | tee /tmp/cosign-out; then
+            if grep -q 'createLogEntryConflict' /tmp/cosign-out; then
+              echo "::notice::Image already signed in transparency log -- skipping"
+            else
+              cat /tmp/cosign-out
+              exit 1
+            fi
+          fi
 
       - name: Attest build provenance (SLSA Level 3)
         if: github.event_name != 'pull_request'
@@ -422,7 +430,15 @@ jobs:
             echo "::error::Push step did not produce a digest -- cannot sign image"
             exit 1
           fi
-          cosign sign --yes ghcr.io/aureliolo/synthorg-web@${DIGEST}
+          set -o pipefail
+          if ! cosign sign --yes ghcr.io/aureliolo/synthorg-web@${DIGEST} 2>&1 | tee /tmp/cosign-out; then
+            if grep -q 'createLogEntryConflict' /tmp/cosign-out; then
+              echo "::notice::Image already signed in transparency log -- skipping"
+            else
+              cat /tmp/cosign-out
+              exit 1
+            fi
+          fi
 
       - name: Attest build provenance (SLSA Level 3)
         if: github.event_name != 'pull_request'
@@ -617,7 +633,15 @@ jobs:
             echo "::error::Push step did not produce a digest -- cannot sign image"
             exit 1
           fi
-          cosign sign --yes ghcr.io/aureliolo/synthorg-sandbox@${DIGEST}
+          set -o pipefail
+          if ! cosign sign --yes ghcr.io/aureliolo/synthorg-sandbox@${DIGEST} 2>&1 | tee /tmp/cosign-out; then
+            if grep -q 'createLogEntryConflict' /tmp/cosign-out; then
+              echo "::notice::Image already signed in transparency log -- skipping"
+            else
+              cat /tmp/cosign-out
+              exit 1
+            fi
+          fi
 
       - name: Attest build provenance (SLSA Level 3)
         if: github.event_name != 'pull_request'

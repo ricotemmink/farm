@@ -201,6 +201,14 @@ class AppState:
             OrgMutationService(
                 settings_service=settings_service,
                 config_resolver=self._config_resolver,
+                budget_config_versions=(
+                    persistence.budget_config_versions
+                    if persistence is not None
+                    else None
+                ),
+                company_versions=(
+                    persistence.company_versions if persistence is not None else None
+                ),
             )
             if settings_service is not None and self._config_resolver is not None
             else None
@@ -837,6 +845,16 @@ class AppState:
         org_mutations = OrgMutationService(
             settings_service=settings_service,
             config_resolver=resolver,
+            budget_config_versions=(
+                self._persistence.budget_config_versions
+                if self._persistence is not None
+                else None
+            ),
+            company_versions=(
+                self._persistence.company_versions
+                if self._persistence is not None
+                else None
+            ),
         )
         self._settings_service = settings_service
         self._config_resolver = resolver
