@@ -89,3 +89,10 @@ class PromotionCooldownError(PromotionError):
 
 class PromotionApprovalRequiredError(PromotionError):
     """Promotion requires human approval before proceeding."""
+
+
+# ── Pruning ────────────────────────────────────────────────────
+
+
+class PruningError(HRError):
+    """Error during the pruning process."""
