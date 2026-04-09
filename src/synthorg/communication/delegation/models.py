@@ -1,5 +1,6 @@
 """Delegation request, result, and audit trail models."""
 
+from collections.abc import Mapping  # noqa: TC003 -- runtime for Pydantic
 from typing import Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -35,6 +36,10 @@ class DelegationRequest(BaseModel):
     constraints: tuple[NotBlankStr, ...] = Field(
         default=(),
         description="Extra constraints for the delegatee",
+    )
+    entity_versions: Mapping[str, int] | None = Field(
+        default=None,
+        description="Delegator's known entity version manifest",
     )
 
     @model_validator(mode="after")
@@ -107,6 +112,7 @@ class DelegationRecord(BaseModel):
         delegated_task_id: ID of the created sub-task.
         timestamp: When the delegation occurred.
         refinement: Context provided by the delegator.
+        entity_versions: Entity version manifest at delegation time.
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -132,4 +138,8 @@ class DelegationRecord(BaseModel):
     refinement: str = Field(
         default="",
         description="Context provided by delegator",
+    )
+    entity_versions: Mapping[str, int] | None = Field(
+        default=None,
+        description="Entity version manifest at delegation time",
     )

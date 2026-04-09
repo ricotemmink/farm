@@ -25,10 +25,10 @@ pytestmark = pytest.mark.unit
 
 class TestInjectionStrategy:
     def test_values(self) -> None:
+        assert InjectionStrategy.PROMPT.value == "prompt"
+        assert InjectionStrategy.TOOL.value == "tool"
         assert InjectionStrategy.HYBRID.value == "hybrid"
-        assert InjectionStrategy.FULL.value == "full"
-        assert InjectionStrategy.SUMMARY.value == "summary"
-        assert InjectionStrategy.NONE.value == "none"
+        assert InjectionStrategy.MEMORY.value == "memory"
 
 
 # ── DriftStrategy ───────────────────────────────────────────────
@@ -38,6 +38,7 @@ class TestDriftStrategy:
     def test_values(self) -> None:
         assert DriftStrategy.PASSIVE.value == "passive"
         assert DriftStrategy.ACTIVE.value == "active"
+        assert DriftStrategy.LAYERED.value == "layered"
         assert DriftStrategy.NONE.value == "none"
 
 
@@ -60,12 +61,12 @@ class TestOntologyInjectionConfig:
         c = OntologyInjectionConfig()
         assert c.strategy == InjectionStrategy.HYBRID
         assert c.core_token_budget > 0
-        assert c.tool_name == "get_entity_definition"
+        assert c.tool_name == "lookup_entity"
 
     def test_frozen(self) -> None:
         c = OntologyInjectionConfig()
         with pytest.raises(ValidationError):
-            c.strategy = InjectionStrategy.FULL  # type: ignore[misc]
+            c.strategy = InjectionStrategy.PROMPT  # type: ignore[misc]
 
     def test_budget_must_be_positive(self) -> None:
         with pytest.raises(ValidationError):

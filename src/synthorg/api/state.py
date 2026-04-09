@@ -46,6 +46,10 @@ from synthorg.observability.events.settings import SETTINGS_SERVICE_SWAPPED
 from synthorg.observability.prometheus_collector import (
     PrometheusCollector,  # noqa: TC001
 )
+from synthorg.ontology.drift.service import DriftDetectionService  # noqa: TC001
+from synthorg.ontology.drift.store import DriftReportStore  # noqa: TC001
+from synthorg.ontology.service import OntologyService  # noqa: TC001
+from synthorg.ontology.sync import OntologyOrgMemorySync  # noqa: TC001
 from synthorg.persistence.artifact_storage import (
     ArtifactStorageBackend,  # noqa: TC001
 )
@@ -97,6 +101,8 @@ class AppState:
         "_coordinator",
         "_cost_tracker",
         "_delegation_record_store",
+        "_drift_detection_service",
+        "_drift_report_store",
         "_fine_tune_orchestrator",
         "_lockout_store",
         "_meeting_orchestrator",
@@ -104,6 +110,8 @@ class AppState:
         "_message_bus",
         "_model_router",
         "_notification_dispatcher",
+        "_ontology_service",
+        "_ontology_sync_service",
         "_org_mutation_service",
         "_performance_tracker",
         "_persistence",
@@ -149,6 +157,7 @@ class AppState:
         delegation_record_store: DelegationRecordStore | None = None,
         artifact_storage: ArtifactStorageBackend | None = None,
         notification_dispatcher: NotificationDispatcher | None = None,
+        ontology_service: OntologyService | None = None,
         audit_log: AuditLog | None = None,
         trust_service: TrustService | None = None,
         coordination_metrics_store: CoordinationMetricsStore | None = None,
@@ -162,6 +171,10 @@ class AppState:
         self._backup_service: BackupService | None = None
         self._coordination_metrics_store = coordination_metrics_store
         self._notification_dispatcher = notification_dispatcher
+        self._ontology_service = ontology_service
+        self._drift_report_store: DriftReportStore | None = None
+        self._drift_detection_service: DriftDetectionService | None = None
+        self._ontology_sync_service: OntologyOrgMemorySync | None = None
         self._persistence = persistence
         self._message_bus = message_bus
         self._cost_tracker = cost_tracker
@@ -747,6 +760,88 @@ class AppState:
         return self._require_service(
             self._notification_dispatcher, "notification_dispatcher"
         )
+
+    @property
+    def ontology_service(self) -> OntologyService:
+        """Return ontology service or raise 503."""
+        return self._require_service(
+            self._ontology_service,
+            "ontology_service",
+        )
+
+    @property
+    def has_ontology_service(self) -> bool:
+        """Check whether the ontology service is configured."""
+        return self._ontology_service is not None
+
+    @property
+    def drift_report_store(self) -> DriftReportStore | None:
+        """Return the drift report store, or None if not configured."""
+        return self._drift_report_store
+
+    @property
+    def drift_detection_service(self) -> DriftDetectionService | None:
+        """Return the drift detection service, or None if not configured."""
+        return self._drift_detection_service
+
+    @property
+    def ontology_sync_service(self) -> OntologyOrgMemorySync | None:
+        """Return the ontology sync service, or None if not configured."""
+        return self._ontology_sync_service
+
+    def set_drift_report_store(self, store: DriftReportStore) -> None:
+        """Set the drift report store (deferred initialisation).
+
+        Args:
+            store: Configured drift report store.
+
+        Raises:
+            RuntimeError: If the store was already configured.
+        """
+        if self._drift_report_store is not None:
+            msg = "Drift report store already configured"
+            logger.error(API_APP_STARTUP, error=msg)
+            raise RuntimeError(msg)
+        self._drift_report_store = store
+        logger.info(API_APP_STARTUP, note="Drift report store configured")
+
+    def set_drift_detection_service(
+        self,
+        service: DriftDetectionService,
+    ) -> None:
+        """Set the drift detection service (deferred initialisation).
+
+        Args:
+            service: Configured drift detection service.
+
+        Raises:
+            RuntimeError: If the service was already configured.
+        """
+        if self._drift_detection_service is not None:
+            msg = "Drift detection service already configured"
+            logger.error(API_APP_STARTUP, error=msg)
+            raise RuntimeError(msg)
+        self._drift_detection_service = service
+        logger.info(API_APP_STARTUP, note="Drift detection service configured")
+
+    def set_ontology_sync_service(
+        self,
+        service: OntologyOrgMemorySync,
+    ) -> None:
+        """Set the ontology sync service (deferred initialisation).
+
+        Args:
+            service: Configured ontology sync service.
+
+        Raises:
+            RuntimeError: If the service was already configured.
+        """
+        if self._ontology_sync_service is not None:
+            msg = "Ontology sync service already configured"
+            logger.error(API_APP_STARTUP, error=msg)
+            raise RuntimeError(msg)
+        self._ontology_sync_service = service
+        logger.info(API_APP_STARTUP, note="Ontology sync service configured")
 
     @property
     def has_model_router(self) -> bool:
