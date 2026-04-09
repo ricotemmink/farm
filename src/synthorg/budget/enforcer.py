@@ -47,6 +47,7 @@ from synthorg.observability.events.budget import (
     BUDGET_HARD_STOP_EXCEEDED,
     BUDGET_NOTIFICATION_FAILED,
     BUDGET_PREFLIGHT_ERROR,
+    BUDGET_PROJECT_BASELINE_SOURCE,
     BUDGET_PROJECT_BUDGET_EXCEEDED,
     BUDGET_PROJECT_ENFORCEMENT_CHECK,
     BUDGET_RESOLVE_MODEL_ERROR,
@@ -71,6 +72,9 @@ if TYPE_CHECKING:
 
     from synthorg.budget.config import BudgetConfig
     from synthorg.budget.degradation import DegradationResult
+    from synthorg.budget.project_cost_aggregate import (
+        ProjectCostAggregateRepository,
+    )
     from synthorg.budget.quota import QuotaCheckResult
     from synthorg.budget.quota_tracker import QuotaTracker
     from synthorg.budget.risk_record import RiskRecord
@@ -78,6 +82,7 @@ if TYPE_CHECKING:
     from synthorg.budget.tracker import CostTracker
     from synthorg.core.agent import AgentIdentity
     from synthorg.core.task import Task
+    from synthorg.core.types import NotBlankStr
     from synthorg.engine.loop_protocol import BudgetChecker
     from synthorg.providers.routing.resolver import ModelResolver
     from synthorg.security.risk_scorer import RiskScorer
@@ -100,6 +105,9 @@ class BudgetEnforcer:
         degradation_configs: Per-provider degradation strategies.
         risk_tracker: Optional risk tracking service.
         risk_scorer: Optional risk scoring implementation.
+        notification_dispatcher: Optional notification dispatcher.
+        project_cost_repo: Optional durable project cost aggregate
+            repository for lifetime budget enforcement.
     """
 
     def __init__(  # noqa: PLR0913
@@ -113,12 +121,14 @@ class BudgetEnforcer:
         risk_tracker: RiskTracker | None = None,
         risk_scorer: RiskScorer | None = None,
         notification_dispatcher: NotificationDispatcher | None = None,
+        project_cost_repo: ProjectCostAggregateRepository | None = None,
     ) -> None:
         self._budget_config = budget_config
         self._cost_tracker = cost_tracker
         self._model_resolver = model_resolver
         self._quota_tracker = quota_tracker
         self._notification_dispatcher = notification_dispatcher
+        self._project_cost_repo = project_cost_repo
         self._degradation_configs: MappingProxyType[str, DegradationConfig] | None = (
             MappingProxyType(copy.deepcopy(dict(degradation_configs)))
             if degradation_configs is not None
@@ -248,20 +258,17 @@ class BudgetEnforcer:
 
     async def check_project_budget(
         self,
-        project_id: str,
+        project_id: NotBlankStr,
         project_budget: float,
     ) -> None:
         """Check project-level budget and raise if exceeded.
 
-        .. warning::
-
-            The current in-memory tracker applies retention-based
-            pruning (168 h).  For projects whose lifetime exceeds
-            the retention window, older cost records are pruned and
-            the aggregate returned by ``get_project_cost`` under-
-            reports actual spend.  A persistent cost-tracking backend
-            (planned) will resolve this; until then, project budgets
-            are accurate only within the retention window.
+        Returns immediately when ``project_budget <= 0`` (enforcement
+        disabled).  Otherwise uses the durable project cost aggregate
+        when available, providing accurate lifetime totals that survive
+        the in-memory tracker's 168-hour retention window.  Falls back
+        to in-memory tracking when no aggregate repository is configured
+        or when the aggregate query fails.
 
         Args:
             project_id: Project identifier for cost lookup.
@@ -269,22 +276,14 @@ class BudgetEnforcer:
 
         Raises:
             ProjectBudgetExhaustedError: When project spend >= budget.
+            MemoryError: Re-raised unconditionally.
+            RecursionError: Re-raised unconditionally.
         """
         if project_budget <= 0:
             return
 
-        try:
-            project_cost = await self._cost_tracker.get_project_cost(
-                project_id,
-            )
-        except MemoryError, RecursionError:
-            raise
-        except Exception:
-            logger.exception(
-                BUDGET_PREFLIGHT_ERROR,
-                project_id=project_id,
-                reason="project_cost_query_failed",
-            )
+        project_cost = await self._get_project_cost(project_id)
+        if project_cost is None:
             return
 
         logger.debug(
@@ -597,7 +596,7 @@ class BudgetEnforcer:
         task: Task,
         agent_id: str,
         *,
-        project_id: str | None = None,
+        project_id: NotBlankStr | None = None,
         project_budget: float = 0.0,
     ) -> BudgetChecker | None:
         """Create a sync BudgetChecker with pre-computed baselines.
@@ -636,19 +635,12 @@ class BudgetEnforcer:
 
         project_baseline = 0.0
         if project_id is not None and project_budget > 0:
-            try:
-                project_baseline = await self._cost_tracker.get_project_cost(
-                    project_id,
-                )
-            except MemoryError, RecursionError:
-                raise
-            except Exception:
-                logger.exception(
-                    BUDGET_BASELINE_ERROR,
-                    agent_id=agent_id,
-                    project_id=project_id,
-                    reason="project_baseline_query_failed",
-                )
+            baseline = await self._get_project_cost(
+                project_id,
+                error_event=BUDGET_BASELINE_ERROR,
+            )
+            if baseline is not None:
+                project_baseline = baseline
 
         thresholds = _compute_thresholds(cfg, monthly_budget)
 
@@ -884,3 +876,74 @@ class BudgetEnforcer:
             )
 
         return monthly_baseline, daily_baseline
+
+    async def _get_project_cost(
+        self,
+        project_id: NotBlankStr,
+        *,
+        error_event: str = BUDGET_PREFLIGHT_ERROR,
+    ) -> float | None:
+        """Query project cost from durable aggregate or in-memory tracker.
+
+        Returns the total cost (rounded to
+        ``BUDGET_ROUNDING_PRECISION``), or ``None`` when both
+        sources fail (caller should skip enforcement on ``None``).
+
+        Args:
+            project_id: Project identifier.
+            error_event: Event constant to log on failure.  Allows
+                callers to preserve distinct monitoring semantics
+                (e.g. preflight vs baseline).
+
+        Raises:
+            MemoryError: Re-raised unconditionally.
+            RecursionError: Re-raised unconditionally.
+        """
+        # Try durable aggregate first.
+        if self._project_cost_repo is not None:
+            try:
+                aggregate = await self._project_cost_repo.get(
+                    project_id,
+                )
+            except MemoryError, RecursionError:
+                raise
+            except Exception:
+                logger.exception(
+                    error_event,
+                    project_id=project_id,
+                    reason="project_cost_aggregate_query_failed",
+                )
+                # Fall through to in-memory.
+            else:
+                raw = aggregate.total_cost if aggregate else 0.0
+                cost = round(raw, BUDGET_ROUNDING_PRECISION)
+                logger.debug(
+                    BUDGET_PROJECT_BASELINE_SOURCE,
+                    project_id=project_id,
+                    source="aggregate",
+                    cost=cost,
+                )
+                return cost
+
+        # Fallback to in-memory tracker.
+        try:
+            cost = await self._cost_tracker.get_project_cost(
+                project_id,
+            )
+        except MemoryError, RecursionError:
+            raise
+        except Exception:
+            logger.exception(
+                error_event,
+                project_id=project_id,
+                reason="project_cost_query_failed",
+            )
+            return None
+        else:
+            logger.debug(
+                BUDGET_PROJECT_BASELINE_SOURCE,
+                project_id=project_id,
+                source="in_memory",
+                cost=cost,
+            )
+            return cost
