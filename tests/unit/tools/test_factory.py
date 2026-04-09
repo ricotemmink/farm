@@ -171,6 +171,234 @@ class TestBuildDefaultTools:
 
 
 @pytest.mark.unit
+class TestBuildDesignTools:
+    """Tests for _build_design_tools via build_default_tools."""
+
+    def test_design_tools_skipped_when_config_none(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        tools = build_default_tools(workspace=tmp_path, design_config=None)
+        names = {t.name for t in tools}
+        assert "image_generator" not in names
+        assert "diagram_generator" not in names
+        assert "asset_manager" not in names
+
+    def test_design_tools_included_with_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from synthorg.tools.design.config import DesignToolsConfig
+
+        config = DesignToolsConfig()
+        tools = build_default_tools(
+            workspace=tmp_path,
+            design_config=config,
+        )
+        names = {t.name for t in tools}
+        # diagram_generator and asset_manager need no backend
+        assert "diagram_generator" in names
+        assert "asset_manager" in names
+        # image_generator requires a provider
+        assert "image_generator" not in names
+
+    def test_design_tools_with_provider(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from synthorg.tools.design.config import DesignToolsConfig
+        from synthorg.tools.design.image_generator import ImageProvider
+
+        provider = AsyncMock(spec=ImageProvider)
+        config = DesignToolsConfig()
+        tools = build_default_tools(
+            workspace=tmp_path,
+            design_config=config,
+            image_provider=provider,
+        )
+        names = {t.name for t in tools}
+        assert "image_generator" in names
+        assert "diagram_generator" in names
+        assert "asset_manager" in names
+
+
+@pytest.mark.unit
+class TestBuildCommunicationTools:
+    """Tests for _build_communication_tools via build_default_tools."""
+
+    def test_communication_tools_skipped_when_config_none(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        tools = build_default_tools(
+            workspace=tmp_path,
+            communication_config=None,
+        )
+        names = {t.name for t in tools}
+        assert "email_sender" not in names
+        assert "notification_sender" not in names
+        assert "template_formatter" not in names
+
+    def test_communication_tools_included_with_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from synthorg.tools.communication.config import (
+            CommunicationToolsConfig,
+        )
+
+        config = CommunicationToolsConfig()
+        tools = build_default_tools(
+            workspace=tmp_path,
+            communication_config=config,
+        )
+        names = {t.name for t in tools}
+        # template_formatter needs no backend
+        assert "template_formatter" in names
+        # email_sender requires email config, notification_sender requires dispatcher
+        assert "email_sender" not in names
+        assert "notification_sender" not in names
+
+    def test_communication_tools_with_dispatcher(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from synthorg.tools.communication.config import (
+            CommunicationToolsConfig,
+            EmailConfig,
+        )
+        from synthorg.tools.communication.notification_sender import (
+            NotificationDispatcherProtocol,
+        )
+
+        dispatcher = AsyncMock(spec=NotificationDispatcherProtocol)
+        email = EmailConfig(
+            host="smtp.example.com",
+            from_address="test@example.com",
+            use_tls=False,
+        )
+        config = CommunicationToolsConfig(email=email)
+        tools = build_default_tools(
+            workspace=tmp_path,
+            communication_config=config,
+            communication_dispatcher=dispatcher,
+        )
+        names = {t.name for t in tools}
+        assert "email_sender" in names
+        assert "notification_sender" in names
+        assert "template_formatter" in names
+
+
+@pytest.mark.unit
+class TestBuildAnalyticsTools:
+    """Tests for _build_analytics_tools via build_default_tools."""
+
+    def test_analytics_tools_skipped_when_config_none(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        tools = build_default_tools(
+            workspace=tmp_path,
+            analytics_config=None,
+        )
+        names = {t.name for t in tools}
+        assert "data_aggregator" not in names
+        assert "report_generator" not in names
+        assert "metric_collector" not in names
+
+    def test_analytics_tools_included_with_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from synthorg.tools.analytics.config import AnalyticsToolsConfig
+
+        config = AnalyticsToolsConfig()
+        tools = build_default_tools(
+            workspace=tmp_path,
+            analytics_config=config,
+        )
+        names = {t.name for t in tools}
+        # Without provider/sink, no analytics tools are registered
+        assert "data_aggregator" not in names
+        assert "report_generator" not in names
+        assert "metric_collector" not in names
+
+    def test_analytics_tools_with_backends(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from synthorg.tools.analytics.config import AnalyticsToolsConfig
+        from synthorg.tools.analytics.data_aggregator import (
+            AnalyticsProvider,
+        )
+        from synthorg.tools.analytics.metric_collector import MetricSink
+
+        provider = AsyncMock(spec=AnalyticsProvider)
+        sink = AsyncMock(spec=MetricSink)
+        config = AnalyticsToolsConfig()
+        tools = build_default_tools(
+            workspace=tmp_path,
+            analytics_config=config,
+            analytics_provider=provider,
+            metric_sink=sink,
+        )
+        names = {t.name for t in tools}
+        assert "data_aggregator" in names
+        assert "report_generator" in names
+        assert "metric_collector" in names
+
+    def test_analytics_provider_only(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from synthorg.tools.analytics.config import AnalyticsToolsConfig
+        from synthorg.tools.analytics.data_aggregator import (
+            AnalyticsProvider,
+        )
+
+        provider = AsyncMock(spec=AnalyticsProvider)
+        config = AnalyticsToolsConfig()
+        tools = build_default_tools(
+            workspace=tmp_path,
+            analytics_config=config,
+            analytics_provider=provider,
+        )
+        names = {t.name for t in tools}
+        assert "data_aggregator" in names
+        assert "report_generator" in names
+        assert "metric_collector" not in names
+
+    def test_analytics_sink_only(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from synthorg.tools.analytics.config import AnalyticsToolsConfig
+        from synthorg.tools.analytics.metric_collector import MetricSink
+
+        sink = AsyncMock(spec=MetricSink)
+        config = AnalyticsToolsConfig()
+        tools = build_default_tools(
+            workspace=tmp_path,
+            analytics_config=config,
+            metric_sink=sink,
+        )
+        names = {t.name for t in tools}
+        assert "metric_collector" in names
+        assert "data_aggregator" not in names
+        assert "report_generator" not in names
+
+
+@pytest.mark.unit
 class TestBuildDefaultToolsFromConfig:
     """Tests for build_default_tools_from_config()."""
 
@@ -193,6 +421,74 @@ class TestBuildDefaultToolsFromConfig:
         clone = next(t for t in tools if t.name == "git_clone")
         assert isinstance(clone, GitCloneTool)
         assert clone._network_policy.hostname_allowlist == ("git.corp.example.com",)
+
+    def test_from_config_wires_design_tools(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from synthorg.tools.design.config import DesignToolsConfig
+
+        config = RootConfig(
+            company_name="test-corp",
+            design_tools=DesignToolsConfig(),
+        )
+        tools = build_default_tools_from_config(
+            workspace=tmp_path,
+            config=config,
+        )
+        names = {t.name for t in tools}
+        assert "diagram_generator" in names
+        assert "asset_manager" in names
+        # No backend provided -- image_generator excluded
+        assert "image_generator" not in names
+
+    def test_from_config_wires_communication_tools(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from synthorg.tools.communication.config import (
+            CommunicationToolsConfig,
+            EmailConfig,
+        )
+
+        email = EmailConfig(
+            host="smtp.example.com",
+            from_address="noreply@example.com",
+            use_tls=False,
+        )
+        config = RootConfig(
+            company_name="test-corp",
+            communication_tools=CommunicationToolsConfig(email=email),
+        )
+        tools = build_default_tools_from_config(
+            workspace=tmp_path,
+            config=config,
+        )
+        names = {t.name for t in tools}
+        assert "email_sender" in names
+        assert "template_formatter" in names
+        # No dispatcher provided -- notification_sender excluded
+        assert "notification_sender" not in names
+
+    def test_from_config_wires_analytics_tools(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from synthorg.tools.analytics.config import AnalyticsToolsConfig
+
+        config = RootConfig(
+            company_name="test-corp",
+            analytics_tools=AnalyticsToolsConfig(),
+        )
+        tools = build_default_tools_from_config(
+            workspace=tmp_path,
+            config=config,
+        )
+        names = {t.name for t in tools}
+        # Without backends, no analytics tools are created
+        assert "data_aggregator" not in names
+        assert "report_generator" not in names
+        assert "metric_collector" not in names
 
     def test_default_config_uses_default_policy(
         self,
