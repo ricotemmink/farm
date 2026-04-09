@@ -11,6 +11,7 @@ from synthorg.core.enums import (
     Complexity,
     CoordinationTopology,
     Priority,
+    TaskSource,
     TaskStatus,
     TaskStructure,
     TaskType,
@@ -154,6 +155,10 @@ class Task(BaseModel):
         default=CoordinationTopology.AUTO,
         description="Coordination topology for multi-agent execution",
     )
+    source: TaskSource | None = Field(
+        default=None,
+        description="Origin of this task (internal, client, or simulation)",
+    )
 
     @model_validator(mode="after")
     def _validate_deadline_format(self) -> Self:
@@ -210,14 +215,16 @@ class Task(BaseModel):
 
         ``CREATED`` status must have ``assigned_to=None``.  Statuses beyond
         ``CREATED`` (``ASSIGNED``, ``IN_PROGRESS``, ``IN_REVIEW``,
-        ``COMPLETED``) require ``assigned_to`` to be set.  ``BLOCKED``,
-        ``FAILED``, and ``CANCELLED`` may or may not have an assignee.
+        ``COMPLETED``, ``AUTH_REQUIRED``) require ``assigned_to`` to be set.
+        ``BLOCKED``, ``FAILED``, ``CANCELLED``, and ``REJECTED`` may or may
+        not have an assignee.
         """
         requires_assignee = {
             TaskStatus.ASSIGNED,
             TaskStatus.IN_PROGRESS,
             TaskStatus.IN_REVIEW,
             TaskStatus.COMPLETED,
+            TaskStatus.AUTH_REQUIRED,
         }
         if self.status is TaskStatus.CREATED and self.assigned_to is not None:
             msg = "assigned_to must be None when status is 'created'"

@@ -25,6 +25,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
 const ALL_STATUSES: TaskStatus[] = [
   'created', 'assigned', 'in_progress', 'in_review', 'completed',
   'blocked', 'failed', 'interrupted', 'suspended', 'cancelled',
+  'rejected', 'auth_required',
 ]
 
 // ── getTaskStatusColor ──────────────────────────────────────
@@ -41,6 +42,8 @@ describe('getTaskStatusColor', () => {
     ['interrupted', 'warning'],
     ['suspended', 'warning'],
     ['cancelled', 'text-secondary'],
+    ['rejected', 'danger'],
+    ['auth_required', 'warning'],
   ])('maps %s to %s', (status, expected) => {
     expect(getTaskStatusColor(status)).toBe(expected)
   })
@@ -60,6 +63,8 @@ describe('getTaskStatusLabel', () => {
     ['interrupted', 'Interrupted'],
     ['suspended', 'Suspended'],
     ['cancelled', 'Cancelled'],
+    ['rejected', 'Rejected'],
+    ['auth_required', 'Auth Required'],
   ])('maps %s to %s', (status, expected) => {
     expect(getTaskStatusLabel(status)).toBe(expected)
   })
@@ -276,6 +281,11 @@ describe('VALID_TRANSITIONS', () => {
   it('terminal statuses have no outgoing transitions', () => {
     expect(VALID_TRANSITIONS.completed).toHaveLength(0)
     expect(VALID_TRANSITIONS.cancelled).toHaveLength(0)
+    expect(VALID_TRANSITIONS.rejected).toHaveLength(0)
+  })
+
+  it('auth_required supports approval-gate transitions', () => {
+    expect([...VALID_TRANSITIONS.auth_required].sort()).toEqual(['assigned', 'cancelled'])
   })
 
   it('created can transition to assigned', () => {

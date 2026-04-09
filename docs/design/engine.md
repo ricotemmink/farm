@@ -19,8 +19,10 @@ behind a pluggable protocol interface.
 stateDiagram-v2
     [*] --> CREATED
     CREATED --> ASSIGNED : assignment
+    CREATED --> REJECTED : delegation refused
 
     ASSIGNED --> IN_PROGRESS : starts
+    ASSIGNED --> AUTH_REQUIRED : requires authorization
     ASSIGNED --> FAILED : early setup failure
     ASSIGNED --> BLOCKED : blocked
     ASSIGNED --> CANCELLED : cancelled
@@ -28,6 +30,7 @@ stateDiagram-v2
     ASSIGNED --> SUSPENDED : checkpoint shutdown
 
     IN_PROGRESS --> IN_REVIEW : agent done
+    IN_PROGRESS --> AUTH_REQUIRED : requires authorization
     IN_PROGRESS --> FAILED : runtime crash
     IN_PROGRESS --> CANCELLED : cancelled
     IN_PROGRESS --> INTERRUPTED : shutdown signal
@@ -35,6 +38,9 @@ stateDiagram-v2
 
     IN_REVIEW --> COMPLETED : approved
     IN_REVIEW --> IN_PROGRESS : rework
+
+    AUTH_REQUIRED --> ASSIGNED : approved
+    AUTH_REQUIRED --> CANCELLED : denied/timeout
 
     BLOCKED --> ASSIGNED : unblocked
 
@@ -46,10 +52,12 @@ stateDiagram-v2
 
     COMPLETED --> [*]
     CANCELLED --> [*]
+    REJECTED --> [*]
 ```
 
 !!! info "Non-terminal states"
-    `BLOCKED`, `FAILED`, `INTERRUPTED`, and `SUSPENDED` are non-terminal:
+    `BLOCKED`, `FAILED`, `INTERRUPTED`, `SUSPENDED`, and `AUTH_REQUIRED` are
+    non-terminal:
 
     - **BLOCKED** returns to `ASSIGNED` when unblocked.
     - **FAILED** returns to `ASSIGNED` for retry when `retry_count < max_retries`
@@ -58,7 +66,9 @@ stateDiagram-v2
       (see [Graceful Shutdown](#graceful-shutdown-protocol)).
     - **SUSPENDED** returns to `ASSIGNED` for resume from checkpoint
       (see [Graceful Shutdown](#graceful-shutdown-protocol), Strategy 4).
-    - **COMPLETED** and **CANCELLED** are the only terminal states with no
+    - **AUTH_REQUIRED** returns to `ASSIGNED` when approved or to `CANCELLED`
+      when denied or timed out.
+    - **COMPLETED**, **CANCELLED**, and **REJECTED** are terminal states with no
       outgoing transitions.
 
 !!! info "Runtime wrapper"
@@ -1636,3 +1646,28 @@ score each token, and treat low-scoring tokens (below a tunable percentile thres
 as compressible filler. The resulting importance map can drive selective truncation in
 `_build_summary()` without any additional model inference -- a significantly cheaper
 approximation of the surprisal signal.
+
+---
+
+## Review Pipeline
+
+The review pipeline provides a configurable chain of review stages for tasks
+in `IN_REVIEW` status. See the [Client Simulation](client-simulation.md) design
+page for the full architecture, including `ReviewStage` protocol, pipeline
+execution semantics, and metadata tracking.
+
+Key design decisions:
+
+- **No new TaskStatus values** for pipeline tracking -- tasks stay `IN_REVIEW`
+  throughout; progress is tracked in task metadata.
+- **Short-circuit on FAIL** -- first failing stage sends the task back to
+  `IN_PROGRESS` for rework with the stage name and reason in metadata.
+- **Backward compatible** -- when no pipeline is configured, the existing
+  `ReviewGateService` single-stage behavior is preserved.
+
+## Intake Engine
+
+The intake engine processes `ClientRequest` submissions through an independent
+state machine (`RequestStatus`) before creating tasks in the task engine. See
+[Client Simulation](client-simulation.md) for the full request lifecycle and
+intake strategy contracts.

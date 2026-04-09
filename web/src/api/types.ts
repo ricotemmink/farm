@@ -13,6 +13,8 @@ export type TaskStatus =
   | 'interrupted'
   | 'suspended'
   | 'cancelled'
+  | 'rejected'
+  | 'auth_required'
 
 export type TaskType =
   | 'development'
@@ -21,6 +23,8 @@ export type TaskType =
   | 'review'
   | 'meeting'
   | 'admin'
+
+export type TaskSource = 'internal' | 'client' | 'simulation'
 
 export type Priority = 'critical' | 'high' | 'medium' | 'low'
 
@@ -256,6 +260,7 @@ export interface Task {
   readonly delegation_chain: readonly string[]
   task_structure: TaskStructure | null
   coordination_topology: CoordinationTopology
+  source?: TaskSource | null
   version?: number
   created_at?: string
   updated_at?: string
