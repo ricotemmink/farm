@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     )
     from synthorg.config.schema import RootConfig
     from synthorg.hr.registry import AgentRegistryService
+    from synthorg.ontology.service import OntologyService
     from synthorg.persistence.protocol import PersistenceBackend
     from synthorg.settings.dispatcher import SettingsChangeDispatcher
     from synthorg.settings.service import SettingsService
@@ -560,3 +561,64 @@ async def auto_wire_settings(  # noqa: PLR0913
         raise
     logger.info(API_SERVICE_AUTO_WIRED, service="settings_service")
     return dispatcher
+
+
+async def auto_wire_ontology(
+    effective_config: RootConfig,
+) -> OntologyService | None:
+    """Auto-wire the ontology subsystem.
+
+    Creates the SQLite backend, connects it, applies the schema,
+    wires up versioning, creates the ``OntologyService``, and runs
+    bootstrap (decorator registry + config entities).
+
+    Args:
+        effective_config: Root company configuration.
+
+    Returns:
+        The bootstrapped ``OntologyService``, or ``None`` if wiring
+        fails (non-fatal -- ontology is not required for startup).
+    """
+    from synthorg.observability.events.ontology import (  # noqa: PLC0415
+        ONTOLOGY_AUTO_WIRE_FAILED,
+    )
+    from synthorg.ontology.backends.sqlite.backend import (  # noqa: PLC0415
+        SQLiteOntologyBackend,
+    )
+    from synthorg.ontology.service import OntologyService  # noqa: PLC0415
+    from synthorg.ontology.versioning import (  # noqa: PLC0415
+        create_ontology_versioning,
+    )
+
+    ontology_config = effective_config.ontology
+    # Resolve database path: use the persistence SQLite path if available,
+    # otherwise default to in-memory.
+    db_path = effective_config.persistence.sqlite.path or ":memory:"
+
+    backend = SQLiteOntologyBackend(db_path=db_path)
+    try:
+        await backend.connect()
+        versioning = create_ontology_versioning(backend.get_db())
+        service = OntologyService(
+            backend=backend,
+            versioning=versioning,
+            config=ontology_config,
+        )
+        await service.bootstrap()
+        if ontology_config.entities.entries:
+            await service.bootstrap_from_config(ontology_config.entities)
+    except MemoryError, RecursionError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            ONTOLOGY_AUTO_WIRE_FAILED,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            exc_info=True,
+        )
+        with contextlib.suppress(Exception):
+            await backend.disconnect()
+        return None
+    else:
+        logger.info(API_SERVICE_AUTO_WIRED, service="ontology_service")
+        return service
