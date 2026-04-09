@@ -12,7 +12,13 @@ from pydantic import (
     model_validator,
 )
 
-from synthorg.core.enums import CompanyType, SeniorityLevel, SkillPattern, WorkflowType
+from synthorg.core.enums import (
+    CompanyType,
+    SeniorityLevel,
+    SkillPattern,
+    StrategicOutputMode,
+    WorkflowType,
+)
 from synthorg.core.types import NotBlankStr  # noqa: TC001
 from synthorg.memory.config import EmbedderOverrideConfig  # noqa: TC001
 from synthorg.observability import get_logger
@@ -110,6 +116,9 @@ class TemplateAgentConfig(BaseModel):
             ``personality_preset``).
         department: Department override (``None`` uses the template
             system default during rendering).
+        strategic_output_mode: Strategic output mode override for this
+            agent (``StrategicOutputMode | None``).  ``None`` inherits
+            the company strategy config default.
         merge_id: Stable identity for inheritance merge.  When a
             template has multiple agents with the same ``(role,
             department)`` pair, ``merge_id`` disambiguates them so
@@ -159,6 +168,10 @@ class TemplateAgentConfig(BaseModel):
     department: NotBlankStr | None = Field(
         default=None,
         description="Department override",
+    )
+    strategic_output_mode: StrategicOutputMode | None = Field(
+        default=None,
+        description="Strategic output mode override for this agent",
     )
     merge_id: str = Field(
         default="",

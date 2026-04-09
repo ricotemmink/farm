@@ -18,11 +18,17 @@ from synthorg.core.company import (
     EscalationPath,
     WorkflowHandoff,
 )
-from synthorg.core.enums import AutonomyLevel, CompanyType, SeniorityLevel
+from synthorg.core.enums import (
+    AutonomyLevel,
+    CompanyType,
+    SeniorityLevel,
+    StrategicOutputMode,
+)
 from synthorg.core.resilience_config import RateLimiterConfig, RetryConfig
 from synthorg.core.role import CustomRole  # noqa: TC001
 from synthorg.core.types import NotBlankStr  # noqa: TC001
 from synthorg.engine.coordination.section_config import CoordinationSectionConfig
+from synthorg.engine.strategy.models import StrategyConfig
 from synthorg.engine.task_engine_config import TaskEngineConfig
 from synthorg.engine.workflow.config import WorkflowConfig
 from synthorg.hr.performance.config import PerformanceConfig
@@ -403,6 +409,11 @@ class AgentConfig(BaseModel):
         memory: Raw memory config dict.
         tools: Raw tools config dict.
         authority: Raw authority config dict.
+        autonomy_level: Per-agent autonomy level override
+            (``None`` inherits default).
+        strategic_output_mode: Per-agent strategic output mode override
+            (``StrategicOutputMode | None``).  ``None`` inherits the
+            company strategy config default.
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -437,6 +448,13 @@ class AgentConfig(BaseModel):
     autonomy_level: AutonomyLevel | None = Field(
         default=None,
         description="Per-agent autonomy level override (D6)",
+    )
+    strategic_output_mode: StrategicOutputMode | None = Field(
+        default=None,
+        description=(
+            "Per-agent strategic output mode override. "
+            "None inherits the company strategy config default."
+        ),
     )
 
 
@@ -586,6 +604,7 @@ class RootConfig(BaseModel):
             CI/LLM weights, trend thresholds).
         task_engine: Task engine configuration.
         coordination: Multi-agent coordination configuration.
+        strategy: Strategy and trendslop mitigation configuration.
         git_clone: Git clone SSRF prevention network policy.
         backup: Backup and restore configuration.
         workflow: Workflow type configuration.
@@ -718,6 +737,10 @@ class RootConfig(BaseModel):
     coordination: CoordinationSectionConfig = Field(
         default_factory=CoordinationSectionConfig,
         description="Multi-agent coordination configuration",
+    )
+    strategy: StrategyConfig = Field(
+        default_factory=StrategyConfig,
+        description="Strategy and trendslop mitigation configuration",
     )
     git_clone: GitCloneNetworkPolicy = Field(
         default_factory=GitCloneNetworkPolicy,
