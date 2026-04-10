@@ -53,6 +53,8 @@ func init() {
 // initAllFlagsSet returns true when all required init flags are provided,
 // enabling fully non-interactive setup. The --image-tag and --channel flags
 // are optional (default to CLI version and "stable" respectively).
+// Telemetry opt-in is intentionally interactive-only; non-interactive
+// init defaults to telemetry disabled (opt-in via "config set" or env var).
 func initAllFlagsSet() bool {
 	return initBackendPort > 0 && initWebPort > 0 && initSandbox != "" &&
 		initLogLevel != ""
@@ -192,6 +194,7 @@ type setupAnswers struct {
 	memoryBackend      string
 	channel            string // optional override (empty = default "stable")
 	imageTag           string // optional override (empty = use CLI version)
+	telemetryOptIn     bool
 }
 
 // validateInitFlags checks that provided CLI flag values are valid before
@@ -303,6 +306,14 @@ func runSetupFormWithOverrides(resolvedDataDir string) (setupAnswers, error) {
 					a.persistenceBackend, a.memoryBackend,
 				)),
 		),
+		huh.NewGroup(
+			huh.NewConfirm().Title("Help improve SynthOrg?").
+				Description(
+					"Send anonymous usage data (agent count, feature usage, error rates).\n"+
+						"We NEVER collect API keys, chat content, or personal data.\n"+
+						"You can change this later: synthorg config set telemetry_opt_in false",
+				).Value(&a.telemetryOptIn),
+		),
 	)
 
 	if err := form.Run(); err != nil {
@@ -357,6 +368,7 @@ func buildState(a setupAnswers) (config.State, error) {
 		SettingsKey:        settingsKey,
 		PersistenceBackend: a.persistenceBackend,
 		MemoryBackend:      a.memoryBackend,
+		TelemetryOptIn:     a.telemetryOptIn,
 	}, nil
 }
 

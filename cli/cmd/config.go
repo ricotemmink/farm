@@ -24,7 +24,7 @@ var supportedConfigKeys = []string{
 	"auto_start_after_wipe", "auto_update_cli",
 	"backend_port", "channel", "color", "docker_sock",
 	"hints", "image_tag", "log_level", "output",
-	"sandbox", "timestamps", "web_port",
+	"sandbox", "telemetry_opt_in", "timestamps", "web_port",
 }
 
 var configCmd = &cobra.Command{
@@ -72,6 +72,7 @@ Supported keys:
   output                Output format
   persistence_backend   Persistence backend (read-only)
   sandbox               Sandbox enabled
+  telemetry_opt_in      Anonymous product telemetry opt-in
   timestamps            Timestamp display mode
   web_port              Web dashboard port`,
 	Args:              cobra.ExactArgs(1),
@@ -100,11 +101,12 @@ Supported keys:
   log_level              Log verbosity: "debug", "info", "warn", "error"
   output                 Output format: "text" or "json"
   sandbox                Enable sandbox: "true" or "false"
+  telemetry_opt_in       Anonymous product telemetry: "true" or "false"
   timestamps             Timestamp format: "relative" or "iso8601"
   web_port               Web dashboard port: 1-65535
 
 Keys that affect Docker compose (backend_port, web_port, sandbox, docker_sock,
-image_tag, log_level) trigger automatic compose.yml regeneration.`,
+image_tag, log_level, telemetry_opt_in) trigger automatic compose.yml regeneration.`,
 	Args:              cobra.ExactArgs(2),
 	RunE:              runConfigSet,
 	ValidArgsFunction: completeConfigSetKeys,
@@ -204,6 +206,11 @@ func printConfigFields(out *ui.UI, state config.State) {
 	out.KeyValue("Auto restart", strconv.FormatBool(state.AutoRestart))
 	out.KeyValue("Auto apply compose", strconv.FormatBool(state.AutoApplyCompose))
 	out.KeyValue("Auto start after wipe", strconv.FormatBool(state.AutoStartAfterWipe))
+	effectiveTelemetry := state.TelemetryOptIn
+	if os.Getenv(EnvTelemetry) != "" {
+		effectiveTelemetry = envBool(EnvTelemetry)
+	}
+	out.KeyValue("Telemetry opt-in", strconv.FormatBool(effectiveTelemetry))
 	out.KeyValue("JWT secret", maskSecret(state.JWTSecret))
 	out.KeyValue("Settings key", maskSecret(state.SettingsKey))
 }
@@ -223,7 +230,8 @@ var gettableConfigKeys = []string{
 	"auto_start_after_wipe", "auto_update_cli",
 	"backend_port", "channel", "color", "docker_sock",
 	"hints", "image_tag", "log_level", "memory_backend",
-	"output", "persistence_backend", "sandbox", "timestamps", "web_port",
+	"output", "persistence_backend", "sandbox", "telemetry_opt_in",
+	"timestamps", "web_port",
 }
 
 func completeConfigGetKeys(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
@@ -257,7 +265,14 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	_, _ = fmt.Fprintln(cmd.OutOrStdout(), configGetValue(state, key))
+	val := configGetValue(state, key)
+	// Apply env var override (same resolution as config list).
+	if envVar := envVarForKey(key); envVar != "" {
+		if envVal := os.Getenv(envVar); envVal != "" {
+			val = envVal
+		}
+	}
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), val)
 	return nil
 }
 
@@ -277,7 +292,7 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := applyConfigValue(&state, key, value); err != nil {
-		return err
+		return fmt.Errorf("applying config value: %w", err)
 	}
 
 	if key == "image_tag" {
@@ -285,7 +300,7 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	}
 	if composeAffectingKeys[key] {
 		if err := regenerateCompose(state); err != nil {
-			return err
+			return fmt.Errorf("regenerating compose after set: %w", err)
 		}
 	}
 
@@ -392,6 +407,8 @@ func applyConfigValue(state *config.State, key, value string) error {
 		return setEnum(value, key, config.IsValidOutputMode, config.OutputModeNames, &state.Output)
 	case "sandbox":
 		return setBool(value, key, &state.Sandbox)
+	case "telemetry_opt_in":
+		return setBool(value, key, &state.TelemetryOptIn)
 	case "timestamps":
 		return setEnum(value, key, config.IsValidTimestampMode, config.TimestampModeNames, &state.Timestamps)
 	case "web_port":
@@ -448,6 +465,7 @@ func maskSecret(s string) string {
 var composeAffectingKeys = map[string]bool{
 	"backend_port": true, "web_port": true, "sandbox": true,
 	"docker_sock": true, "image_tag": true, "log_level": true,
+	"telemetry_opt_in": true,
 }
 
 // regenerateCompose regenerates compose.yml from the current state.
@@ -457,7 +475,7 @@ func regenerateCompose(state config.State) error {
 	// can trace the sanitization for go/path-injection.
 	safeDir, err := config.SecurePath(state.DataDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("securing data dir path: %w", err)
 	}
 	composePath := filepath.Join(safeDir, "compose.yml")
 
@@ -486,7 +504,7 @@ func runConfigUnset(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := resetConfigValue(&state, key); err != nil {
-		return err
+		return fmt.Errorf("resetting config value: %w", err)
 	}
 	// Validate port uniqueness after resetting to default.
 	if key == "backend_port" && state.BackendPort == state.WebPort {
@@ -501,7 +519,7 @@ func runConfigUnset(cmd *cobra.Command, args []string) error {
 
 	if composeAffectingKeys[key] {
 		if err := regenerateCompose(state); err != nil {
-			return err
+			return fmt.Errorf("regenerating compose after unset: %w", err)
 		}
 	}
 
@@ -549,6 +567,8 @@ func resetConfigValue(state *config.State, key string) error {
 		state.Output = ""
 	case "sandbox":
 		state.Sandbox = defaults.Sandbox
+	case "telemetry_opt_in":
+		state.TelemetryOptIn = defaults.TelemetryOptIn
 	case "timestamps":
 		state.Timestamps = ""
 	case "web_port":
@@ -585,6 +605,8 @@ func envVarForKey(key string) string {
 		return EnvAutoPull
 	case "auto_restart":
 		return EnvAutoRestart
+	case "telemetry_opt_in":
+		return EnvTelemetry
 	default:
 		return ""
 	}
@@ -667,6 +689,8 @@ func configGetValue(state config.State, key string) string {
 		return state.PersistenceBackend
 	case "sandbox":
 		return strconv.FormatBool(state.Sandbox)
+	case "telemetry_opt_in":
+		return strconv.FormatBool(state.TelemetryOptIn)
 	case "timestamps":
 		return state.Timestamps
 	case "web_port":

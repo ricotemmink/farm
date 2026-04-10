@@ -43,6 +43,7 @@ type Params struct {
 	DockerSock         string
 	PersistenceBackend string
 	MemoryBackend      string
+	TelemetryOptIn     bool
 	DigestPins         map[string]string // image name suffix → digest (e.g. "backend" → "sha256:abc...")
 }
 
@@ -60,6 +61,7 @@ func ParamsFromState(s config.State) Params {
 		DockerSock:         s.DockerSock,
 		PersistenceBackend: s.PersistenceBackend,
 		MemoryBackend:      s.MemoryBackend,
+		TelemetryOptIn:     s.TelemetryOptIn,
 	}
 }
 
@@ -67,7 +69,7 @@ func ParamsFromState(s config.State) Params {
 // It validates all string parameters before rendering to prevent YAML injection.
 func Generate(p Params) ([]byte, error) {
 	if err := validateParams(p); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validating params: %w", err)
 	}
 
 	funcMap := template.FuncMap{
@@ -77,11 +79,11 @@ func Generate(p Params) ([]byte, error) {
 
 	tmpl, err := template.New("compose").Funcs(funcMap).Parse(composeTmpl)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parsing template: %w", err)
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, p); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("executing template: %w", err)
 	}
 	return buf.Bytes(), nil
 }

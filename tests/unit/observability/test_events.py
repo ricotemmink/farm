@@ -156,6 +156,7 @@ def _all_event_names() -> list[tuple[str, str]]:
     return result
 
 
+@pytest.mark.unit
 class TestEventConstants:
     def test_all_are_strings(self) -> None:
         for attr, val in _all_event_names():
@@ -258,6 +259,7 @@ class TestEventConstants:
             "coordination_metrics",
             "database",
             "sub_constraint",
+            "telemetry",
             "terminal",
             "versioning",
             "web",

@@ -41,6 +41,9 @@ type State struct {
 	AutoRestart        bool `json:"auto_restart"`
 	AutoApplyCompose   bool `json:"auto_apply_compose"`
 	AutoStartAfterWipe bool `json:"auto_start_after_wipe"`
+
+	// Telemetry (opt-in anonymous product telemetry, default false).
+	TelemetryOptIn bool `json:"telemetry_opt_in"`
 }
 
 // DefaultState returns a State with sensible defaults for the interactive init
@@ -283,15 +286,15 @@ func isValidDigestFormat(d string) bool {
 func Save(s State) error {
 	safeDir, err := SecurePath(s.DataDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("securing data dir: %w", err)
 	}
 	s.DataDir = safeDir // persist the canonical path
 	if err := os.MkdirAll(safeDir, 0o700); err != nil {
-		return err
+		return fmt.Errorf("creating config directory: %w", err)
 	}
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("marshaling config: %w", err)
 	}
 	return os.WriteFile(StatePath(safeDir), data, 0o600) //nolint:gosec // path validated by SecurePath
 }
