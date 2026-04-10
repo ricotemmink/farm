@@ -24,6 +24,7 @@ from synthorg.communication.conflict_resolution.config import (
 )
 from synthorg.communication.enums import (
     ChannelType,
+    MessageBusBackend,
     MessagePriority,
     MessageType,
 )
@@ -67,6 +68,12 @@ class MessageRetentionConfigFactory(ModelFactory[MessageRetentionConfig]):
 class MessageBusConfigFactory(ModelFactory[MessageBusConfig]):
     __model__ = MessageBusConfig
     retention = MessageRetentionConfigFactory
+    # Fixed to INTERNAL because other backends require a backend-specific
+    # config sub-block (e.g. MessageBusConfig.nats when backend=nats) that
+    # polyfactory cannot synthesize automatically. Tests that exercise
+    # other backends construct the config explicitly.
+    backend = MessageBusBackend.INTERNAL
+    nats = None
 
 
 class MeetingTypeConfigFactory(ModelFactory[MeetingTypeConfig]):
@@ -126,6 +133,11 @@ class ConflictResolutionConfigFactory(ModelFactory[ConflictResolutionConfig]):
 
 class CommunicationConfigFactory(ModelFactory[CommunicationConfig]):
     __model__ = CommunicationConfig
+    # Use the pinned MessageBusConfigFactory so polyfactory doesn't
+    # synthesize a random NatsConfig for the optional `nats` sub-block.
+    # NatsConfig.url now enforces a scheme allow-list at config load and
+    # polyfactory's random string generator picks values that fail it.
+    message_bus = MessageBusConfigFactory
     meetings = MeetingsConfigFactory
     loop_prevention = LoopPreventionConfigFactory
     conflict_resolution = ConflictResolutionConfigFactory

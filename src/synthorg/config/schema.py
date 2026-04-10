@@ -54,6 +54,7 @@ from synthorg.tools.mcp.config import MCPConfig
 from synthorg.tools.sandbox.sandboxing_config import SandboxingConfig
 from synthorg.tools.terminal.config import TerminalConfig  # noqa: TC001
 from synthorg.tools.web.config import WebToolsConfig  # noqa: TC001
+from synthorg.workers.config import QueueConfig
 
 logger = get_logger(__name__)
 
@@ -605,6 +606,8 @@ class RootConfig(BaseModel):
         performance: Performance tracking configuration (quality judge,
             CI/LLM weights, trend thresholds).
         task_engine: Task engine configuration.
+        queue: Distributed task queue configuration (opt-in, requires
+            a distributed bus backend such as NATS).
         coordination: Multi-agent coordination configuration.
         strategy: Strategy and trendslop mitigation configuration.
         git_clone: Git clone SSRF prevention network policy.
@@ -739,6 +742,10 @@ class RootConfig(BaseModel):
         default_factory=TaskEngineConfig,
         description="Task engine configuration",
     )
+    queue: QueueConfig = Field(
+        default_factory=QueueConfig,
+        description="Distributed task queue configuration (opt-in)",
+    )
     coordination: CoordinationSectionConfig = Field(
         default_factory=CoordinationSectionConfig,
         description="Multi-agent coordination configuration",
@@ -818,6 +825,50 @@ class RootConfig(BaseModel):
         if len(names) != len(set(names)):
             dupes = sorted(n for n, c in Counter(names).items() if c > 1)
             msg = f"Duplicate department names: {dupes}"
+            logger.warning(
+                CONFIG_VALIDATION_FAILED,
+                model="RootConfig",
+                error=msg,
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_queue_requires_distributed_bus(self) -> Self:
+        """Ensure ``queue.enabled`` requires an implemented distributed backend.
+
+        The distributed task queue currently publishes claims through
+        the JetStream work-queue client. ``MessageBusBackend`` also
+        lists ``REDIS`` / ``RABBITMQ`` / ``KAFKA`` as future backends
+        that are documented but not yet implemented, so pairing them
+        with ``queue.enabled`` would pass this check and then silently
+        no-op at auto-wire time. Require ``backend == NATS`` explicitly
+        so config load fails fast when the selected transport cannot
+        actually drive the queue, and additionally require a non-null
+        ``nats`` sub-block so the worker has something to connect to.
+        """
+        from synthorg.communication.enums import MessageBusBackend  # noqa: PLC0415
+
+        if not self.queue.enabled:
+            return self
+        backend = self.communication.message_bus.backend
+        if backend != MessageBusBackend.NATS:
+            msg = (
+                "queue.enabled requires communication.message_bus.backend=='nats'; "
+                f"got {backend.value!r}. Redis, RabbitMQ and Kafka are documented "
+                "as future transports but do not yet have a task-queue client."
+            )
+            logger.warning(
+                CONFIG_VALIDATION_FAILED,
+                model="RootConfig",
+                error=msg,
+            )
+            raise ValueError(msg)
+        if self.communication.message_bus.nats is None:
+            msg = (
+                "queue.enabled requires communication.message_bus.nats to be set "
+                "so the worker has a server URL and credentials to connect to."
+            )
             logger.warning(
                 CONFIG_VALIDATION_FAILED,
                 model="RootConfig",

@@ -1,9 +1,10 @@
 """Communication configuration models (see Communication design page)."""
 
 from collections import Counter
-from typing import Literal, Self
+from typing import Final, Literal, Self
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from synthorg.communication.conflict_resolution.config import (
     ConflictResolutionConfig,
@@ -18,6 +19,18 @@ from synthorg.core.types import (
     NotBlankStr,
     validate_unique_strings,
 )
+
+_VALID_NATS_URL_SCHEMES: frozenset[str] = frozenset({"nats", "tls", "nats+tls"})
+"""NATS URL schemes accepted at config load.
+
+Matches the Go CLI's ``validateNatsURL`` allow-list in
+``cli/cmd/worker_start.go`` so the config and the CLI enforce the
+same rule at their respective system boundaries.
+"""
+
+_MIN_TCP_PORT: Final[int] = 1
+_MAX_TCP_PORT: Final[int] = 65535
+"""Legal TCP port range applied to ``NatsConfig.url`` at load time."""
 
 # Default channels from the Communication design page.
 _DEFAULT_CHANNELS: tuple[str, ...] = (
@@ -48,6 +61,111 @@ class MessageRetentionConfig(BaseModel):
     )
 
 
+class NatsConfig(BaseModel):
+    """NATS JetStream backend configuration.
+
+    Only applicable when ``MessageBusConfig.backend == NATS``. See
+    ``docs/design/distributed-runtime.md`` for stream layout and
+    subject naming.
+
+    Attributes:
+        url: NATS server URL (e.g. ``nats://localhost:4222``).
+        credentials_path: Optional path to a credentials file for
+            secured clusters (creds file or jwt+seed).
+        stream_name_prefix: Prefix for JetStream stream names. The
+            bus stream is ``<prefix>_BUS`` and the KV bucket for
+            dynamic channels is ``<prefix>_BUS_CHANNELS``.
+        connect_timeout_seconds: Seconds to wait for the initial
+            connection before raising.
+        reconnect_time_wait_seconds: Seconds between reconnect
+            attempts.
+        max_reconnect_attempts: Maximum reconnect attempts before
+            giving up (``-1`` for unlimited).
+        publish_ack_wait_seconds: Seconds to wait for a JetStream
+            publish ack before considering the publish failed.
+    """
+
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
+
+    url: NotBlankStr = Field(
+        default="nats://localhost:4222",
+        description="NATS server URL",
+    )
+
+    @field_validator("url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        """Reject bad NATS URLs at config load instead of first connect.
+
+        The in-process NATS client accepts "anything non-empty" and only
+        fails later when it tries to dial the server, which leads to
+        confusing errors downstream. Parse the URL here and require a
+        recognised scheme, a non-empty host, and (if a port is present)
+        a numeric port inside the legal TCP range so misconfiguration
+        surfaces immediately at config load.
+        """
+        try:
+            parsed = urlparse(value)
+        except ValueError as exc:
+            msg = f"invalid NATS url {value!r}: {exc}"
+            raise ValueError(msg) from exc
+        if parsed.scheme.lower() not in _VALID_NATS_URL_SCHEMES:
+            schemes = ", ".join(sorted(_VALID_NATS_URL_SCHEMES))
+            msg = (
+                f"invalid NATS url {value!r}: scheme must be one of {schemes}; "
+                f"got {parsed.scheme!r}"
+            )
+            raise ValueError(msg)
+        if not parsed.hostname:
+            msg = f"invalid NATS url {value!r}: missing host"
+            raise ValueError(msg)
+        # parsed.port raises ValueError for a non-numeric or negative
+        # port; re-wrap with a contextual message. When no port is
+        # present parsed.port returns None, which is fine (the client
+        # uses the NATS default).
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            msg = f"invalid NATS url {value!r}: non-numeric port in netloc"
+            raise ValueError(msg) from exc
+        if port is not None and not (_MIN_TCP_PORT <= port <= _MAX_TCP_PORT):
+            msg = (
+                f"invalid NATS url {value!r}: port {port} out of range "
+                f"(must be {_MIN_TCP_PORT}-{_MAX_TCP_PORT})"
+            )
+            raise ValueError(msg)
+        return value
+
+    credentials_path: str | None = Field(
+        default=None,
+        description="Optional credentials file path",
+    )
+    stream_name_prefix: NotBlankStr = Field(
+        default="SYNTHORG",
+        description="Prefix for JetStream stream names",
+    )
+    connect_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="Initial connect timeout",
+    )
+    reconnect_time_wait_seconds: float = Field(
+        default=2.0,
+        gt=0,
+        description="Seconds between reconnect attempts",
+    )
+    max_reconnect_attempts: int = Field(
+        default=-1,
+        ge=-1,
+        description="Max reconnect attempts (-1 = unlimited)",
+    )
+    publish_ack_wait_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="JetStream publish ack wait",
+    )
+
+
 class MessageBusConfig(BaseModel):
     """Message bus backend configuration.
 
@@ -57,6 +175,8 @@ class MessageBusConfig(BaseModel):
         backend: Transport backend to use.
         channels: Pre-defined channel names.
         retention: Message retention settings.
+        nats: NATS-specific configuration (required when
+            ``backend == NATS``, ignored otherwise).
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -73,11 +193,23 @@ class MessageBusConfig(BaseModel):
         default_factory=MessageRetentionConfig,
         description="Message retention settings",
     )
+    nats: NatsConfig | None = Field(
+        default=None,
+        description="NATS-specific configuration (required when backend=nats)",
+    )
 
     @model_validator(mode="after")
     def _validate_channels(self) -> Self:
         """Ensure channel names are unique."""
         validate_unique_strings(self.channels, "channels")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_backend_config(self) -> Self:
+        """Ensure backend-specific config is provided when required."""
+        if self.backend == MessageBusBackend.NATS and self.nats is None:
+            msg = "message_bus.nats must be provided when message_bus.backend is 'nats'"
+            raise ValueError(msg)
         return self
 
 

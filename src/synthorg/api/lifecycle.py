@@ -5,7 +5,7 @@ failure), ``_safe_shutdown`` (graceful ordered teardown), and their
 supporting helpers.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from synthorg.api.auth.secret import resolve_jwt_secret
 from synthorg.api.auth.service import AuthService
@@ -33,16 +33,39 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+class _AsyncStartStop(Protocol):
+    """Minimal async lifecycle Protocol used by the distributed task queue hook.
+
+    The concrete type is ``synthorg.workers.claim.JetStreamTaskQueue``, but
+    importing that here would force the optional ``synthorg[distributed]``
+    extra to be installed even for deployments that never use the queue.
+    A structural Protocol with ``start()``/``stop()`` gives the lifecycle
+    helpers a real shape without the hard dependency.
+    """
+
+    async def start(self) -> None:
+        """Open the connection / initialise resources."""
+        ...
+
+    async def stop(self) -> None:
+        """Tear down the connection / release resources."""
+        ...
+
+
 async def _try_stop(
     coro: Awaitable[None],
     event: str,
     error_msg: str,
-) -> None:
+) -> bool:
     """Await *coro* inside a safe try/except, logging failures.
 
     ``MemoryError`` and ``RecursionError`` are re-raised immediately;
     all other exceptions are logged and swallowed so that sibling
     shutdown steps can still run.
+
+    Returns ``True`` when *coro* completes without raising, ``False``
+    when an exception was swallowed. Callers use this to guard
+    "stopped" log lines so they only fire on actual success.
     """
     try:
         await coro
@@ -50,9 +73,11 @@ async def _try_stop(
         raise
     except Exception:
         logger.exception(event, error=error_msg)
+        return False
+    return True
 
 
-async def _cleanup_on_failure(  # noqa: PLR0913
+async def _cleanup_on_failure(  # noqa: PLR0913, C901
     *,
     persistence: PersistenceBackend | None,
     started_persistence: bool,
@@ -64,6 +89,8 @@ async def _cleanup_on_failure(  # noqa: PLR0913
     started_settings_dispatcher: bool = False,
     task_engine: TaskEngine | None = None,
     started_task_engine: bool = False,
+    distributed_task_queue: _AsyncStartStop | None = None,
+    started_distributed_task_queue: bool = False,
     meeting_scheduler: MeetingScheduler | None = None,
     started_meeting_scheduler: bool = False,
     backup_service: BackupService | None = None,
@@ -108,6 +135,23 @@ async def _cleanup_on_failure(  # noqa: PLR0913
             API_APP_STARTUP,
             "Cleanup: failed to stop message bus bridge",
         )
+    if started_distributed_task_queue and distributed_task_queue is not None:
+        logger.info(
+            API_APP_STARTUP,
+            service="distributed_task_queue",
+            phase="stopping_on_cleanup",
+        )
+        ok = await _try_stop(
+            distributed_task_queue.stop(),
+            API_APP_STARTUP,
+            "Cleanup: failed to stop distributed task queue",
+        )
+        if ok:
+            logger.info(
+                API_APP_STARTUP,
+                service="distributed_task_queue",
+                phase="stopped_on_cleanup",
+            )
     if started_bus and message_bus is not None:
         await _try_stop(
             message_bus.stop(),
@@ -186,9 +230,11 @@ async def _safe_startup(  # noqa: PLR0913, PLR0912, PLR0915, C901
     started_persistence = False
     started_settings_dispatcher = False
     started_task_engine = False
+    started_distributed_task_queue = False
     started_meeting_scheduler = False
     started_backup_service = False
     started_approval_timeout_scheduler = False
+    distributed_task_queue = app_state.distributed_task_queue
     try:
         if persistence is not None:
             try:
@@ -266,6 +312,21 @@ async def _safe_startup(  # noqa: PLR0913, PLR0912, PLR0915, C901
                 )
                 raise
             started_bus = True
+        if distributed_task_queue is not None:
+            try:
+                await distributed_task_queue.start()
+            except Exception:
+                logger.exception(
+                    API_APP_STARTUP,
+                    error="Failed to start distributed task queue",
+                )
+                raise
+            started_distributed_task_queue = True
+            logger.info(
+                API_APP_STARTUP,
+                service="distributed_task_queue",
+                phase="started",
+            )
         if bridge is not None:
             try:
                 await bridge.start()
@@ -357,6 +418,8 @@ async def _safe_startup(  # noqa: PLR0913, PLR0912, PLR0915, C901
             started_settings_dispatcher=started_settings_dispatcher,
             task_engine=task_engine,
             started_task_engine=started_task_engine,
+            distributed_task_queue=distributed_task_queue,
+            started_distributed_task_queue=started_distributed_task_queue,
             meeting_scheduler=meeting_scheduler,
             started_meeting_scheduler=started_meeting_scheduler,
             backup_service=backup_service,
@@ -367,7 +430,7 @@ async def _safe_startup(  # noqa: PLR0913, PLR0912, PLR0915, C901
         raise
 
 
-async def _safe_shutdown(  # noqa: PLR0913, C901
+async def _safe_shutdown(  # noqa: PLR0913, PLR0912, C901
     task_engine: TaskEngine | None,
     meeting_scheduler: MeetingScheduler | None,
     backup_service: BackupService | None,
@@ -377,14 +440,17 @@ async def _safe_shutdown(  # noqa: PLR0913, C901
     message_bus: MessageBus | None,
     persistence: PersistenceBackend | None,
     performance_tracker: PerformanceTracker | None = None,
+    distributed_task_queue: _AsyncStartStop | None = None,
 ) -> None:
     """Stop services in reverse startup order.
 
     Approval timeout scheduler first, then meeting scheduler
     (depends on orchestrator), then task engine so it can drain queued
     mutations and publish final snapshots through the still-running
-    bridge.  Performance tracker closes after task engine (sampling
-    is triggered by task events).  Backup runs before persistence
+    bridge. The distributed task queue stops after the engine so
+    in-flight observer callbacks can still publish their final claims.
+    Performance tracker closes after task engine (sampling is
+    triggered by task events). Backup runs before persistence
     disconnect so shutdown backup can still access the DB.
     """
     if approval_timeout_scheduler is not None:
@@ -412,7 +478,6 @@ async def _safe_shutdown(  # noqa: PLR0913, C901
             "Failed to close performance tracker",
         )
     if backup_service is not None:
-        # Create shutdown backup before stopping the backup scheduler
         if backup_service.on_shutdown:
             try:
                 await backup_service.create_backup(
@@ -443,6 +508,27 @@ async def _safe_shutdown(  # noqa: PLR0913, C901
             API_APP_SHUTDOWN,
             "Failed to stop message bus bridge",
         )
+    # Distributed task queue stops after bridge but before the bus so
+    # the NATS connection it shares is still alive during drain. This
+    # mirrors the exact inverse of the startup order: bus -> queue ->
+    # bridge -> ... -> task_engine.
+    if distributed_task_queue is not None:
+        logger.info(
+            API_APP_SHUTDOWN,
+            service="distributed_task_queue",
+            phase="stopping",
+        )
+        ok = await _try_stop(
+            distributed_task_queue.stop(),
+            API_APP_SHUTDOWN,
+            "Failed to stop distributed task queue",
+        )
+        if ok:
+            logger.info(
+                API_APP_SHUTDOWN,
+                service="distributed_task_queue",
+                phase="stopped",
+            )
     if message_bus is not None:
         await _try_stop(
             message_bus.stop(),
