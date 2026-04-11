@@ -24,6 +24,15 @@
 - Surface improvements as suggestions, not silent changes -- user decides
 - **Prioritize issues by dependency order**, not priority labels -- unblocked dependencies come first
 
+## Diagrams in Documentation
+
+- **D2** (`\`\`\`d2`): architecture diagrams, nested container layouts, complex entity relationships. Rendered at build time via `mkdocs-d2-plugin` (dagre layout). Requires the [D2 CLI](https://d2lang.com/tour/install) on `PATH` locally and in CI (pinned to v0.7.1 via `.github/workflows/pages.yml`).
+- **Mermaid** (`\`\`\`mermaid`): flowcharts, sequence diagrams, simple hierarchies, pipelines. Rendered client-side via `pymdownx.superfences`.
+- **Markdown tables**: grid/matrix data that is semantically tabular (not diagrams).
+- D2 uses theme 200 (Dark Mauve), dark-only render -- configured globally in `mkdocs.yml`.
+- Never use `\`\`\`text` blocks with ASCII/Unicode box-drawing characters for diagrams.
+- Review agent `diagram-syntax-validator` runs in `/pre-pr-review` and `/aurelio-review-pr` pipelines.
+
 ## Quick Commands
 
 ```bash
@@ -49,8 +58,8 @@ atlas schema diff --env postgres           # drift detection for Postgres (schem
 bash scripts/squash_migrations.sh          # squash old migrations (release-time)
 uv run python scripts/export_openapi.py    # export OpenAPI schema (needed before docs build)
 uv run python scripts/generate_comparison.py  # generate comparison page (needed before docs build)
-uv run zensical build                      # build docs (output: _site/docs/) -- no --strict until zensical/backlog#72
-uv run zensical serve                      # local docs preview (http://127.0.0.1:8000)
+PYTHONPATH=. uv run zensical build          # build docs (output: _site/docs/) -- PYTHONPATH=. enables d2_fence.py for D2 rendering
+PYTHONPATH=. uv run zensical serve          # local docs preview (http://127.0.0.1:8000)
 ```
 
 ### Web Dashboard

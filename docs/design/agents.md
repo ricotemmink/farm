@@ -613,29 +613,37 @@ does.
 
 ### Architecture
 
-```text
-Trigger --> Build Context --> Proposer --> Guards --> Adapter.apply
-  |              |               |            |           |
-  |              |               |            |           +-- IdentityAdapter
-  |              |               |            |           +-- StrategySelectionAdapter
-  |              |               |            |           +-- PromptTemplateAdapter
-  |              |               |            |
-  |              |               |            +-- RateLimitGuard
-  |              |               |            +-- ReviewGateGuard
-  |              |               |            +-- RollbackGuard
-  |              |               |            +-- ShadowEvaluationGuard
-  |              |               |            +-- CompositeGuard
-  |              |               |
-  |              |               +-- SeparateAnalyzerProposer
-  |              |               +-- SelfReportProposer
-  |              |               +-- CompositeProposer
-  |              |
-  |              +-- EvolutionContext (identity, performance, memories)
-  |
-  +-- BatchedTrigger (cron-like)
-  +-- InflectionTrigger (performance trend changes)
-  +-- PerTaskTrigger (post-execution)
-  +-- CompositeTrigger (OR-combines)
+```d2
+Pipeline: "Evolution Pipeline" {
+  Trigger: {
+    T1: "BatchedTrigger\n(cron-like)"
+    T2: "InflectionTrigger\n(performance trend)"
+    T3: "PerTaskTrigger\n(post-execution)"
+    T4: "CompositeTrigger\n(OR-combines)"
+  }
+  Context: "Build Context" {
+    BC: "EvolutionContext\n(identity, performance, memories)"
+  }
+  Proposer: {
+    P1: SeparateAnalyzerProposer
+    P2: SelfReportProposer
+    P3: CompositeProposer
+  }
+  Guards: {
+    G1: RateLimitGuard
+    G2: ReviewGateGuard
+    G3: RollbackGuard
+    G4: ShadowEvaluationGuard
+    G5: CompositeGuard
+  }
+  Apply: "Adapter.apply" {
+    A1: IdentityAdapter
+    A2: StrategySelectionAdapter
+    A3: PromptTemplateAdapter
+  }
+
+  Trigger -> Context -> Proposer -> Guards -> Apply
+}
 ```
 
 The pipeline is orchestrated by ``EvolutionService`` in ``engine/evolution/service.py``.

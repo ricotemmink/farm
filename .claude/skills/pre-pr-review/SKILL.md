@@ -132,10 +132,13 @@ Automated pre-PR pipeline that runs checks, launches review agents, triages find
 
 Determine if agent review can be skipped:
 
-- If `$ARGUMENTS` contains `quick` -> skip agents, go to Phase 2 then Phase 8, then Phase 10 and Phase 11
+- If `$ARGUMENTS` contains `quick`:
+  - If any changed `.md` file contains a ` ```d2 ` or ` ```mermaid ` fence, run only `diagram-syntax-validator` (per Phase 3) before continuing to Phase 2.
+  - Otherwise skip agents entirely, go to Phase 2 then Phase 8, then Phase 10 and Phase 11
 - **Auto-detect**: If ALL changed files are non-substantive (only `.md` docs, config formatting, typo-level edits with no logic changes, `site/` static assets like images/fonts), skip agents automatically
   - Auto-skip examples: all changes are `.md` files; only `pyproject.toml` version bump; only `.yaml`/`.json` config with no Python changes; only `site/` image/font/asset changes
   - Do NOT auto-skip: any `.py` file changed; any `.go` file changed; any `.tsx`/`.ts`/`.css` file changed; any `docker/` or `.github/workflows/` file changed; config changes that affect runtime behavior; new dependencies added
+  - **Exception for diagram changes**: even when auto-skipping, if any changed `.md` file contains a ` ```d2 ` or ` ```mermaid ` fence, run the `diagram-syntax-validator` agent (per Phase 3) before continuing. Its entire purpose is to catch broken diagrams in docs-only PRs -- the one scenario where auto-skip would otherwise bypass it.
 - If auto-skipping, inform user: "Skipping agent review (no substantive code changes detected). Running automated checks only."
 
 ## Phase 2: Automated Checks (always run)
@@ -269,6 +272,7 @@ This captures committed-but-unpushed changes AND any uncommitted/untracked work 
 | **go-conventions-enforcer** | Any `cli_go` | `pr-review-toolkit:code-reviewer` (custom prompt below) |
 | **issue-resolution-verifier** | Issue context was found in Phase 0 step 6 | `pr-review-toolkit:code-reviewer` (custom prompt below) |
 | **tool-parity-checker** | Any `.claude/` or `.opencode/` or `opencode.json` or `AGENTS.md` or `CLAUDE.md` file changed | `.claude/agents/tool-parity-checker.md` prompt (verifies Claude Code <-> OpenCode config parity) |
+| **diagram-syntax-validator** | Any `docs` files changed that contain ` ```d2 ` or ` ```mermaid ` blocks | `.claude/agents/diagram-syntax-validator.md` prompt (validates diagram syntax, conventions, fence types) |
 
 ### Go-conventions-enforcer custom prompt
 
