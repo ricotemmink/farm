@@ -20,6 +20,10 @@ from synthorg.hr.performance.models import (
     WindowMetrics,
 )
 from synthorg.observability import get_logger
+from synthorg.observability.events.inflection import (
+    PERF_INFLECTION_DETECTED,
+    PERF_INFLECTION_EMISSION_FAILED,
+)
 from synthorg.observability.events.performance import (
     PERF_LLM_SAMPLE_FAILED,
     PERF_METRIC_RECORDED,
@@ -33,12 +37,14 @@ if TYPE_CHECKING:
 
     from synthorg.core.task import AcceptanceCriterion
     from synthorg.engine.coordination.attribution import AgentContribution
+    from synthorg.hr.enums import TrendDirection
     from synthorg.hr.performance.collaboration_override_store import (
         CollaborationOverrideStore,
     )
     from synthorg.hr.performance.collaboration_protocol import (
         CollaborationScoringStrategy,
     )
+    from synthorg.hr.performance.inflection_protocol import InflectionSink
     from synthorg.hr.performance.llm_calibration_sampler import (
         LlmCalibrationSampler,
     )
@@ -83,6 +89,7 @@ class PerformanceTracker:
         sampler: LlmCalibrationSampler | None = None,
         override_store: CollaborationOverrideStore | None = None,
         quality_override_store: QualityOverrideStore | None = None,
+        inflection_sink: InflectionSink | None = None,
     ) -> None:
         cfg = config or PerformanceConfig()
         self._config = cfg
@@ -95,6 +102,8 @@ class PerformanceTracker:
         self._sampler = sampler
         self._override_store = override_store
         self._quality_override_store = quality_override_store
+        self._inflection_sink = inflection_sink
+        self._trend_direction_cache: dict[tuple[str, str, str], TrendDirection] = {}
         self._task_metrics: dict[str, list[TaskMetricRecord]] = {}
         self._collab_metrics: dict[str, list[CollaborationMetricRecord]] = {}
         self._contributions: dict[str, list[AgentContribution]] = {}
@@ -332,6 +341,10 @@ class PerformanceTracker:
         # Compute trends for quality and cost metrics.
         trends = self._compute_trends(task_records, windows, now=now)
 
+        # Emit inflection events for trend direction changes.
+        if self._inflection_sink is not None and trends:
+            self._schedule_inflection_emission(agent_id, trends)
+
         # Overall quality: average of all scored records.
         scored = [r.quality_score for r in task_records if r.quality_score is not None]
         overall_quality = round(sum(scored) / len(scored), 4) if scored else None
@@ -376,46 +389,64 @@ class PerformanceTracker:
         for window in windows:
             if window.data_point_count < self._config.min_data_points:
                 continue
-
-            # Filter records to this window's time boundary.
-            window_label = str(window.window_size)
-            match = re.match(r"^(\d+)d$", window_label)
-            if match:
-                days = int(match.group(1))
-                cutoff = now - timedelta(days=days)
-                window_records = tuple(r for r in records if r.completed_at >= cutoff)
-            else:
-                logger.warning(
-                    PERF_WINDOW_INSUFFICIENT_DATA,
-                    window=window_label,
-                    warning="unparseable_window_label",
-                )
+            window_records = self._filter_records_to_window(records, window, now)
+            if window_records is None:
                 continue
+            trends.extend(self._detect_metric_trends(window_records, window))
+        return trends
 
-            # Quality score trend.
-            quality_values = tuple(
-                (r.completed_at, r.quality_score)
-                for r in window_records
-                if r.quality_score is not None
+    def _filter_records_to_window(
+        self,
+        records: tuple[TaskMetricRecord, ...],
+        window: WindowMetrics,
+        now: AwareDatetime,
+    ) -> tuple[TaskMetricRecord, ...] | None:
+        """Filter records to a window's time boundary.
+
+        Returns None if the window label is unparseable.
+        """
+        window_label = str(window.window_size)
+        match = re.match(r"^(\d+)d$", window_label)
+        if not match:
+            logger.warning(
+                PERF_WINDOW_INSUFFICIENT_DATA,
+                window=window_label,
+                warning="unparseable_window_label",
             )
-            if quality_values:
-                trends.append(
-                    self._trend_strategy.detect(
-                        metric_name=NotBlankStr("quality_score"),
-                        values=quality_values,
-                        window_size=window.window_size,
-                    )
+            return None
+        days = int(match.group(1))
+        cutoff = now - timedelta(days=days)
+        return tuple(r for r in records if r.completed_at >= cutoff)
+
+    def _detect_metric_trends(
+        self,
+        window_records: tuple[TaskMetricRecord, ...],
+        window: WindowMetrics,
+    ) -> list[TrendResult]:
+        """Detect quality and cost trends for window records."""
+        trends: list[TrendResult] = []
+        quality_values = tuple(
+            (r.completed_at, r.quality_score)
+            for r in window_records
+            if r.quality_score is not None
+        )
+        if quality_values:
+            trends.append(
+                self._trend_strategy.detect(
+                    metric_name=NotBlankStr("quality_score"),
+                    values=quality_values,
+                    window_size=window.window_size,
                 )
-            # Cost trend.
-            cost_values = tuple((r.completed_at, r.cost_usd) for r in window_records)
-            if cost_values:
-                trends.append(
-                    self._trend_strategy.detect(
-                        metric_name=NotBlankStr("cost_usd"),
-                        values=cost_values,
-                        window_size=window.window_size,
-                    )
+            )
+        cost_values = tuple((r.completed_at, r.cost_usd) for r in window_records)
+        if cost_values:
+            trends.append(
+                self._trend_strategy.detect(
+                    metric_name=NotBlankStr("cost_usd"),
+                    values=cost_values,
+                    window_size=window.window_size,
                 )
+            )
         return trends
 
     def get_task_metrics(
@@ -489,6 +520,26 @@ class PerformanceTracker:
         """Return the LLM calibration sampler, if configured."""
         return self._sampler
 
+    @property
+    def inflection_sink(self) -> InflectionSink | None:
+        """Return the inflection sink, if configured."""
+        return self._inflection_sink
+
+    @inflection_sink.setter
+    def inflection_sink(self, value: InflectionSink | None) -> None:
+        """Set the inflection sink.
+
+        Args:
+            value: The inflection sink to assign.
+
+        Raises:
+            ValueError: If an inflection sink is already configured.
+        """
+        if self._inflection_sink is not None and value is not None:
+            msg = "Inflection sink is already configured"
+            raise ValueError(msg)
+        self._inflection_sink = value
+
     def _schedule_sampling(
         self,
         record: CollaborationMetricRecord,
@@ -554,5 +605,85 @@ class PerformanceTracker:
                 agent_id=record.agent_id,
                 record_id=record.id,
                 reason="llm_sample_failed",
+                exc_info=True,
+            )
+
+    # ── Inflection emission ─────────────────────────────────────
+
+    def _schedule_inflection_emission(
+        self,
+        agent_id: NotBlankStr,
+        trends: list[TrendResult],
+    ) -> None:
+        """Schedule inflection emission as a background task.
+
+        Compares each trend's direction against the cached previous
+        direction.  Emits a ``PerformanceInflection`` for every
+        direction change.  The task is tracked to prevent GC warnings.
+        """
+        task = asyncio.create_task(
+            self._do_emit_inflections(agent_id, trends),
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _do_emit_inflections(
+        self,
+        agent_id: NotBlankStr,
+        trends: list[TrendResult],
+    ) -> None:
+        """Emit inflection events for trend direction changes.
+
+        Best-effort: failures are logged and never propagated.
+        """
+        from synthorg.hr.performance.inflection_protocol import (  # noqa: PLC0415
+            PerformanceInflection,
+        )
+
+        sink = self._inflection_sink
+        if sink is None:  # pragma: no cover -- guarded by caller
+            return
+
+        try:
+            for trend in trends:
+                cache_key = (
+                    str(agent_id),
+                    str(trend.metric_name),
+                    str(trend.window_size),
+                )
+                # Atomically read old direction and update cache (TOCTOU fix).
+                async with self._metrics_lock:
+                    old_direction = self._trend_direction_cache.get(
+                        cache_key,
+                    )
+                    self._trend_direction_cache[cache_key] = trend.direction
+                # Emit outside lock to allow concurrent inflections.
+                if old_direction is not None and old_direction != trend.direction:
+                    inflection = PerformanceInflection(
+                        agent_id=agent_id,
+                        metric_name=trend.metric_name,
+                        window_size=trend.window_size,
+                        old_direction=old_direction,
+                        new_direction=trend.direction,
+                        slope=trend.slope,
+                    )
+                    logger.info(
+                        PERF_INFLECTION_DETECTED,
+                        agent_id=str(agent_id),
+                        metric=str(trend.metric_name),
+                        window=str(trend.window_size),
+                        old=old_direction.value,
+                        new=trend.direction.value,
+                    )
+                    await sink.emit(inflection)
+        except MemoryError, RecursionError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                PERF_INFLECTION_EMISSION_FAILED,
+                agent_id=str(agent_id),
+                error=f"{type(exc).__name__}: {exc}",
                 exc_info=True,
             )
