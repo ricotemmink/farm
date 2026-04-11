@@ -24,6 +24,7 @@ from synthorg.api.controllers.company import CompanyController
 from synthorg.api.controllers.company_versions import (
     CompanyVersionController,
 )
+from synthorg.api.controllers.connections import ConnectionsController
 from synthorg.api.controllers.coordination import CoordinationController
 from synthorg.api.controllers.coordination_metrics import (
     CoordinationMetricsController,
@@ -33,10 +34,15 @@ from synthorg.api.controllers.evaluation_config_versions import (
     EvaluationConfigVersionController,
 )
 from synthorg.api.controllers.health import HealthController
+from synthorg.api.controllers.integration_health import (
+    IntegrationHealthController,
+)
+from synthorg.api.controllers.mcp_catalog import MCPCatalogController
 from synthorg.api.controllers.meetings import MeetingController
 from synthorg.api.controllers.memory import MemoryAdminController
 from synthorg.api.controllers.messages import MessageController
 from synthorg.api.controllers.metrics import MetricsController
+from synthorg.api.controllers.oauth import OAuthController
 from synthorg.api.controllers.ontology import OntologyController
 from synthorg.api.controllers.personalities import (
     PersonalityPresetController,
@@ -60,7 +66,9 @@ from synthorg.api.controllers.tasks import TaskController
 from synthorg.api.controllers.teams import TeamController
 from synthorg.api.controllers.template_packs import TemplatePackController
 from synthorg.api.controllers.training import TrainingController
+from synthorg.api.controllers.tunnel import TunnelController
 from synthorg.api.controllers.users import UserController
+from synthorg.api.controllers.webhooks import WebhooksController
 from synthorg.api.controllers.workflow_executions import (
     WorkflowExecutionController,
 )
@@ -70,7 +78,8 @@ from synthorg.api.controllers.workflow_versions import (
 from synthorg.api.controllers.workflows import WorkflowController
 from synthorg.api.controllers.ws import ws_handler
 
-ALL_CONTROLLERS: tuple[type[Controller], ...] = (
+# Core API controllers (always registered).
+BASE_CONTROLLERS: tuple[type[Controller], ...] = (
     HealthController,
     MetricsController,
     CompanyController,
@@ -121,8 +130,28 @@ ALL_CONTROLLERS: tuple[type[Controller], ...] = (
     TrainingController,
 )
 
+# Integration subsystem controllers. Registered only when
+# ``effective_config.integrations.enabled`` is True (default in
+# production, disabled in unit tests so Litestar route registration
+# stays cheap -- ~0.7s per create_app() otherwise).
+INTEGRATION_CONTROLLERS: tuple[type[Controller], ...] = (
+    ConnectionsController,
+    IntegrationHealthController,
+    OAuthController,
+    WebhooksController,
+    MCPCatalogController,
+    TunnelController,
+)
+
+ALL_CONTROLLERS: tuple[type[Controller], ...] = (
+    *BASE_CONTROLLERS,
+    *INTEGRATION_CONTROLLERS,
+)
+
 __all__ = [
     "ALL_CONTROLLERS",
+    "BASE_CONTROLLERS",
+    "INTEGRATION_CONTROLLERS",
     "ActivityController",
     "AgentController",
     "AnalyticsController",
@@ -139,16 +168,20 @@ __all__ = [
     "CollaborationController",
     "CompanyController",
     "CompanyVersionController",
+    "ConnectionsController",
     "Controller",
     "CoordinationController",
     "CoordinationMetricsController",
     "DepartmentController",
     "EvaluationConfigVersionController",
     "HealthController",
+    "IntegrationHealthController",
+    "MCPCatalogController",
     "MeetingController",
     "MemoryAdminController",
     "MessageController",
     "MetricsController",
+    "OAuthController",
     "OntologyController",
     "PersonalityPresetController",
     "ProjectController",
@@ -168,7 +201,9 @@ __all__ = [
     "TeamController",
     "TemplatePackController",
     "TrainingController",
+    "TunnelController",
     "UserController",
+    "WebhooksController",
     "WorkflowController",
     "WorkflowExecutionController",
     "WorkflowVersionController",

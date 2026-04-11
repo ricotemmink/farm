@@ -33,12 +33,16 @@ from synthorg.engine.task_engine_config import TaskEngineConfig
 from synthorg.engine.workflow.config import WorkflowConfig
 from synthorg.hr.performance.config import PerformanceConfig
 from synthorg.hr.promotion.config import PromotionConfig
+from synthorg.integrations.config import IntegrationsConfig
 from synthorg.memory.config import CompanyMemoryConfig
 from synthorg.memory.org.config import OrgMemoryConfig
 from synthorg.notifications.config import NotificationConfig
 from synthorg.observability import get_logger
 from synthorg.observability.config import LogConfig  # noqa: TC001
-from synthorg.observability.events.config import CONFIG_VALIDATION_FAILED
+from synthorg.observability.events.config import (
+    CONFIG_DEPRECATION_NOTICE,
+    CONFIG_VALIDATION_FAILED,
+)
 from synthorg.ontology.config import OntologyConfig
 from synthorg.persistence.config import PersistenceConfig
 from synthorg.providers.enums import AuthType
@@ -140,7 +144,9 @@ class ProviderConfig(BaseModel):
             of the provider name as the model prefix for LiteLLM routing.
             Falls back to the provider name when ``None``.
         auth_type: Authentication type for this provider.
-        api_key: API key (typically injected by secret management).
+        connection_name: Reference to a ConnectionCatalog entry for
+            credential resolution.  Preferred over embedded api_key.
+        api_key: API key (prefer connection_name for new configs).
         subscription_token: Bearer token for subscription-based auth
             (e.g. provider subscription plans).  Encrypted at rest.
         tos_accepted_at: Timestamp when the user accepted the subscription
@@ -190,10 +196,18 @@ class ProviderConfig(BaseModel):
         default=AuthType.API_KEY,
         description="Authentication type",
     )
+    connection_name: NotBlankStr | None = Field(
+        default=None,
+        description=(
+            "Reference to a ConnectionCatalog entry.  When set, "
+            "credentials are resolved from the catalog at runtime "
+            "instead of using embedded api_key / oauth fields."
+        ),
+    )
     api_key: NotBlankStr | None = Field(
         default=None,
         repr=False,
-        description="API key",
+        description="API key (prefer connection_name for new configs)",
     )
     subscription_token: NotBlankStr | None = Field(
         default=None,
@@ -278,7 +292,17 @@ class ProviderConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_auth_fields(self) -> Self:
-        """Validate auth fields based on auth_type."""
+        """Validate auth fields based on auth_type.
+
+        When ``connection_name`` is set, the provider resolves
+        credentials from the ConnectionCatalog at runtime, so the
+        embedded auth fields (oauth_*, custom_header_*, subscription_*)
+        are not required on the config itself. Skip the check in that
+        case to let catalog-backed providers use OAuth / custom header
+        / subscription grants without duplicating secrets in YAML.
+        """
+        if self.connection_name is not None:
+            return self
         required = self._AUTH_REQUIRED_FIELDS.get(self.auth_type)
         if required is None:
             return self
@@ -292,6 +316,21 @@ class ProviderConfig(BaseModel):
                 error=msg,
             )
             raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _warn_embedded_api_key(self) -> Self:
+        """Log deprecation when api_key is used without connection_name."""
+        if self.api_key is not None and self.connection_name is None:
+            logger.debug(
+                CONFIG_DEPRECATION_NOTICE,
+                model="ProviderConfig",
+                field="api_key",
+                message=(
+                    "api_key without connection_name is deprecated; "
+                    "prefer connection_name for catalog-based resolution"
+                ),
+            )
         return self
 
     @model_validator(mode="after")
@@ -769,6 +808,10 @@ class RootConfig(BaseModel):
     notifications: NotificationConfig = Field(
         default_factory=NotificationConfig,
         description="Notification subsystem configuration",
+    )
+    integrations: IntegrationsConfig = Field(
+        default_factory=IntegrationsConfig,
+        description="External service integrations configuration",
     )
     ontology: OntologyConfig = Field(
         default_factory=OntologyConfig,

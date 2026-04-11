@@ -6,6 +6,7 @@ API.
 """
 
 import json
+import time
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
@@ -88,6 +89,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_CREDENTIAL_CACHE_TTL = 300.0
+"""Cached credentials from the connection catalog are refreshed at
+most every ``_CREDENTIAL_CACHE_TTL`` seconds. Prevents pinning stale
+OAuth/rotating tokens for the lifetime of the driver."""
+
 # ── Exception mapping table ──────────────────────────────────────
 
 _EXCEPTION_TABLE: tuple[tuple[type[Exception], type[errors.ProviderError]], ...] = (
@@ -127,6 +133,8 @@ class LiteLLMDriver(BaseCompletionProvider):
         self,
         provider_name: str,
         config: ProviderConfig,
+        *,
+        connection_catalog: Any | None = None,
     ) -> None:
         retry_handler = (
             RetryHandler(config.retry) if config.retry.max_retries > 0 else None
@@ -141,12 +149,57 @@ class LiteLLMDriver(BaseCompletionProvider):
         )
         self._provider_name = provider_name
         self._config = config
+        self._connection_catalog = connection_catalog
+        self._resolved_credentials: dict[str, str] | None = None
+        # Cached credentials expire after ``_CREDENTIAL_CACHE_TTL`` so
+        # rotating/OAuth tokens are re-fetched from the catalog
+        # periodically instead of being pinned for the lifetime of
+        # the driver. The TTL is intentionally coarse -- it is a safety
+        # net for rotation, not a token-refresh mechanism.
+        self._credentials_cached_at: float | None = None
         self._model_lookup: MappingProxyType[str, ProviderModelConfig] = (
             MappingProxyType(self._build_model_lookup(config.models))
         )
         self._routing_key = config.litellm_provider or provider_name
 
-    # ── Hook implementations ─────────────────────────────────────
+    async def _ensure_credentials_resolved(self) -> None:
+        """Resolve credentials from ConnectionCatalog if needed.
+
+        Caches the result on the driver instance with a bounded TTL
+        so rotating/OAuth tokens are picked up on a subsequent call
+        rather than pinned forever.
+        """
+        if self._config.connection_name is None or self._connection_catalog is None:
+            return
+        from synthorg.observability.events.integrations import (  # noqa: PLC0415
+            PROVIDER_CONNECTION_RESOLVED,
+        )
+
+        now = time.monotonic()
+        # Never serve cached OAuth credentials -- the token manager
+        # can rotate them at any moment and a stale bearer token
+        # would just fail auth on the next request with no way for
+        # the driver to recover. Always go back to the catalog and
+        # pick up the current access token.
+        if self._config.auth_type is not AuthType.OAUTH and (
+            self._resolved_credentials is not None
+            and self._credentials_cached_at is not None
+            and (now - self._credentials_cached_at) < _CREDENTIAL_CACHE_TTL
+        ):
+            return
+
+        creds = await self._connection_catalog.get_credentials(
+            self._config.connection_name,
+        )
+        # Snapshot so the caller's view is insulated from any
+        # subsequent mutation in the catalog layer.
+        self._resolved_credentials = dict(creds)
+        self._credentials_cached_at = now
+        logger.info(
+            PROVIDER_CONNECTION_RESOLVED,
+            provider=self._provider_name,
+            connection_name=self._config.connection_name,
+        )
 
     async def _do_complete(
         self,
@@ -157,23 +210,22 @@ class LiteLLMDriver(BaseCompletionProvider):
         config: CompletionConfig | None = None,
     ) -> CompletionResponse:
         """Call ``litellm.acompletion`` and map the response."""
-        model_config = self._resolve_model(model)
-        litellm_model = f"{self._routing_key}/{model_config.id}"
-        kwargs = self._build_kwargs(
-            messages,
-            litellm_model,
-            tools=tools,
-            config=config,
-        )
-
         try:
+            await self._ensure_credentials_resolved()
+            model_config = self._resolve_model(model)
+            litellm_model = f"{self._routing_key}/{model_config.id}"
+            kwargs = self._build_kwargs(
+                messages,
+                litellm_model,
+                tools=tools,
+                config=config,
+            )
             response = await _litellm.acompletion(**kwargs)
         except errors.ProviderError:
             raise
         except Exception as exc:
             raise self._map_exception(exc, model) from exc
-        else:
-            return self._map_response(response, model_config)
+        return self._map_response(response, model_config)
 
     async def _do_stream(
         self,
@@ -189,17 +241,17 @@ class LiteLLMDriver(BaseCompletionProvider):
         directly) because the base class ``await``s this coroutine to
         obtain the iterator.
         """
-        model_config = self._resolve_model(model)
-        litellm_model = f"{self._routing_key}/{model_config.id}"
-        kwargs = self._build_kwargs(
-            messages,
-            litellm_model,
-            tools=tools,
-            config=config,
-            stream=True,
-        )
-
         try:
+            await self._ensure_credentials_resolved()
+            model_config = self._resolve_model(model)
+            litellm_model = f"{self._routing_key}/{model_config.id}"
+            kwargs = self._build_kwargs(
+                messages,
+                litellm_model,
+                tools=tools,
+                config=config,
+                stream=True,
+            )
             raw_stream = await _litellm.acompletion(**kwargs)
             return self._wrap_stream(raw_stream, model, model_config)
         except errors.ProviderError:
@@ -313,7 +365,7 @@ class LiteLLMDriver(BaseCompletionProvider):
 
     # ── Request building ─────────────────────────────────────────
 
-    def _build_kwargs(  # noqa: C901
+    def _build_kwargs(  # noqa: C901, PLR0912
         self,
         messages: list[ChatMessage],
         litellm_model: str,
@@ -333,30 +385,53 @@ class LiteLLMDriver(BaseCompletionProvider):
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}
 
+        resolved = self._resolved_credentials
         match self._config.auth_type:
             case AuthType.API_KEY:
-                if self._config.api_key is not None:
-                    kwargs["api_key"] = self._config.api_key
+                key = resolved.get("api_key") if resolved else None
+                if key is None:
+                    key = self._config.api_key
+                if key is not None:
+                    kwargs["api_key"] = key
             case AuthType.OAUTH:
-                # MVP: OAuth credentials stored; user provides
-                # pre-fetched token via api_key field. Full
-                # client_credentials token exchange is future work.
-                if self._config.api_key is not None:
-                    kwargs["api_key"] = self._config.api_key
+                # Catalog-backed OAuth stores the bearer under the
+                # ``access_token`` key (set by
+                # ``ConnectionCatalog.store_oauth_tokens``). Fall back
+                # to ``api_key`` (legacy embedded config) and finally
+                # to the static ``self._config.api_key``. Missing any
+                # of these means the request would go out
+                # unauthenticated, so we leave ``kwargs["api_key"]``
+                # unset only when nothing resolves.
+                key = None
+                if resolved:
+                    key = resolved.get("access_token") or resolved.get("api_key")
+                if key is None:
+                    key = self._config.api_key
+                if key is not None:
+                    kwargs["api_key"] = key
             case AuthType.CUSTOM_HEADER:
-                if self._config.custom_header_name and self._config.custom_header_value:
-                    kwargs["extra_headers"] = {
-                        self._config.custom_header_name: (
-                            self._config.custom_header_value
-                        ),
-                    }
+                # Prefer catalog-resolved credentials so a
+                # ``connection_name`` provider can ship the header
+                # without duplicating it in config. Fall back to the
+                # embedded fields for the legacy, catalog-less path.
+                header_name = resolved.get("custom_header_name") if resolved else None
+                if header_name is None:
+                    header_name = self._config.custom_header_name
+                header_value = resolved.get("custom_header_value") if resolved else None
+                if header_value is None:
+                    header_value = self._config.custom_header_value
+                if header_name and header_value:
+                    kwargs["extra_headers"] = {header_name: header_value}
             case AuthType.SUBSCRIPTION:
                 # Pass as api_key -- the correct kwarg for LiteLLM
                 # authentication.  Do NOT use "auth_token" -- it is
                 # not a litellm.completion() parameter and is silently
                 # discarded.
-                if self._config.subscription_token is not None:
-                    kwargs["api_key"] = self._config.subscription_token
+                token = resolved.get("subscription_token") if resolved else None
+                if token is None:
+                    token = self._config.subscription_token
+                if token is not None:
+                    kwargs["api_key"] = token
             case AuthType.NONE:
                 pass
 

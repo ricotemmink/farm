@@ -1,0 +1,521 @@
+"""Connection catalog service.
+
+Central registry for external service connections.  Provides CRUD,
+lookup, credential resolution, and health status management.
+"""
+
+import asyncio
+import copy
+import json
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from synthorg.core.types import NotBlankStr
+from synthorg.integrations.connections.models import (
+    AuthMethod,
+    Connection,
+    ConnectionStatus,
+    ConnectionType,
+    SecretRef,
+)
+from synthorg.integrations.connections.secret_backends.protocol import (
+    SecretBackend,  # noqa: TC001
+)
+from synthorg.integrations.connections.types import get_authenticator
+from synthorg.integrations.errors import (
+    ConnectionNotFoundError,
+    DuplicateConnectionError,
+    InvalidConnectionAuthError,
+    SecretRetrievalError,
+)
+from synthorg.observability import get_logger
+from synthorg.observability.events.integrations import (
+    CONNECTION_CREATED,
+    CONNECTION_DELETED,
+    CONNECTION_DUPLICATE,
+    CONNECTION_NOT_FOUND,
+    CONNECTION_UPDATED,
+    CONNECTION_VALIDATION_FAILED,
+    OAUTH_TOKEN_EXCHANGED,
+    SECRET_RETRIEVAL_FAILED,
+)
+from synthorg.persistence.repositories_integrations import (
+    ConnectionRepository,  # noqa: TC001
+)
+
+logger = get_logger(__name__)
+
+_UNSET = object()
+"""Sentinel value to distinguish 'not provided' from None."""
+
+
+class ConnectionCatalog:
+    """Central registry for external service connections.
+
+    Thread-safe via ``asyncio.Lock`` for cache invalidation.
+    All writes go through the persistence layer; reads use an
+    in-memory cache that is invalidated on mutation.
+
+    Args:
+        repository: Persistence repository for connections.
+        secret_backend: Backend for credential storage.
+    """
+
+    def __init__(
+        self,
+        repository: ConnectionRepository,
+        secret_backend: SecretBackend,
+    ) -> None:
+        self._repo = repository
+        self._secret_backend = secret_backend
+        self._cache: dict[str, Connection] = {}
+        self._cache_lock = asyncio.Lock()
+        self._cache_valid = False
+        # Per-name mutation lock used to serialize create/update/
+        # delete/rotate for a given connection. Prevents races that
+        # would otherwise leave orphaned secrets or repo rows.
+        self._name_locks: dict[str, asyncio.Lock] = {}
+        self._name_locks_lock = asyncio.Lock()
+
+    async def _ensure_cache(self) -> None:
+        """Populate the cache from persistence if invalid."""
+        if self._cache_valid:
+            return
+        async with self._cache_lock:
+            # Re-check under lock (double-checked locking)
+            if not self._cache_valid:
+                all_conns = await self._repo.list_all()
+                self._cache = {c.name: c for c in all_conns}
+                self._cache_valid = True
+
+    def _invalidate_cache(self) -> None:
+        self._cache_valid = False
+
+    async def _lock_for(self, name: str) -> asyncio.Lock:
+        """Return (or create) the mutation lock for a connection name."""
+        async with self._name_locks_lock:
+            lock = self._name_locks.get(name)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._name_locks[name] = lock
+            return lock
+
+    async def create(  # noqa: PLR0913
+        self,
+        *,
+        name: str,
+        connection_type: ConnectionType,
+        auth_method: str,
+        credentials: dict[str, str],
+        base_url: str | None = None,
+        metadata: dict[str, str] | None = None,
+        health_check_enabled: bool = True,
+    ) -> Connection:
+        """Create a new connection.
+
+        Validates credentials via the type's authenticator, encrypts
+        them via the secret backend, and persists the connection.
+
+        Args:
+            name: Unique connection name.
+            connection_type: Service type.
+            auth_method: How credentials are provided.
+            credentials: Plaintext credentials (encrypted before storage).
+            base_url: Optional base URL.
+            metadata: Optional user tags.
+            health_check_enabled: Whether to probe health.
+
+        Returns:
+            The persisted connection.
+
+        Raises:
+            DuplicateConnectionError: If name already exists.
+            InvalidConnectionAuthError: If credentials are invalid.
+        """
+        lock = await self._lock_for(name)
+        async with lock:
+            await self._ensure_cache()
+            if name in self._cache:
+                logger.warning(
+                    CONNECTION_DUPLICATE,
+                    connection_name=name,
+                )
+                msg = f"Connection '{name}' already exists"
+                raise DuplicateConnectionError(msg)
+
+            authenticator = get_authenticator(connection_type)
+            try:
+                authenticator.validate_credentials(credentials)
+            except InvalidConnectionAuthError:
+                logger.warning(
+                    CONNECTION_VALIDATION_FAILED,
+                    connection_name=name,
+                    connection_type=connection_type,
+                )
+                raise
+
+            # Build and validate the ``Connection`` model BEFORE
+            # writing to the secret backend. If the model raises
+            # (e.g. ``NotBlankStr`` rejects a value, or ``AuthMethod``
+            # rejects the auth_method string), we would otherwise
+            # leave an orphaned secret behind with no row to clean
+            # it up from.
+            secret_id = str(uuid4())
+            secret_ref = SecretRef(
+                secret_id=NotBlankStr(secret_id),
+                backend=NotBlankStr(self._secret_backend.backend_name),
+            )
+            now = datetime.now(UTC)
+            connection = Connection(
+                name=NotBlankStr(name),
+                connection_type=connection_type,
+                auth_method=AuthMethod(auth_method),
+                base_url=NotBlankStr(base_url) if base_url else None,
+                secret_refs=(secret_ref,),
+                health_check_enabled=health_check_enabled,
+                metadata=metadata or {},
+                created_at=now,
+                updated_at=now,
+            )
+
+            await self._secret_backend.store(
+                secret_id,
+                json.dumps(credentials).encode("utf-8"),
+            )
+            try:
+                await self._repo.save(connection)
+            except Exception:
+                # Compensating cleanup: secret was already stored.
+                logger.exception(
+                    CONNECTION_CREATED,
+                    connection_name=name,
+                    error="repo save failed, deleting orphaned secret",
+                )
+                try:
+                    await self._secret_backend.delete(secret_id)
+                except Exception as cleanup_exc:
+                    logger.exception(
+                        CONNECTION_CREATED,
+                        connection_name=name,
+                        secret_id=secret_id,
+                        error=(
+                            "rollback delete failed; manual cleanup "
+                            "required for orphaned secret"
+                        ),
+                        cleanup_exception=str(cleanup_exc),
+                    )
+                raise
+            self._invalidate_cache()
+            logger.info(
+                CONNECTION_CREATED,
+                connection_name=name,
+                connection_type=connection_type,
+            )
+            return connection
+
+    async def get(self, name: str) -> Connection | None:
+        """Retrieve a connection by name."""
+        await self._ensure_cache()
+        return self._cache.get(name)
+
+    async def get_or_raise(self, name: str) -> Connection:
+        """Retrieve a connection by name, or raise.
+
+        Raises:
+            ConnectionNotFoundError: If the connection does not exist.
+        """
+        conn = await self.get(name)
+        if conn is None:
+            logger.warning(CONNECTION_NOT_FOUND, connection_name=name)
+            msg = f"Connection '{name}' not found"
+            raise ConnectionNotFoundError(msg)
+        return conn
+
+    async def list_all(self) -> tuple[Connection, ...]:
+        """List all connections."""
+        await self._ensure_cache()
+        return tuple(self._cache.values())
+
+    async def list_by_type(
+        self,
+        connection_type: ConnectionType,
+    ) -> tuple[Connection, ...]:
+        """List connections of a specific type."""
+        await self._ensure_cache()
+        return tuple(
+            c for c in self._cache.values() if c.connection_type == connection_type
+        )
+
+    async def update(
+        self,
+        name: str,
+        *,
+        base_url: str | None | object = _UNSET,
+        metadata: dict[str, str] | None = None,
+        health_check_enabled: bool | None = None,
+    ) -> Connection:
+        """Update a connection's mutable fields.
+
+        Raises:
+            ConnectionNotFoundError: If the connection does not exist.
+        """
+        lock = await self._lock_for(name)
+        async with lock:
+            existing = await self.get_or_raise(name)
+            updates: dict[str, object] = {"updated_at": datetime.now(UTC)}
+            if base_url is not _UNSET:
+                updates["base_url"] = NotBlankStr(base_url) if base_url else None
+            if metadata is not None:
+                updates["metadata"] = metadata
+            if health_check_enabled is not None:
+                updates["health_check_enabled"] = health_check_enabled
+            updated = existing.model_copy(update=updates)
+            await self._repo.save(updated)
+            self._invalidate_cache()
+            logger.info(CONNECTION_UPDATED, connection_name=name)
+            return updated
+
+    async def update_health(
+        self,
+        name: str,
+        *,
+        status: ConnectionStatus,
+        checked_at: datetime,
+    ) -> Connection:
+        """Update a connection's health status.
+
+        Raises:
+            ConnectionNotFoundError: If the connection does not exist.
+        """
+        lock = await self._lock_for(name)
+        async with lock:
+            existing = await self.get_or_raise(name)
+            updated = existing.model_copy(
+                update={
+                    "health_status": status,
+                    "last_health_check_at": checked_at,
+                    "updated_at": datetime.now(UTC),
+                },
+            )
+            await self._repo.save(updated)
+            self._invalidate_cache()
+            return updated
+
+    async def delete(self, name: str) -> None:
+        """Delete a connection and its secrets.
+
+        The repo row is removed first; secrets are only deleted
+        after the repo deletion succeeds, so a failure during
+        secret cleanup leaves the row already removed (and the
+        orphaned secret is logged for follow-up).
+
+        Raises:
+            ConnectionNotFoundError: If the connection does not exist.
+        """
+        lock = await self._lock_for(name)
+        async with lock:
+            existing = await self.get_or_raise(name)
+            await self._repo.delete(name)
+            for ref in existing.secret_refs:
+                try:
+                    await self._secret_backend.delete(ref.secret_id)
+                except Exception:
+                    logger.exception(
+                        CONNECTION_DELETED,
+                        connection_name=name,
+                        secret_id=ref.secret_id,
+                        error="secret delete failed after repo delete",
+                    )
+            self._invalidate_cache()
+            logger.info(CONNECTION_DELETED, connection_name=name)
+
+    async def get_credentials(self, name: str) -> dict[str, str]:
+        """Retrieve decrypted credentials for a connection.
+
+        Resolves all ``SecretRef`` entries and returns the merged
+        credential dict.
+
+        Raises:
+            ConnectionNotFoundError: If the connection does not exist.
+            SecretRetrievalError: If a referenced secret is missing
+                or cannot be decoded.
+        """
+        conn = await self.get_or_raise(name)
+        return await self._resolve_credentials_for(conn)
+
+    async def _resolve_credentials_for(
+        self,
+        conn: Connection,
+    ) -> dict[str, str]:
+        """Decrypt and merge credentials for a pre-loaded ``Connection``.
+
+        Extracted from :meth:`get_credentials` so callers that have
+        already loaded the connection under a lock can reuse the
+        merge logic without hitting the cache a second time.
+        """
+        name = conn.name
+        merged: dict[str, str] = {}
+        for ref in conn.secret_refs:
+            raw = await self._secret_backend.retrieve(ref.secret_id)
+            if raw is None:
+                logger.warning(
+                    SECRET_RETRIEVAL_FAILED,
+                    connection_name=name,
+                    secret_id=ref.secret_id,
+                    error="secret not found",
+                )
+                msg = (
+                    f"Secret '{ref.secret_id}' for connection "
+                    f"'{name}' not found in backend"
+                )
+                raise SecretRetrievalError(msg)
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                logger.warning(
+                    SECRET_RETRIEVAL_FAILED,
+                    connection_name=name,
+                    secret_id=ref.secret_id,
+                    error=f"malformed secret: {exc}",
+                )
+                msg = f"Secret '{ref.secret_id}' for connection '{name}' is malformed"
+                raise SecretRetrievalError(msg) from exc
+            if not isinstance(data, dict):
+                logger.warning(
+                    SECRET_RETRIEVAL_FAILED,
+                    connection_name=name,
+                    secret_id=ref.secret_id,
+                    error="secret payload is not a dict",
+                )
+                msg = (
+                    f"Secret '{ref.secret_id}' for connection "
+                    f"'{name}' is not a credential dict"
+                )
+                raise SecretRetrievalError(msg)
+            if not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in data.items()
+            ):
+                logger.warning(
+                    SECRET_RETRIEVAL_FAILED,
+                    connection_name=name,
+                    secret_id=ref.secret_id,
+                    error="secret payload contains non-string entries",
+                )
+                msg = (
+                    f"Secret '{ref.secret_id}' for connection "
+                    f"'{name}' contains non-string credential entries"
+                )
+                raise SecretRetrievalError(msg)
+            merged.update(data)
+        return copy.deepcopy(merged)
+
+    async def store_oauth_tokens(
+        self,
+        name: str,
+        *,
+        access_token: str,
+        refresh_token: str | None = None,
+    ) -> Connection:
+        """Persist OAuth access/refresh tokens via the secret backend.
+
+        Merges the tokens into the connection's existing credential
+        blob (so token_url, client_id, client_secret etc. remain
+        available) and collapses ``secret_refs`` to a single fresh
+        ``SecretRef`` pointing at the merged payload. Any
+        previously-referenced secrets are deleted from the backend
+        so ``get_credentials`` cannot reintroduce stale keys on
+        the next resolve.
+
+        Raises:
+            ConnectionNotFoundError: If the connection does not exist.
+        """
+        lock = await self._lock_for(name)
+        async with lock:
+            # Load the connection once and share it across the
+            # credential merge + persist paths. The previous
+            # implementation called ``get_credentials`` (which
+            # itself loads the connection) followed by
+            # ``get_or_raise``, performing two redundant cache hits
+            # plus the secret-backend lookup under the same lock.
+            conn = await self.get_or_raise(name)
+            existing = await self._resolve_credentials_for(conn)
+            merged = dict(existing)
+            merged["access_token"] = access_token
+            if refresh_token is not None:
+                merged["refresh_token"] = refresh_token
+
+            # Always write a single merged secret (new id) and
+            # replace ``secret_refs`` with exactly that one ref.
+            # Writing back into an existing ref would leave any
+            # sibling refs pointing at stale credential slices,
+            # and ``get_credentials`` merges them in order so the
+            # old values could shadow the fresh token on the next
+            # resolve.
+            new_secret_id = str(uuid4())
+            await self._secret_backend.store(
+                new_secret_id,
+                json.dumps(merged).encode("utf-8"),
+            )
+            old_refs = conn.secret_refs
+            ref = SecretRef(
+                secret_id=NotBlankStr(new_secret_id),
+                backend=NotBlankStr(self._secret_backend.backend_name),
+            )
+            updated = conn.model_copy(
+                update={
+                    "secret_refs": (ref,),
+                    "updated_at": datetime.now(UTC),
+                }
+            )
+            try:
+                await self._repo.save(updated)
+            except Exception:
+                # Compensating cleanup: delete the freshly-written
+                # secret so we do not leak a bearer token when the
+                # repo row could not record it.
+                logger.exception(
+                    OAUTH_TOKEN_EXCHANGED,
+                    connection_name=name,
+                    error=(
+                        "repo save failed; deleting orphaned OAuth "
+                        "secret to avoid leaking tokens"
+                    ),
+                )
+                try:
+                    await self._secret_backend.delete(new_secret_id)
+                except Exception as cleanup_exc:
+                    logger.exception(
+                        OAUTH_TOKEN_EXCHANGED,
+                        connection_name=name,
+                        secret_id=new_secret_id,
+                        error=(
+                            "rollback delete failed; manual cleanup "
+                            "required for orphaned OAuth secret"
+                        ),
+                        cleanup_exception=str(cleanup_exc),
+                    )
+                raise
+            # Repo save succeeded -- drop any previously-referenced
+            # secrets from the backend now that the canonical merged
+            # secret is persisted. Best effort: log failures but do
+            # not re-raise so one stale secret does not abort the
+            # whole rotation.
+            for old_ref in old_refs:
+                try:
+                    await self._secret_backend.delete(old_ref.secret_id)
+                except Exception as del_exc:
+                    logger.warning(
+                        OAUTH_TOKEN_EXCHANGED,
+                        connection_name=name,
+                        secret_id=old_ref.secret_id,
+                        error="failed to delete stale secret after rotation",
+                        cleanup_exception=str(del_exc),
+                    )
+            self._invalidate_cache()
+            logger.info(
+                OAUTH_TOKEN_EXCHANGED,
+                connection_name=name,
+                has_refresh=refresh_token is not None,
+            )
+            return updated

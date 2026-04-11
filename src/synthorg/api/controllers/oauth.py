@@ -1,0 +1,205 @@
+"""OAuth API controller.
+
+Endpoints for initiating OAuth flows, handling callbacks,
+and checking token status.
+"""
+
+from typing import Any
+
+from litestar import Controller, get, post
+from litestar.datastructures import State  # noqa: TC002
+from litestar.params import Parameter
+
+from synthorg.api.dto import ApiResponse
+from synthorg.api.errors import ApiValidationError, NotFoundError
+from synthorg.api.guards import require_read_access, require_write_access
+from synthorg.integrations.errors import (
+    ConnectionNotFoundError,
+    InvalidStateError,
+    TokenExchangeFailedError,
+)
+from synthorg.integrations.oauth.flows.authorization_code import (
+    AuthorizationCodeFlow,
+)
+from synthorg.observability import get_logger
+from synthorg.observability.events.integrations import SECRET_RETRIEVAL_FAILED
+
+logger = get_logger(__name__)
+
+
+class OAuthController(Controller):
+    """OAuth flow management endpoints."""
+
+    path = "/api/v1/oauth"
+    tags = ["Integrations"]  # noqa: RUF012
+
+    @post(
+        "/initiate",
+        guards=[require_write_access],
+        summary="Start an OAuth flow",
+    )
+    async def initiate_flow(
+        self,
+        state: State,
+        data: dict[str, Any],
+    ) -> ApiResponse[dict[str, str]]:
+        """Initiate an OAuth authorization code flow.
+
+        Returns the authorization URL for the user to visit.
+        """
+        connection_name = data.get("connection_name")
+        if not isinstance(connection_name, str) or not connection_name.strip():
+            msg = "Field 'connection_name' is required"
+            raise ApiValidationError(msg)
+
+        scopes_raw = data.get("scopes", [])
+        if not isinstance(scopes_raw, list) or not all(
+            isinstance(s, str) for s in scopes_raw
+        ):
+            msg = "Field 'scopes' must be a list of strings"
+            raise ApiValidationError(msg)
+
+        catalog = state["app_state"].connection_catalog
+        try:
+            conn = await catalog.get_or_raise(connection_name)
+        except ConnectionNotFoundError as exc:
+            raise NotFoundError(str(exc)) from exc
+
+        credentials = await catalog.get_credentials(connection_name)
+
+        flow = AuthorizationCodeFlow()
+        config = state["app_state"].config.integrations.oauth
+        if not config.redirect_uri_base:
+            msg = "oauth.redirect_uri_base must be configured to initiate OAuth flows"
+            raise ApiValidationError(msg)
+
+        # Build the callback URL from the configured API prefix so
+        # deployments on a non-default prefix do not hand the OAuth
+        # provider a URL this app never actually serves.
+        api_prefix = state["app_state"].config.api.api_prefix
+        redirect_uri = (
+            config.redirect_uri_base.rstrip("/")
+            + "/"
+            + api_prefix.strip("/")
+            + "/oauth/callback"
+        )
+
+        auth_url, oauth_state = await flow.start_flow(
+            auth_url=credentials.get("auth_url", ""),
+            token_url=credentials.get("token_url", ""),
+            client_id=credentials.get("client_id", ""),
+            client_secret=credentials.get("client_secret", ""),
+            scopes=tuple(scopes_raw),
+            redirect_uri=redirect_uri,
+        )
+
+        # Persist the OAuth state
+        updated_state = oauth_state.model_copy(
+            update={"connection_name": conn.name},
+        )
+        persistence = state["app_state"].persistence
+        await persistence.oauth_states.save(updated_state)
+
+        return ApiResponse(
+            data={
+                "authorization_url": auth_url,
+                "state_token": updated_state.state_token,
+            },
+        )
+
+    @get(
+        "/callback",
+        summary="OAuth callback",
+    )
+    async def callback(
+        self,
+        state: State,
+        code: str = Parameter(description="Authorization code"),
+        state_param: str = Parameter(
+            query="state",
+            description="OAuth state token",
+        ),
+    ) -> ApiResponse[dict[str, Any]]:
+        """Handle OAuth provider callback.
+
+        The callback URL itself is unauthenticated because the
+        external OAuth provider cannot carry a session cookie,
+        but the state token is validated inside the handler and
+        acts as CSRF protection.
+        """
+        from synthorg.integrations.oauth.callback_handler import (  # noqa: PLC0415
+            handle_oauth_callback,
+        )
+
+        persistence = state["app_state"].persistence
+        catalog = state["app_state"].connection_catalog
+
+        try:
+            connection_name = await handle_oauth_callback(
+                state_param=state_param,
+                code=code,
+                state_repo=persistence.oauth_states,
+                catalog=catalog,
+            )
+        except InvalidStateError as exc:
+            raise ApiValidationError(str(exc)) from exc
+        except TokenExchangeFailedError as exc:
+            raise ApiValidationError(str(exc)) from exc
+        return ApiResponse(
+            data={
+                "status": "connected",
+                "connection_name": connection_name,
+            },
+        )
+
+    @get(
+        "/status/{connection_name:str}",
+        guards=[require_read_access],
+        summary="Check OAuth token status",
+    )
+    async def token_status(
+        self,
+        state: State,
+        connection_name: str,
+    ) -> ApiResponse[dict[str, Any]]:
+        """Check the OAuth token status for a connection."""
+        catalog = state["app_state"].connection_catalog
+        try:
+            conn = await catalog.get_or_raise(connection_name)
+        except ConnectionNotFoundError as exc:
+            raise NotFoundError(str(exc)) from exc
+
+        # ``has_token`` is true only when the OAuth exchange has
+        # actually completed -- derive it from the token expiry
+        # metadata, not from the presence of any stored secret
+        # (which would be true for a connection that only has
+        # client_id/client_secret but no user token yet).
+        expires_at = conn.metadata.get("token_expires_at")
+        # Check the credential blob for a stored access_token as
+        # a secondary signal (e.g. non-expiring client credentials).
+        # ``has_token=None`` signals a secret-store outage -- distinct
+        # from ``False`` (user never connected) so the UI can render a
+        # "backend unavailable" state instead of prompting a reconnect.
+        has_access_token: bool | None = False
+        try:
+            credentials = await catalog.get_credentials(connection_name)
+            has_access_token = bool(credentials.get("access_token"))
+        except Exception:
+            logger.warning(
+                SECRET_RETRIEVAL_FAILED,
+                connection_name=connection_name,
+                error="credential lookup failed in /status",
+                exc_info=True,
+            )
+            has_access_token = None
+        if has_access_token is None:
+            has_token: bool | None = None
+        else:
+            has_token = bool(expires_at) or has_access_token
+        return ApiResponse(
+            data={
+                "connection_name": connection_name,
+                "has_token": has_token,
+                "token_expires_at": expires_at,
+            },
+        )

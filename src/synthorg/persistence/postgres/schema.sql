@@ -797,3 +797,75 @@ CREATE INDEX idx_edv_entity_saved
     ON entity_definition_versions(entity_id, saved_at DESC);
 CREATE INDEX idx_edv_content_hash
     ON entity_definition_versions(entity_id, content_hash);
+
+-- ── Connection secrets ───────────────────────────────────────
+CREATE TABLE connection_secrets (
+    secret_id TEXT NOT NULL PRIMARY KEY CHECK (length(secret_id) > 0),
+    encrypted_value BYTEA NOT NULL,
+    key_version INTEGER NOT NULL DEFAULT 1 CHECK (key_version >= 1),
+    created_at TIMESTAMPTZ NOT NULL,
+    rotated_at TIMESTAMPTZ
+);
+
+-- ── Connections ──────────────────────────────────────────────
+CREATE TABLE connections (
+    name TEXT NOT NULL PRIMARY KEY CHECK (length(name) > 0),
+    connection_type TEXT NOT NULL CHECK (
+        connection_type IN (
+            'github', 'slack', 'smtp', 'database',
+            'generic_http', 'oauth_app'
+        )
+    ),
+    auth_method TEXT NOT NULL CHECK (
+        auth_method IN (
+            'api_key', 'oauth2', 'basic_auth',
+            'bearer_token', 'custom'
+        )
+    ),
+    base_url TEXT,
+    secret_refs_json JSONB NOT NULL DEFAULT '[]',
+    rate_limit_rpm INTEGER NOT NULL DEFAULT 0
+        CHECK (rate_limit_rpm >= 0),
+    rate_limit_concurrent INTEGER NOT NULL DEFAULT 0
+        CHECK (rate_limit_concurrent >= 0),
+    health_check_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    health_status TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (
+            health_status IN ('healthy', 'degraded', 'unhealthy', 'unknown')
+        ),
+    last_health_check_at TIMESTAMPTZ,
+    metadata_json JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX idx_connections_type ON connections(connection_type);
+
+-- ── OAuth states ─────────────────────────────────────────────
+CREATE TABLE oauth_states (
+    state_token TEXT NOT NULL PRIMARY KEY,
+    connection_name TEXT NOT NULL REFERENCES connections(name) ON DELETE CASCADE,
+    pkce_verifier TEXT,
+    scopes_requested TEXT NOT NULL DEFAULT '',
+    redirect_uri TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX idx_oauth_states_expires ON oauth_states(expires_at);
+CREATE INDEX idx_oauth_states_connection ON oauth_states(connection_name);
+
+-- ── Webhook receipts ─────────────────────────────────────────
+CREATE TABLE webhook_receipts (
+    id TEXT NOT NULL PRIMARY KEY,
+    connection_name TEXT NOT NULL REFERENCES connections(name) ON DELETE CASCADE,
+    event_type TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'received',
+    received_at TIMESTAMPTZ NOT NULL,
+    processed_at TIMESTAMPTZ,
+    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    error TEXT
+);
+
+CREATE INDEX idx_webhook_receipts_conn_received
+    ON webhook_receipts(connection_name, received_at DESC);

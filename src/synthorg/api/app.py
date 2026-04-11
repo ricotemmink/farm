@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Any
 
-from litestar import Litestar, Request, Router
+from litestar import Controller, Litestar, Request, Router
 from litestar.config.compression import CompressionConfig
 from litestar.config.cors import CORSConfig
 from litestar.datastructures import State
@@ -47,7 +47,7 @@ from synthorg.api.channels import (
     CHANNEL_MEETINGS,
     create_channels_plugin,
 )
-from synthorg.api.controllers import ALL_CONTROLLERS
+from synthorg.api.controllers import BASE_CONTROLLERS
 from synthorg.api.controllers.ws import ws_handler
 from synthorg.api.exception_handlers import EXCEPTION_HANDLERS
 from synthorg.api.lifecycle import (
@@ -98,6 +98,7 @@ from synthorg.observability.events.api import (
     API_APPROVAL_PUBLISH_FAILED,
     API_AUTH_LOCKOUT_CLEANUP,
     API_NETWORK_EXPOSURE_WARNING,
+    API_SERVICE_AUTO_WIRED,
     API_SESSION_CLEANUP,
     API_WS_SEND_FAILED,
     API_WS_TICKET_CLEANUP,
@@ -523,7 +524,7 @@ def _build_lifecycle(  # noqa: PLR0913, PLR0915, C901
                 exc_info=exc,
             )
 
-    async def on_startup() -> None:
+    async def on_startup() -> None:  # noqa: C901, PLR0912, PLR0915
         nonlocal _ticket_cleanup_task, _auto_wired_dispatcher, _health_prober
         logger.info(API_APP_STARTUP, version=__version__)
         await _safe_startup(
@@ -618,6 +619,41 @@ def _build_lifecycle(  # noqa: PLR0913, PLR0915, C901
         _ticket_cleanup_task.add_done_callback(_on_cleanup_task_done)
         _health_prober = await _maybe_start_health_prober(app_state)
 
+        # Start integration background services (non-fatal).
+        if app_state.webhook_event_bridge is not None:
+            try:
+                await app_state.webhook_event_bridge.start()
+            except MemoryError, RecursionError:
+                raise
+            except Exception:
+                logger.warning(
+                    API_APP_STARTUP,
+                    error="Webhook event bridge startup failed (non-fatal)",
+                    exc_info=True,
+                )
+        if app_state.health_prober_service is not None:
+            try:
+                await app_state.health_prober_service.start()
+            except MemoryError, RecursionError:
+                raise
+            except Exception:
+                logger.warning(
+                    API_APP_STARTUP,
+                    error="Integration health prober startup failed (non-fatal)",
+                    exc_info=True,
+                )
+        if app_state.oauth_token_manager is not None:
+            try:
+                await app_state.oauth_token_manager.start()
+            except MemoryError, RecursionError:
+                raise
+            except Exception:
+                logger.warning(
+                    API_APP_STARTUP,
+                    error="OAuth token manager startup failed (non-fatal)",
+                    exc_info=True,
+                )
+
     async def on_shutdown() -> None:
         nonlocal _ticket_cleanup_task, _auto_wired_dispatcher, _health_prober
         if _ticket_cleanup_task is not None:
@@ -633,6 +669,48 @@ def _build_lifecycle(  # noqa: PLR0913, PLR0915, C901
                 "Failed to stop health prober",
             )
             _health_prober = None
+        # Stop integration background services (reverse start order).
+        if app_state.oauth_token_manager is not None:
+            await _try_stop(
+                app_state.oauth_token_manager.stop(),
+                API_APP_SHUTDOWN,
+                "Failed to stop OAuth token manager",
+            )
+        if app_state.health_prober_service is not None:
+            await _try_stop(
+                app_state.health_prober_service.stop(),
+                API_APP_SHUTDOWN,
+                "Failed to stop integration health prober",
+            )
+        if app_state.webhook_event_bridge is not None:
+            await _try_stop(
+                app_state.webhook_event_bridge.stop(),
+                API_APP_SHUTDOWN,
+                "Failed to stop webhook event bridge",
+            )
+        if app_state.has_tunnel_provider:
+            await _try_stop(
+                app_state.tunnel_provider.stop(),
+                API_APP_SHUTDOWN,
+                "Failed to stop tunnel provider",
+            )
+        # Stop every cached rate-limit coordinator and clear the
+        # module-level factory so background poll tasks and bus
+        # subscriptions cannot outlive the app (matters for
+        # hot-reload / test teardown where ``create_app`` runs
+        # multiple times in the same process).
+        try:
+            from synthorg.integrations.rate_limiting import (  # noqa: PLC0415
+                shared_state as _rate_limit_shared_state,
+            )
+
+            await _rate_limit_shared_state.set_coordinator_factory(None)
+        except Exception:
+            logger.warning(
+                API_APP_SHUTDOWN,
+                error="Failed to stop rate-limit coordinators",
+                exc_info=True,
+            )
         if _auto_wired_dispatcher is not None:
             await _try_stop(
                 _auto_wired_dispatcher.stop(),
@@ -843,7 +921,7 @@ def _build_performance_tracker(
     )
 
 
-def create_app(  # noqa: C901, PLR0913, PLR0915
+def create_app(  # noqa: C901, PLR0912, PLR0913, PLR0915
     *,
     config: RootConfig | None = None,
     persistence: PersistenceBackend | None = None,
@@ -1012,6 +1090,182 @@ def create_app(  # noqa: C901, PLR0913, PLR0915
         effective_config.notifications,
     )
 
+    # -- Integration services auto-wire ──────────────────────────────────
+    connection_catalog = None
+    oauth_token_manager = None
+    health_prober_service = None
+    tunnel_provider = None
+    webhook_event_bridge = None
+    mcp_catalog_service = None
+
+    # Bundled MCP catalog is stateless (loads static JSON) and has no
+    # runtime dependencies, so it is wired unconditionally.
+    try:
+        from synthorg.integrations.mcp_catalog.service import (  # noqa: PLC0415
+            CatalogService,
+        )
+
+        mcp_catalog_service = CatalogService()
+        logger.info(API_SERVICE_AUTO_WIRED, service="mcp_catalog_service")
+    except MemoryError, RecursionError:
+        raise
+    except Exception:
+        logger.warning(
+            API_APP_STARTUP,
+            error="MCP catalog auto-wire failed (non-fatal)",
+            exc_info=True,
+        )
+
+    if effective_config.integrations.enabled and persistence is not None:
+        try:
+            from synthorg.integrations.connections.catalog import (  # noqa: PLC0415
+                ConnectionCatalog,
+            )
+            from synthorg.integrations.connections.secret_backends.factory import (  # noqa: PLC0415
+                create_secret_backend,
+            )
+            from synthorg.integrations.health.prober import (  # noqa: PLC0415
+                HealthProberService,
+                bind_health_check_catalog,
+            )
+            from synthorg.integrations.oauth.token_manager import (  # noqa: PLC0415
+                OAuthTokenManager,
+            )
+            from synthorg.integrations.tunnel.ngrok_adapter import (  # noqa: PLC0415
+                NgrokAdapter,
+            )
+
+            # Prefer the active SQLite persistence path so the
+            # encrypted_sqlite secret backend lands in the same DB
+            # file as ``connections`` -- otherwise a diverging
+            # SYNTHORG_DB_PATH can orphan connection_secrets in a
+            # separate file or fail outright.
+            #
+            # Resolution order:
+            #   1. ``resolved_db_path`` -- populated when persistence
+            #      was auto-wired from ``SYNTHORG_DB_PATH``.
+            #   2. Injected persistence's SQLite config path --
+            #      picked up when ``create_app()`` was handed an
+            #      already-built ``SQLitePersistenceBackend``.
+            #   3. ``SYNTHORG_DB_PATH`` env var as a last resort.
+            secret_db_path: str | None
+            if resolved_db_path is not None:
+                secret_db_path = str(resolved_db_path)
+            else:
+                secret_db_path = None
+                injected_cfg = getattr(persistence, "_config", None)
+                injected_path = getattr(injected_cfg, "path", None)
+                if (
+                    isinstance(injected_path, str)
+                    and injected_path
+                    and injected_path != ":memory:"
+                ):
+                    secret_db_path = injected_path
+                else:
+                    env_db_path = (os.environ.get("SYNTHORG_DB_PATH") or "").strip()
+                    secret_db_path = env_db_path or None
+            secret_backend = create_secret_backend(
+                effective_config.integrations.secret_backend,
+                db_path=secret_db_path,
+            )
+            connection_catalog = ConnectionCatalog(
+                repository=persistence.connections,
+                secret_backend=secret_backend,
+            )
+            bind_health_check_catalog(connection_catalog)
+            logger.info(API_SERVICE_AUTO_WIRED, service="connection_catalog")
+
+            health_cfg = effective_config.integrations.health
+            health_prober_service = HealthProberService(
+                catalog=connection_catalog,
+                interval_seconds=health_cfg.check_interval_seconds,
+                unhealthy_threshold=health_cfg.unhealthy_threshold,
+            )
+            logger.info(API_SERVICE_AUTO_WIRED, service="health_prober_service")
+
+            oauth_token_manager = OAuthTokenManager(
+                catalog=connection_catalog,
+                refresh_threshold_seconds=effective_config.integrations.oauth.auto_refresh_threshold_seconds,
+            )
+            logger.info(API_SERVICE_AUTO_WIRED, service="oauth_token_manager")
+
+            tunnel_provider = NgrokAdapter(
+                auth_token_env=effective_config.integrations.tunnel.auth_token_env,
+            )
+            logger.info(API_SERVICE_AUTO_WIRED, service="tunnel_provider")
+
+            if message_bus is not None and ceremony_scheduler is not None:
+                from synthorg.engine.workflow.webhook_bridge import (  # noqa: PLC0415
+                    WebhookEventBridge,
+                )
+
+                webhook_event_bridge = WebhookEventBridge(
+                    bus=message_bus,
+                    ceremony_scheduler=ceremony_scheduler,
+                )
+                logger.info(
+                    API_SERVICE_AUTO_WIRED,
+                    service="webhook_event_bridge",
+                )
+
+            if message_bus is not None:
+                from synthorg.integrations.rate_limiting.shared_state import (  # noqa: PLC0415
+                    SharedRateLimitCoordinator,
+                    set_coordinator_factory_sync,
+                )
+
+                _bus = message_bus
+                _catalog = connection_catalog
+
+                def _make_coordinator(
+                    name: str,
+                ) -> SharedRateLimitCoordinator:
+                    # Honour the connection's configured rate
+                    # limiter so each coordinator enforces the
+                    # correct per-connection global budget. Previously
+                    # the default 60 RPM was hard-coded, which
+                    # silently ignored any higher/lower setting on
+                    # the connection row.
+                    max_rpm = 60
+                    try:
+                        conn = _catalog._cache.get(name)  # noqa: SLF001
+                        if (
+                            conn is not None
+                            and conn.rate_limiter is not None
+                            and conn.rate_limiter.max_requests_per_minute > 0
+                        ):
+                            max_rpm = conn.rate_limiter.max_requests_per_minute
+                    except Exception:
+                        logger.warning(
+                            API_SERVICE_AUTO_WIRED,
+                            service="rate_limit_coordinator_factory",
+                            note=(
+                                "could not read rate_limit_rpm from "
+                                "catalog cache; using default"
+                            ),
+                            connection_name=name,
+                            exc_info=True,
+                        )
+                    return SharedRateLimitCoordinator(
+                        bus=_bus,
+                        connection_name=name,
+                        max_rpm=max_rpm,
+                    )
+
+                set_coordinator_factory_sync(_make_coordinator)
+                logger.info(
+                    API_SERVICE_AUTO_WIRED,
+                    service="rate_limit_coordinator_factory",
+                )
+        except MemoryError, RecursionError:
+            raise
+        except Exception:
+            logger.warning(
+                API_APP_STARTUP,
+                error="Integration services auto-wire failed (non-fatal)",
+                exc_info=True,
+            )
+
     # Auto-wire control-plane services when not injected.
     if audit_log is None:
         audit_log = AuditLog()
@@ -1044,6 +1298,12 @@ def create_app(  # noqa: C901, PLR0913, PLR0915
         audit_log=audit_log,
         trust_service=trust_service,
         coordination_metrics_store=coordination_metrics_store,
+        connection_catalog=connection_catalog,
+        oauth_token_manager=oauth_token_manager,
+        health_prober_service=health_prober_service,
+        tunnel_provider=tunnel_provider,
+        webhook_event_bridge=webhook_event_bridge,
+        mcp_catalog_service=mcp_catalog_service,
         startup_time=time.monotonic(),
     )
     if distributed_task_queue is not None:
@@ -1069,9 +1329,90 @@ def create_app(  # noqa: C901, PLR0913, PLR0915
     plugins: list[ChannelsPlugin] = [channels_plugin]
     middleware = _build_middleware(api_config)
 
+    # Integration controllers add ~20 routes (~0.7s of Litestar
+    # registration per create_app). Skip them entirely when the
+    # integrations subsystem is disabled, so unit tests that do not
+    # exercise integration endpoints pay no registration cost.
+    #
+    # When enabled, gate each controller by its own collaborators
+    # instead of a single boolean. ``MCPCatalogController`` only
+    # needs ``mcp_catalog_service``; ``WebhooksController`` needs a
+    # bus; ``TunnelController`` needs ``tunnel_provider``. A single
+    # global gate either under-exposes controllers that are ready
+    # or over-exposes ones whose dependencies failed to auto-wire.
+    integration_controllers: tuple[type[Controller], ...] = ()
+    if effective_config.integrations.enabled:
+        from synthorg.api.controllers.connections import (  # noqa: PLC0415
+            ConnectionsController,
+        )
+        from synthorg.api.controllers.integration_health import (  # noqa: PLC0415
+            IntegrationHealthController,
+        )
+        from synthorg.api.controllers.mcp_catalog import (  # noqa: PLC0415
+            MCPCatalogController,
+        )
+        from synthorg.api.controllers.oauth import OAuthController  # noqa: PLC0415
+        from synthorg.api.controllers.tunnel import (  # noqa: PLC0415
+            TunnelController,
+        )
+        from synthorg.api.controllers.webhooks import (  # noqa: PLC0415
+            WebhooksController,
+        )
+
+        controller_readiness: tuple[
+            tuple[type[Controller], tuple[tuple[str, object], ...]], ...
+        ] = (
+            (
+                ConnectionsController,
+                (("connection_catalog", connection_catalog),),
+            ),
+            (
+                IntegrationHealthController,
+                (("connection_catalog", connection_catalog),),
+            ),
+            (
+                OAuthController,
+                (
+                    ("connection_catalog", connection_catalog),
+                    ("persistence", persistence),
+                ),
+            ),
+            (
+                WebhooksController,
+                (
+                    ("connection_catalog", connection_catalog),
+                    ("message_bus", message_bus),
+                ),
+            ),
+            (
+                MCPCatalogController,
+                (("mcp_catalog_service", mcp_catalog_service),),
+            ),
+            (
+                TunnelController,
+                (("tunnel_provider", tunnel_provider),),
+            ),
+        )
+        ready: list[type[Controller]] = []
+        for controller_cls, deps in controller_readiness:
+            missing = [name for name, value in deps if value is None]
+            if missing:
+                logger.warning(
+                    API_APP_STARTUP,
+                    note="skipping integration controller (missing deps)",
+                    controller=controller_cls.__name__,
+                    missing=missing,
+                )
+                continue
+            ready.append(controller_cls)
+        integration_controllers = tuple(ready)
     api_router = Router(
         path=api_config.api_prefix,
-        route_handlers=[*ALL_CONTROLLERS, ws_handler],
+        route_handlers=[
+            *BASE_CONTROLLERS,
+            *integration_controllers,
+            ws_handler,
+        ],
         guards=[require_password_changed],
     )
 
@@ -1258,6 +1599,11 @@ def _build_auth_exclude_paths(
     """Compute auth middleware exclude paths with fail-safe defaults."""
     setup_status_path = f"^{prefix}/setup/status$"
     metrics_path = f"^{prefix}/metrics$"
+    # The OAuth provider redirects the user's browser here without a
+    # session cookie, so the global auth middleware has to let it
+    # through. CSRF protection is handled by the state token the
+    # callback validates against the oauth_states repo.
+    oauth_callback_path = f"^{prefix}/oauth/callback$"
     exclude_paths = (
         auth.exclude_paths
         if auth.exclude_paths is not None
@@ -1269,6 +1615,7 @@ def _build_auth_exclude_paths(
             f"^{prefix}/auth/setup$",
             f"^{prefix}/auth/login$",
             setup_status_path,
+            oauth_callback_path,
         )
     )
     if metrics_path not in exclude_paths:
@@ -1277,6 +1624,8 @@ def _build_auth_exclude_paths(
         exclude_paths = (*exclude_paths, setup_status_path)
     if ws_path not in exclude_paths:
         exclude_paths = (*exclude_paths, ws_path)
+    if oauth_callback_path not in exclude_paths:
+        exclude_paths = (*exclude_paths, oauth_callback_path)
     return exclude_paths
 
 
