@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validat
 
 from synthorg.constants import BUDGET_ROUNDING_PRECISION
 from synthorg.core.enums import AutonomyLevel, CompanyType
+from synthorg.core.middleware_config import MiddlewareConfig
 from synthorg.core.types import NotBlankStr  # noqa: TC001
 from synthorg.observability import get_logger
 from synthorg.observability.events.company import (
@@ -491,6 +492,7 @@ class CompanyConfig(BaseModel):
         budget_monthly: Monthly budget in USD (base currency).
         communication_pattern: Default communication pattern name.
         tool_access_default: Default tool access for all agents.
+        middleware: Agent and coordination middleware configuration.
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -516,6 +518,10 @@ class CompanyConfig(BaseModel):
     tool_access_default: tuple[NotBlankStr, ...] = Field(
         default=(),
         description="Default tool access for all agents",
+    )
+    middleware: MiddlewareConfig = Field(
+        default_factory=MiddlewareConfig,
+        description="Agent and coordination middleware configuration",
     )
 
 
