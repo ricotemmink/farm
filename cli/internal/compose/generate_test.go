@@ -100,6 +100,7 @@ func TestGenerateWithSandbox(t *testing.T) {
 		LogLevel:           "info",
 		Sandbox:            true,
 		DockerSock:         "/var/run/docker.sock",
+		DockerSockGID:      -1,
 		PersistenceBackend: "sqlite",
 		MemoryBackend:      "mem0",
 		BusBackend:         "internal",
@@ -110,8 +111,24 @@ func TestGenerateWithSandbox(t *testing.T) {
 	}
 	yaml := string(out)
 
-	assertContains(t, yaml, "synthorg-sandbox:latest")
-	assertContains(t, yaml, "/var/run/docker.sock:/var/run/docker.sock:ro")
+	// Backend gets the docker.sock mount (read-write) so aiodocker
+	// can create/start/stop ephemeral sandbox containers.
+	assertContains(t, yaml, "/var/run/docker.sock:/var/run/docker.sock")
+	if strings.Contains(yaml, "/var/run/docker.sock:/var/run/docker.sock:ro") {
+		t.Error("backend docker.sock mount must be read-write (no :ro suffix)")
+	}
+
+	// Backend env var pins the sandbox image reference so the CLI
+	// and backend stay version-locked.
+	assertContains(t, yaml, `SYNTHORG_SANDBOX_IMAGE: "ghcr.io/aureliolo/synthorg-sandbox:latest"`)
+
+	// No standalone sandbox service -- the backend spawns ephemeral
+	// sandbox containers on demand via aiodocker, not via compose.
+	if strings.Contains(yaml, "\n  sandbox:\n") {
+		t.Error("sandbox must not be a compose service; backend spawns sandbox containers on demand")
+	}
+
+	// Hardening still present on backend.
 	assertContains(t, yaml, "no-new-privileges:true")
 
 	// Compose must not override Dockerfile healthchecks.
@@ -119,7 +136,91 @@ func TestGenerateWithSandbox(t *testing.T) {
 		t.Error("compose output must not override healthcheck (defined in Dockerfile)")
 	}
 
+	// DockerSockGID is -1 (detection failed), so no group_add block should render.
+	if strings.Contains(yaml, "group_add:") {
+		t.Error("group_add must not render when DockerSockGID is -1 (not detected)")
+	}
+
 	compareGolden(t, "compose_sandbox.yml", out)
+}
+
+func TestGenerateWithSandboxAndDockerSockGID(t *testing.T) {
+	t.Parallel()
+	p := Params{
+		CLIVersion:         "dev",
+		ImageTag:           "latest",
+		BackendPort:        3001,
+		WebPort:            3000,
+		LogLevel:           "info",
+		Sandbox:            true,
+		DockerSock:         "/var/run/docker.sock",
+		DockerSockGID:      999,
+		PersistenceBackend: "sqlite",
+		MemoryBackend:      "mem0",
+		BusBackend:         "internal",
+	}
+	out, err := Generate(p)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	yaml := string(out)
+
+	assertContains(t, yaml, "group_add:")
+	assertContains(t, yaml, `- "999"`)
+	assertContains(t, yaml, "/var/run/docker.sock:/var/run/docker.sock")
+}
+
+func TestGenerateWithSandboxAndDockerSockGIDZero(t *testing.T) {
+	t.Parallel()
+	p := Params{
+		CLIVersion:         "dev",
+		ImageTag:           "latest",
+		BackendPort:        3001,
+		WebPort:            3000,
+		LogLevel:           "info",
+		Sandbox:            true,
+		DockerSock:         "/var/run/docker.sock",
+		DockerSockGID:      0,
+		PersistenceBackend: "sqlite",
+		MemoryBackend:      "mem0",
+		BusBackend:         "internal",
+	}
+	out, err := Generate(p)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	yaml := string(out)
+
+	// GID 0 (root group) is a valid detection result and must render.
+	assertContains(t, yaml, "group_add:")
+	assertContains(t, yaml, `- "0"`)
+}
+
+func TestGenerateWithSandboxAndDockerSockGIDNegative(t *testing.T) {
+	t.Parallel()
+	p := Params{
+		CLIVersion:         "dev",
+		ImageTag:           "latest",
+		BackendPort:        3001,
+		WebPort:            3000,
+		LogLevel:           "info",
+		Sandbox:            true,
+		DockerSock:         "/var/run/docker.sock",
+		DockerSockGID:      -1,
+		PersistenceBackend: "sqlite",
+		MemoryBackend:      "mem0",
+		BusBackend:         "internal",
+	}
+	out, err := Generate(p)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	yaml := string(out)
+
+	// -1 means detection failed; group_add must NOT render.
+	if strings.Contains(yaml, "group_add:") {
+		t.Error("group_add must not render when DockerSockGID is -1 (not detected)")
+	}
 }
 
 func TestGenerateWithDigestPins(t *testing.T) {
@@ -169,6 +270,7 @@ func TestGenerateWithDigestPinsAndSandbox(t *testing.T) {
 		LogLevel:           "info",
 		Sandbox:            true,
 		DockerSock:         "/var/run/docker.sock",
+		DockerSockGID:      -1,
 		PersistenceBackend: "sqlite",
 		MemoryBackend:      "mem0",
 		BusBackend:         "internal",
@@ -186,7 +288,112 @@ func TestGenerateWithDigestPinsAndSandbox(t *testing.T) {
 
 	assertContains(t, yaml, "ghcr.io/aureliolo/synthorg-backend@sha256:aaaa")
 	assertContains(t, yaml, "ghcr.io/aureliolo/synthorg-web@sha256:bbbb")
-	assertContains(t, yaml, "ghcr.io/aureliolo/synthorg-sandbox@sha256:cccc")
+
+	// Sandbox digest pin is wired through the backend env var, not a
+	// standalone image field.
+	assertContains(t, yaml, `SYNTHORG_SANDBOX_IMAGE: "ghcr.io/aureliolo/synthorg-sandbox@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"`)
+
+	// No standalone sandbox service block.
+	if strings.Contains(yaml, "\n  sandbox:\n") {
+		t.Error("sandbox must not be a compose service")
+	}
+}
+
+func TestGenerateWithSandboxAndPostgres(t *testing.T) {
+	t.Parallel()
+	p := Params{
+		CLIVersion:         "dev",
+		ImageTag:           "latest",
+		BackendPort:        3001,
+		WebPort:            3000,
+		LogLevel:           "info",
+		Sandbox:            true,
+		DockerSock:         "/var/run/docker.sock",
+		DockerSockGID:      -1,
+		PersistenceBackend: "postgres",
+		MemoryBackend:      "mem0",
+		BusBackend:         "internal",
+		PostgresPort:       3002,
+		PostgresPassword:   "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	}
+	out, err := Generate(p)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	yaml := string(out)
+
+	// Backend keeps the sandbox wiring regardless of persistence backend.
+	assertContains(t, yaml, "/var/run/docker.sock:/var/run/docker.sock")
+	assertContains(t, yaml, `SYNTHORG_SANDBOX_IMAGE: "ghcr.io/aureliolo/synthorg-sandbox:latest"`)
+	// Postgres service is still generated alongside the sandbox wiring.
+	assertContains(t, yaml, "postgres:18-alpine")
+	assertContains(t, yaml, "SYNTHORG_DATABASE_URL")
+	// SQLite path must not appear when postgres is active.
+	if strings.Contains(yaml, "SYNTHORG_DB_PATH") {
+		t.Error("SYNTHORG_DB_PATH must not appear when persistence_backend is postgres")
+	}
+	// No standalone sandbox service.
+	if strings.Contains(yaml, "\n  sandbox:\n") {
+		t.Error("sandbox must not be a compose service")
+	}
+}
+
+func TestGenerateWithSandboxAndSecrets(t *testing.T) {
+	t.Parallel()
+	p := Params{
+		CLIVersion:         "dev",
+		ImageTag:           "latest",
+		BackendPort:        3001,
+		WebPort:            3000,
+		LogLevel:           "info",
+		Sandbox:            true,
+		DockerSock:         "/var/run/docker.sock",
+		DockerSockGID:      -1,
+		JWTSecret:          "test-secret-value",
+		SettingsKey:        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		PersistenceBackend: "sqlite",
+		MemoryBackend:      "mem0",
+		BusBackend:         "internal",
+	}
+	out, err := Generate(p)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	yaml := string(out)
+
+	// All three backend env wires coexist.
+	assertContains(t, yaml, `SYNTHORG_SANDBOX_IMAGE: "ghcr.io/aureliolo/synthorg-sandbox:latest"`)
+	assertContains(t, yaml, "SYNTHORG_JWT_SECRET")
+	assertContains(t, yaml, "SYNTHORG_SETTINGS_KEY")
+	assertContains(t, yaml, "/var/run/docker.sock:/var/run/docker.sock")
+}
+
+func TestGenerateWithSandboxAndEmptyDigestPins(t *testing.T) {
+	t.Parallel()
+	p := Params{
+		CLIVersion:         "dev",
+		ImageTag:           "latest",
+		BackendPort:        3001,
+		WebPort:            3000,
+		LogLevel:           "info",
+		Sandbox:            true,
+		DockerSock:         "/var/run/docker.sock",
+		DockerSockGID:      -1,
+		PersistenceBackend: "sqlite",
+		MemoryBackend:      "mem0",
+		BusBackend:         "internal",
+		DigestPins:         map[string]string{},
+	}
+	out, err := Generate(p)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	yaml := string(out)
+
+	// Empty map must behave identically to nil: backend env var falls back to tag-based ref.
+	assertContains(t, yaml, `SYNTHORG_SANDBOX_IMAGE: "ghcr.io/aureliolo/synthorg-sandbox:latest"`)
+	// Backend image is tag-based too.
+	assertContains(t, yaml, "ghcr.io/aureliolo/synthorg-backend:latest")
 }
 
 func TestGenerateNilDigestPinsFallsBackToTag(t *testing.T) {
