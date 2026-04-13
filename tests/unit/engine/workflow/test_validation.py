@@ -3,6 +3,11 @@
 import pytest
 
 from synthorg.core.enums import WorkflowEdgeType, WorkflowNodeType
+from synthorg.engine.workflow.definition import (
+    WorkflowDefinition,
+    WorkflowEdge,
+    WorkflowNode,
+)
 from synthorg.engine.workflow.validation import (
     ValidationErrorCode,
     validate_workflow,
@@ -350,3 +355,174 @@ class TestCycleDetection:
         assert not result.valid
         codes = {err.code for err in result.errors}
         assert ValidationErrorCode.CYCLE_DETECTED in codes
+
+
+# ── Verification node validation ─────────────────────────────────
+
+
+def _verification_wf(
+    verify_edges: tuple[WorkflowEdgeType, ...] = (
+        WorkflowEdgeType.VERIFICATION_PASS,
+        WorkflowEdgeType.VERIFICATION_FAIL,
+        WorkflowEdgeType.VERIFICATION_REFER,
+    ),
+    verify_config: dict[str, object] | None = None,
+) -> WorkflowDefinition:
+    """Build a workflow with a verification node and given edges."""
+    cfg = (
+        verify_config
+        if verify_config is not None
+        else {
+            "rubric_name": "test-rubric",
+            "evaluator_agent_id": "eval-agent",
+        }
+    )
+    edge_list: list[WorkflowEdge] = [_edge("e1", "s", "v")]
+    target_nodes: list[WorkflowNode] = []
+    for i, et in enumerate(verify_edges):
+        tid = f"target-{i}"
+        edge_list.append(_edge(f"ev{i}", "v", tid, et))
+        target_nodes.append(_node(tid, WorkflowNodeType.TASK, title=tid))
+    edge_list.extend(_edge(f"e-{tn.id}-end", tn.id, "e") for tn in target_nodes)
+    verify_node = _node("v", WorkflowNodeType.VERIFICATION, **cfg)
+    return _wf(
+        nodes=(
+            _node("s", WorkflowNodeType.START),
+            verify_node,
+            *target_nodes,
+            _node("e", WorkflowNodeType.END),
+        ),
+        edges=tuple(edge_list),
+    )
+
+
+class TestVerificationEdgeValidation:
+    """Verification node edge constraints."""
+
+    @pytest.mark.unit
+    def test_valid_verification_node(self) -> None:
+        result = validate_workflow(_verification_wf())
+        assert result.valid
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("verify_edges", "expected_code"),
+        [
+            (
+                (
+                    WorkflowEdgeType.VERIFICATION_FAIL,
+                    WorkflowEdgeType.VERIFICATION_REFER,
+                ),
+                ValidationErrorCode.VERIFICATION_MISSING_PASS,
+            ),
+            (
+                (
+                    WorkflowEdgeType.VERIFICATION_PASS,
+                    WorkflowEdgeType.VERIFICATION_REFER,
+                ),
+                ValidationErrorCode.VERIFICATION_MISSING_FAIL,
+            ),
+            (
+                (
+                    WorkflowEdgeType.VERIFICATION_PASS,
+                    WorkflowEdgeType.VERIFICATION_FAIL,
+                ),
+                ValidationErrorCode.VERIFICATION_MISSING_REFER,
+            ),
+        ],
+    )
+    def test_missing_required_verification_edge(
+        self,
+        verify_edges: tuple[WorkflowEdgeType, ...],
+        expected_code: ValidationErrorCode,
+    ) -> None:
+        result = validate_workflow(_verification_wf(verify_edges=verify_edges))
+        assert not result.valid
+        assert expected_code in {err.code for err in result.errors}
+
+    @pytest.mark.unit
+    def test_duplicate_pass_edge(self) -> None:
+        result = validate_workflow(
+            _verification_wf(
+                verify_edges=(
+                    WorkflowEdgeType.VERIFICATION_PASS,
+                    WorkflowEdgeType.VERIFICATION_PASS,
+                    WorkflowEdgeType.VERIFICATION_FAIL,
+                    WorkflowEdgeType.VERIFICATION_REFER,
+                ),
+            ),
+        )
+        assert not result.valid
+        codes = {err.code for err in result.errors}
+        assert ValidationErrorCode.VERIFICATION_DUPLICATE_EDGE in codes
+
+    @pytest.mark.unit
+    def test_non_verification_edge_from_verification_node(self) -> None:
+        result = validate_workflow(
+            _verification_wf(
+                verify_edges=(
+                    WorkflowEdgeType.VERIFICATION_PASS,
+                    WorkflowEdgeType.VERIFICATION_FAIL,
+                    WorkflowEdgeType.VERIFICATION_REFER,
+                    WorkflowEdgeType.SEQUENTIAL,
+                ),
+            ),
+        )
+        assert not result.valid
+        codes = {err.code for err in result.errors}
+        assert ValidationErrorCode.VERIFICATION_EXTRA_OUTGOING in codes
+
+
+class TestVerificationEdgeScope:
+    """Verification edges must not leave non-verification nodes."""
+
+    @pytest.mark.unit
+    def test_verification_edge_from_task_node(self) -> None:
+        result = validate_workflow(
+            _wf(
+                nodes=(
+                    _node("s", WorkflowNodeType.START),
+                    _node("t", WorkflowNodeType.TASK, title="Work"),
+                    _node("e", WorkflowNodeType.END),
+                ),
+                edges=(
+                    _edge("e1", "s", "t"),
+                    _edge(
+                        "e2",
+                        "t",
+                        "e",
+                        WorkflowEdgeType.VERIFICATION_PASS,
+                    ),
+                ),
+            ),
+        )
+        assert not result.valid
+        codes = {err.code for err in result.errors}
+        assert ValidationErrorCode.VERIFICATION_EDGE_OUTSIDE in codes
+
+
+class TestVerificationConfigValidation:
+    """Verification node config constraints."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "verify_config",
+        [
+            {"evaluator_agent_id": "eval-agent"},
+            {"rubric_name": "test-rubric"},
+            {"rubric_name": "  ", "evaluator_agent_id": "eval-agent"},
+            {"rubric_name": "test-rubric", "evaluator_agent_id": "  "},
+            {"rubric_name": 123, "evaluator_agent_id": "eval-agent"},
+            {"rubric_name": "test-rubric", "evaluator_agent_id": 456},
+        ],
+    )
+    def test_invalid_verification_config(
+        self,
+        verify_config: dict[str, object],
+    ) -> None:
+        result = validate_workflow(
+            _verification_wf(verify_config=verify_config),
+        )
+        assert not result.valid
+        codes = {err.code for err in result.errors}
+        assert ValidationErrorCode.VERIFICATION_MISSING_CONFIG in codes
