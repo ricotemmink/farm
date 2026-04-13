@@ -21,13 +21,14 @@ jobs:
           persist-credentials: false
 
       - name: Set up apko
-        run: |
-          go install chainguard.dev/apko@v1.2.3
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+        uses: ./.github/actions/setup-apko
+        with:
+          # renovate: datasource=github-releases depName=chainguard-dev/apko
+          version: v1.2.3
 
       - name: Update lockfiles
         run: |
-          for config in docker/backend/apko.yaml docker/sandbox/apko.yaml; do
+          for config in docker/*/apko.yaml; do
             echo "Updating lockfile for ${config}..."
             apko lock --update "${config}"
           done
