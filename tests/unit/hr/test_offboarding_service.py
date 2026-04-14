@@ -1,5 +1,6 @@
 """Tests for OffboardingService."""
 
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -127,10 +128,29 @@ class FakeMessageBus:
     def is_running(self) -> bool:
         return self._running
 
-    async def publish(self, message: Message) -> None:
+    async def publish(
+        self,
+        message: Message,
+        *,
+        ttl_seconds: float | None = None,
+    ) -> None:
         self.published.append(message)
 
-    async def send_direct(self, message: Message, *, recipient: str) -> None:
+    async def send_direct(
+        self,
+        message: Message,
+        *,
+        recipient: str,
+        ttl_seconds: float | None = None,
+    ) -> None:
+        pass
+
+    async def publish_batch(
+        self,
+        messages: Sequence[Message],
+        *,
+        ttl_seconds: float | None = None,
+    ) -> None:
         pass
 
     async def subscribe(self, channel_name: str, subscriber_id: str) -> Any:
@@ -428,7 +448,12 @@ class TestOffboardingServiceFullPipeline:
         agent_id = str(identity.id)
 
         class FailingMessageBus(FakeMessageBus):
-            async def publish(self, message: Message) -> None:
+            async def publish(
+                self,
+                message: Message,
+                *,
+                ttl_seconds: float | None = None,
+            ) -> None:
                 msg = "publish boom"
                 raise OSError(msg)
 

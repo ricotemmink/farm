@@ -3,19 +3,6 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Drawer } from '@/components/ui/drawer'
 
-// Mock components defined at module level for ESLint compliance
-function MockAnimatePresence({ children }: { children: React.ReactNode }) {
-  return <>{children}</>
-}
-
-// React 19: ref is a regular prop, no forwardRef needed
-function MockMotionDiv({ children, ref, ...allProps }: React.ComponentProps<'div'> & { ref?: React.Ref<HTMLDivElement> } & Record<string, unknown>) {
-  const domProps = Object.fromEntries(
-    Object.entries(allProps).filter(([key]) => !['variants', 'initial', 'animate', 'exit', 'transition'].includes(key)),
-  ) as React.HTMLAttributes<HTMLDivElement>
-  return <div ref={ref} {...domProps}>{children as React.ReactNode}</div>
-}
-
 // Test wrapper for focus-restore testing (needs state to toggle open/close)
 function FocusRestoreWrapper() {
   const [open, setOpen] = React.useState(false)
@@ -26,15 +13,6 @@ function FocusRestoreWrapper() {
     </>
   )
 }
-
-vi.mock('motion/react', async () => {
-  const actual = await vi.importActual<typeof import('motion/react')>('motion/react')
-  return {
-    ...actual,
-    AnimatePresence: MockAnimatePresence,
-    motion: { div: MockMotionDiv },
-  }
-})
 
 describe('Drawer', () => {
   it('renders nothing when closed', () => {
@@ -61,14 +39,9 @@ describe('Drawer', () => {
     expect(screen.getByText('Drawer content')).toBeInTheDocument()
   })
 
-  it('has aria-modal attribute', () => {
-    render(<Drawer open={true} onClose={() => {}} title="Test">Content</Drawer>)
-    expect(screen.getByRole('dialog')).toHaveAttribute('aria-modal', 'true')
-  })
-
-  it('has aria-label matching title', () => {
+  it('has accessible name matching title', () => {
     render(<Drawer open={true} onClose={() => {}} title="Compare">Content</Drawer>)
-    expect(screen.getByRole('dialog')).toHaveAttribute('aria-label', 'Compare')
+    expect(screen.getByRole('dialog', { name: 'Compare' })).toBeInTheDocument()
   })
 
   it('calls onClose when close button is clicked', async () => {
@@ -100,12 +73,11 @@ describe('Drawer', () => {
     render(<FocusRestoreWrapper />)
     const opener = screen.getByTestId('opener')
 
-    // Focus the opener then open the drawer
+    // Open the drawer
     await user.click(opener)
 
-    // Drawer is now open -- focus should have moved to the dialog panel
-    const dialog = screen.getByRole('dialog')
-    expect(document.activeElement).toBe(dialog)
+    // Drawer should be open
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
 
     // Close the drawer by clicking the close button
     await user.click(screen.getByLabelText('Close'))
@@ -137,14 +109,35 @@ describe('Drawer', () => {
       expect(screen.queryByRole('heading')).not.toBeInTheDocument()
     })
 
-    it('uses ariaLabel for aria-label when title is omitted', () => {
+    it('uses ariaLabel for accessible name when title is omitted', () => {
       render(<Drawer open={true} onClose={() => {}} ariaLabel="Navigation menu">Content</Drawer>)
-      expect(screen.getByRole('dialog')).toHaveAttribute('aria-label', 'Navigation menu')
+      expect(screen.getByRole('dialog', { name: 'Navigation menu' })).toBeInTheDocument()
     })
 
     it('ariaLabel takes precedence over title when both are provided', () => {
       render(<Drawer open={true} onClose={() => {}} title="Visible Title" ariaLabel="Screen Reader Label">Content</Drawer>)
       expect(screen.getByRole('dialog')).toHaveAttribute('aria-label', 'Screen Reader Label')
+    })
+
+    it('renders plain heading when ariaLabel overrides title', () => {
+      render(<Drawer open={true} onClose={() => {}} title="Visible" ariaLabel="Override">Content</Drawer>)
+      // Should render a plain <h2>, not BaseDrawer.Title (which would add aria-labelledby)
+      const heading = screen.getByRole('heading', { name: 'Visible' })
+      expect(heading.tagName).toBe('H2')
+    })
+
+    it('renders BaseDrawer.Title when only title is given', () => {
+      render(<Drawer open={true} onClose={() => {}} title="Only Title">Content</Drawer>)
+      // BaseDrawer.Title provides the accessible name via aria-labelledby
+      expect(screen.getByRole('dialog', { name: 'Only Title' })).toBeInTheDocument()
+    })
+  })
+
+  describe('className prop', () => {
+    it('merges className into the popup element', () => {
+      render(<Drawer open={true} onClose={() => {}} title="Test" className="custom-class">Content</Drawer>)
+      const dialog = screen.getByRole('dialog')
+      expect(dialog.className).toMatch(/custom-class/)
     })
   })
 

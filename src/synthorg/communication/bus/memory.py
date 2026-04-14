@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import time
 from collections import deque
+from collections.abc import Sequence  # noqa: TC003
 from datetime import UTC, datetime
 from typing import Final, NoReturn
 
@@ -30,6 +31,7 @@ from synthorg.communication.subscription import (
 )
 from synthorg.observability import get_logger
 from synthorg.observability.events.communication import (
+    COMM_BATCH_PUBLISHED,
     COMM_BUS_ALREADY_RUNNING,
     COMM_BUS_NOT_RUNNING,
     COMM_BUS_SHUTDOWN_SIGNAL,
@@ -185,11 +187,18 @@ class InMemoryMessageBus:
             asyncio.Queue(),
         )
 
-    async def publish(self, message: Message) -> None:
+    async def publish(
+        self,
+        message: Message,
+        *,
+        ttl_seconds: float | None = None,  # noqa: ARG002
+    ) -> None:
         """Publish a message to its channel.
 
         Args:
             message: The message to publish.
+            ttl_seconds: Accepted for protocol conformance but
+                ignored (in-memory bus uses deque-based retention).
 
         Raises:
             MessageBusNotRunningError: If not running.
@@ -233,6 +242,7 @@ class InMemoryMessageBus:
         message: Message,
         *,
         recipient: str,
+        ttl_seconds: float | None = None,  # noqa: ARG002
     ) -> None:
         """Send a direct message between two agents.
 
@@ -242,6 +252,8 @@ class InMemoryMessageBus:
         Args:
             message: The message to send.
             recipient: The recipient agent ID.
+            ttl_seconds: Accepted for protocol conformance but
+                ignored (in-memory bus uses deque-based retention).
 
         Raises:
             MessageBusNotRunningError: If not running.
@@ -280,6 +292,40 @@ class InMemoryMessageBus:
             sender=sender,
             recipient=recipient,
             message_id=str(message.id),
+        )
+
+    async def publish_batch(
+        self,
+        messages: Sequence[Message],
+        *,
+        ttl_seconds: float | None = None,
+    ) -> None:
+        """Publish multiple messages sequentially.
+
+        In-memory implementation publishes each message in order.
+        ``ttl_seconds`` is accepted for protocol conformance but
+        ignored (retention is deque-based).
+
+        If any individual publish fails, the remaining messages in the
+        batch are not attempted and previously published messages are
+        not rolled back.
+
+        Args:
+            messages: Messages to publish.
+            ttl_seconds: Ignored (protocol conformance).
+
+        Raises:
+            MessageBusNotRunningError: If the bus is not running.
+            ChannelNotFoundError: If any target channel does not exist.
+        """
+        if not messages:
+            return
+        for message in messages:
+            await self.publish(message, ttl_seconds=ttl_seconds)
+        logger.debug(
+            COMM_BATCH_PUBLISHED,
+            count=len(messages),
+            backend="memory",
         )
 
     def _ensure_direct_channel(

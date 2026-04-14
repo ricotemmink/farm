@@ -1,6 +1,7 @@
 """Shared fakes and helpers for TaskEngine tests."""
 
 import copy
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from synthorg.core.task import Task
@@ -77,14 +78,42 @@ class FakeMessageBus:
     def is_running(self) -> bool:
         return self._running
 
-    async def publish(self, message: object) -> None:
+    async def publish(
+        self,
+        message: object,
+        *,
+        ttl_seconds: float | None = None,
+    ) -> None:
         self.published.append(message)
+
+    async def send_direct(
+        self,
+        message: object,
+        *,
+        recipient: str,
+        ttl_seconds: float | None = None,
+    ) -> None:
+        pass
+
+    async def publish_batch(
+        self,
+        messages: Sequence[object],
+        *,
+        ttl_seconds: float | None = None,
+    ) -> None:
+        for msg in messages:
+            self.published.append(msg)
 
 
 class FailingMessageBus(FakeMessageBus):
     """Message bus that always fails on publish."""
 
-    async def publish(self, message: object) -> None:
+    async def publish(
+        self,
+        message: object,
+        *,
+        ttl_seconds: float | None = None,
+    ) -> None:
         msg = "Publish failed"
         raise RuntimeError(msg)
 
