@@ -98,6 +98,8 @@ class TurnRecord(BaseModel):
         efficiency_delta: Efficiency ratios against an ideal baseline.
         prior_tool_call_count: Cumulative tool calls before this turn (for PTE).
         tool_response_tokens: Tokens from tool responses this turn (for PTE).
+        semantic_drift_score: Similarity score (0.0--1.0) from
+            SemanticDriftDetector, or ``None`` if not measured.
         success: Whether this turn completed without error or content filter (computed).
     """
 
@@ -161,6 +163,12 @@ class TurnRecord(BaseModel):
         default=0,
         ge=0,
         description="Tokens from tool responses this turn (for PTE)",
+    )
+    semantic_drift_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Semantic drift similarity score (from SemanticDriftDetector)",
     )
 
     @model_validator(mode="after")

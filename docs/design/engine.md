@@ -1502,6 +1502,26 @@ These are complementary systems handling different types of shared state:
 | Agent memory (personal) | Per-agent ownership | Each agent owns its memory exclusively |
 | Org memory (shared knowledge) | Single-writer (`OrgMemoryBackend`) | `OrgMemoryBackend` protocol with role-based write access control |
 
+### Worktree Disk Quota
+
+Per-worktree disk usage limits with a background watcher that emits warning
+and exceeded events when thresholds are crossed.
+
+**Configuration** (on `PlannerWorktreesConfig`):
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_disk_gb_per_worktree` | `5.0` | Maximum disk usage in GB per worktree |
+| `auto_cleanup_on_threshold` | `True` | Signal cleanup when limit exceeded |
+| `cleanup_warning_threshold` | `0.8` | Usage ratio for warning events (0.5-1.0) |
+
+**Watcher** (`DiskQuotaWatcher`): checks worktree disk usage via recursive
+directory size computation. Emits `WORKSPACE_DISK_WARNING` at the warning
+threshold and `WORKSPACE_DISK_EXCEEDED` at the limit. Does not delete
+worktrees directly -- signals the `WorkspaceManager` to act.
+
+**Module**: `src/synthorg/engine/workspace/disk_quota.py`
+
 ---
 
 ## Task Decomposability & Coordination Topology
@@ -1741,7 +1761,11 @@ Protocol: `AgentMiddleware` (`engine/middleware/protocol.py`). Six async hooks i
 
 Composition: `before_*` left-to-right, `after_*` right-to-left, `wrap_*` onion-style (each wraps the next). Exceptions propagate to the classification pipeline.
 
-Default chain: `checkpoint_resume`, `delegation_chain_hash`, `authority_deference`, `sanitize_message`, `security_interceptor`, `approval_gate`, `assumption_violation`, `classification`, `cost_recording`.
+Default chain: `checkpoint_resume`, `delegation_chain_hash`, `authority_deference`, `sanitize_message`, `security_interceptor`, `policy_gate`, `approval_gate`, `assumption_violation`, `classification`, `cost_recording`.
+
+**Optional middleware** (registered in `_AGENT_OPT_IN`, must be enabled explicitly):
+
+- `SemanticDriftDetector` (`after_model` slot) -- compares model output against task acceptance criteria using cosine similarity. Opt-in via `CompanyConfig.security.semantic_drift_enabled`. Fail-soft: logs warnings but never blocks.
 
 ### Coordination Middleware
 

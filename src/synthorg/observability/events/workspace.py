@@ -29,3 +29,10 @@ WORKSPACE_SEMANTIC_ANALYSIS_COMPLETE: Final[str] = (
 WORKSPACE_SEMANTIC_CONFLICT: Final[str] = "workspace.semantic.conflict"
 WORKSPACE_SEMANTIC_ANALYSIS_FAILED: Final[str] = "workspace.semantic.analysis.failed"
 WORKSPACE_SEMANTIC_PARSE_SKIP: Final[str] = "workspace.semantic.parse.skip"
+
+# ── Disk quota events ────────────────────────────────────────────
+WORKSPACE_DISK_WARNING: Final[str] = "workspace.disk.warning"
+WORKSPACE_DISK_EXCEEDED: Final[str] = "workspace.disk.exceeded"
+WORKSPACE_DISK_CLEANUP: Final[str] = "workspace.disk.cleanup"
+WORKSPACE_DISK_TRAVERSAL_ERROR: Final[str] = "workspace.disk.traversal.error"
+WORKSPACE_DISK_CHECK_ERROR: Final[str] = "workspace.disk.check.error"

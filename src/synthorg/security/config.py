@@ -6,12 +6,14 @@ Defines ``SecurityConfig`` (the top-level security configuration),
 """
 
 from enum import StrEnum
+from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from synthorg.core.enums import ActionType, ApprovalRiskLevel
 from synthorg.core.types import NotBlankStr  # noqa: TC001
 from synthorg.security.models import SecurityVerdictType
+from synthorg.security.policy_engine.config import SecurityPolicyConfig
 
 
 class SecurityEnforcementMode(StrEnum):
@@ -158,7 +160,7 @@ class SecurityPolicyRule(BaseModel):
     enabled: bool = True
 
     @model_validator(mode="after")
-    def _check_action_type_format(self) -> SecurityPolicyRule:
+    def _check_action_type_format(self) -> Self:
         """Validate that action_types entries use ``category:action`` format.
 
         Requires exactly one colon with non-empty, non-whitespace
@@ -294,6 +296,8 @@ class SecurityConfig(BaseModel):
         output_scan_policy_type: Output scan response policy
             (default: ``AUTONOMY_TIERED``).
         custom_policies: User-defined policy rules.
+        policy_engine: Runtime policy engine configuration
+            (Cedar-based pre-execution gate, opt-in).
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -327,6 +331,10 @@ class SecurityConfig(BaseModel):
     )
     uncertainty_check: UncertaintyCheckConfig = Field(
         default_factory=UncertaintyCheckConfig,
+    )
+    policy_engine: SecurityPolicyConfig = Field(
+        default_factory=SecurityPolicyConfig,
+        description="Runtime policy engine configuration",
     )
 
     @model_validator(mode="after")
