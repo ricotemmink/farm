@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import type { Transition } from 'framer-motion'
+import type { Transition } from 'motion/react'
 import { statusColorTransition } from '@/lib/motion'
 import type { AgentRuntimeStatus } from '@/lib/utils'
 import { getStatusColor } from '@/lib/utils'
@@ -28,7 +28,7 @@ interface UseStatusTransitionReturn {
 /**
  * Animate between status colors when an agent's runtime status changes.
  *
- * Returns the resolved color and Framer Motion props for smooth transitions.
+ * Returns the resolved color and Motion props for smooth transitions.
  */
 export function useStatusTransition(
   status: AgentRuntimeStatus,

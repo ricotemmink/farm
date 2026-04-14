@@ -1,5 +1,5 @@
-import type { Variants } from 'framer-motion'
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+import type { Variants } from 'motion/react'
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { reducedPageVariants, tweenCrossfadeEnter, tweenCrossfadeExit } from '@/lib/motion'
 import { cn } from '@/lib/utils'
 
@@ -41,7 +41,7 @@ const pageVariants: Variants = {
 }
 
 /**
- * Page transition wrapper using Framer Motion's AnimatePresence.
+ * Page transition wrapper using Motion's AnimatePresence.
  *
  * Wraps children with enter/exit animations keyed by `routeKey`.
  * Automatically falls back to reduced-motion variants when the user

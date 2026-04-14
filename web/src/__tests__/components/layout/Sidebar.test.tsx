@@ -20,12 +20,17 @@ function MockMotionDiv({ children, ref, ...allProps }: React.ComponentProps<'div
   return <div ref={ref} {...domProps}>{children as React.ReactNode}</div>
 }
 
-vi.mock('framer-motion', async () => {
-  const actual = await vi.importActual<typeof import('framer-motion')>('framer-motion')
+vi.mock('motion/react', async () => {
+  const actual = await vi.importActual<typeof import('motion/react')>('motion/react')
   return {
     ...actual,
     AnimatePresence: MockAnimatePresence,
-    motion: { div: MockMotionDiv },
+    motion: new Proxy(actual.motion as object, {
+      get(target, prop, receiver) {
+        if (prop === 'div') return MockMotionDiv
+        return Reflect.get(target, prop, receiver)
+      },
+    }) as typeof actual.motion,
   }
 })
 

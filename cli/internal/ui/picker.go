@@ -1,4 +1,4 @@
-// Package ui: generic option picker built on charmbracelet/huh.
+// Package ui provides a generic option picker built on charm.land/huh/v2.
 //
 // The picker is intentionally data-driven: callers hand in a slice of
 // Option[T] structs describing each choice (label, summary, pros, cons,
@@ -26,7 +26,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/mattn/go-isatty"
 )
 
@@ -137,7 +137,7 @@ func PickOne[T any](
 
 	form := huh.NewForm(huh.NewGroup(selectField))
 	if cfg.Plain {
-		form = form.WithTheme(huh.ThemeBase16())
+		form = form.WithTheme(huh.ThemeFunc(huh.ThemeBase16))
 	}
 	if cfg.Stdout != nil {
 		form = form.WithOutput(cfg.Stdout)
