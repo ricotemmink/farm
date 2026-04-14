@@ -476,6 +476,49 @@ class SinkConfig(BaseModel):
             raise ValueError(msg)
 
 
+class ContainerLogShippingConfig(BaseModel):
+    """Configuration for shipping container logs to the observability stack.
+
+    Controls whether sandbox and sidecar container logs are collected
+    and shipped through the structlog pipeline after execution.
+
+    Attributes:
+        enabled: Whether container log shipping is active.
+        ship_raw_logs: Whether to include raw stdout/stderr/sidecar
+            payloads in shipped events (security-sensitive).
+        collection_timeout_seconds: Timeout for collecting container logs.
+        max_log_bytes: Total byte budget across all shipped fields
+            per execution (stdout + stderr + sidecar logs combined).
+    """
+
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether to ship collected container logs",
+    )
+    ship_raw_logs: bool = Field(
+        default=False,
+        description=(
+            "Include raw stdout/stderr/sidecar payloads in shipped events. "
+            "When False, only metadata (sizes, counts, timing) is shipped. "
+            "Enable only in trusted environments -- raw output may contain "
+            "secrets that bypass key-name-based redaction."
+        ),
+    )
+    collection_timeout_seconds: float = Field(
+        default=5.0,
+        ge=0.1,
+        le=30.0,
+        description="Timeout for log collection from containers",
+    )
+    max_log_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        gt=0,
+        description="Total byte budget per execution across all shipped fields",
+    )
+
+
 class LogConfig(BaseModel):
     """Top-level logging configuration.
 
@@ -485,6 +528,7 @@ class LogConfig(BaseModel):
         sinks: Tuple of sink configurations.
         enable_correlation: Whether to enable correlation ID tracking.
         log_dir: Directory for log files.
+        container_log_shipping: Container log shipping configuration.
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -507,6 +551,10 @@ class LogConfig(BaseModel):
     log_dir: NotBlankStr = Field(
         default="logs",
         description="Directory for log files",
+    )
+    container_log_shipping: ContainerLogShippingConfig = Field(
+        default_factory=ContainerLogShippingConfig,
+        description="Container log shipping configuration",
     )
 
     @model_validator(mode="after")

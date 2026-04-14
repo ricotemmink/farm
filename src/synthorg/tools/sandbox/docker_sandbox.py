@@ -8,6 +8,7 @@ Uses ``aiodocker`` for asynchronous Docker daemon communication.
 import asyncio
 import platform
 import secrets
+import time
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final
 
@@ -31,6 +32,7 @@ from synthorg.observability.events.docker import (
     DOCKER_HEALTH_CHECK,
 )
 from synthorg.observability.events.sandbox import (
+    SANDBOX_CONTAINER_LOGS_COLLECTED,
     SANDBOX_NETWORK_ENFORCEMENT,
     SANDBOX_RUNTIME_RESOLVER_ATTACHED,
     SANDBOX_SIDECAR_CREATED,
@@ -40,6 +42,11 @@ from synthorg.observability.events.sandbox import (
     SANDBOX_SIDECAR_REMOVED,
     SANDBOX_SIDECAR_STARTED,
 )
+from synthorg.tools.sandbox.container_log_shipper import (
+    build_correlation_env,
+    collect_sidecar_logs,
+    ship_container_logs,
+)
 from synthorg.tools.sandbox.credential_manager import SandboxCredentialManager
 from synthorg.tools.sandbox.docker_config import DockerSandboxConfig
 from synthorg.tools.sandbox.errors import SandboxError, SandboxStartError
@@ -48,6 +55,7 @@ from synthorg.tools.sandbox.result import SandboxResult
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from synthorg.observability.config import ContainerLogShippingConfig
     from synthorg.tools.sandbox.runtime_resolver import SandboxRuntimeResolver
 
 _RESERVED_ENV_KEYS: Final[frozenset[str]] = frozenset(
@@ -117,12 +125,15 @@ class DockerSandbox:
         *,
         config: DockerSandboxConfig | None = None,
         workspace: Path,
+        log_shipping_config: ContainerLogShippingConfig | None = None,
     ) -> None:
         """Initialize the Docker sandbox.
 
         Args:
             config: Docker sandbox configuration (defaults to standard).
             workspace: Absolute path to the workspace root. Must exist.
+            log_shipping_config: Container log shipping configuration.
+                Default-constructed if not provided.
 
         Raises:
             ValueError: If *workspace* is not absolute or does not exist.
@@ -143,6 +154,13 @@ class DockerSandbox:
         self._lock = asyncio.Lock()
         self._credential_manager = SandboxCredentialManager()
         self._runtime_resolver: SandboxRuntimeResolver | None = None
+        if log_shipping_config is None:
+            from synthorg.observability.config import (  # noqa: PLC0415
+                ContainerLogShippingConfig as _Cfg,
+            )
+
+            log_shipping_config = _Cfg()
+        self._log_shipping_config = log_shipping_config
 
     @property
     def config(self) -> DockerSandboxConfig:
@@ -264,6 +282,16 @@ class DockerSandbox:
             else None
         )
         env_list = self._validate_env(sanitized)
+        correlation_env = build_correlation_env()
+        # Merge: correlation IDs override user-supplied duplicates.
+        merged: dict[str, str] = {}
+        for entry in env_list:
+            key, _, value = entry.partition("=")
+            merged[key] = value
+        for entry in correlation_env:
+            key, _, value = entry.partition("=")
+            merged[key] = value
+        env_list = [f"{k}={v}" for k, v in merged.items()]
         host_config = self._build_host_config(category=category)
         if network_mode is not None:
             host_config["NetworkMode"] = network_mode
@@ -384,6 +412,9 @@ class DockerSandbox:
         lo_flag = "1" if self._config.loopback_allowed else "0"
         env_list.append(f"SIDECAR_DNS_ALLOWED={dns_flag}")
         env_list.append(f"SIDECAR_LOOPBACK_ALLOWED={lo_flag}")
+
+        # Inject correlation env vars so sidecar logs can self-correlate.
+        env_list.extend(build_correlation_env())
 
         memory_bytes = self._parse_memory_limit(_SIDECAR_MEMORY)
         nano_cpus = int(_SIDECAR_CPU * _NANO_CPUS_MULTIPLIER)
@@ -595,7 +626,7 @@ class DockerSandbox:
             category=category,
         )
 
-    async def _run_container(  # noqa: C901, PLR0913
+    async def _run_container(  # noqa: C901, PLR0912, PLR0913, PLR0915
         self,
         *,
         docker: aiodocker.Docker,
@@ -699,8 +730,11 @@ class DockerSandbox:
             image=self._config.image,
         )
 
+        cfg = self._log_shipping_config
+        sidecar_logs: tuple[dict[str, Any], ...] = ()
+        result: SandboxResult | None = None
         try:
-            return await self._start_and_wait(
+            result = await self._start_and_wait(
                 docker=docker,
                 container_id=container_id,
                 command=command,
@@ -708,6 +742,40 @@ class DockerSandbox:
                 timeout=timeout,
             )
         finally:
+            # Collect sidecar logs BEFORE container removal
+            # (best-effort -- never blocks cleanup).
+            if sidecar_id and cfg.enabled:
+                try:
+                    sidecar_logs = await collect_sidecar_logs(
+                        docker,
+                        sidecar_id,
+                        config=cfg,
+                    )
+                except MemoryError, RecursionError:
+                    raise
+                except Exception:
+                    logger.debug(
+                        SANDBOX_CONTAINER_LOGS_COLLECTED,
+                        sidecar_id=sidecar_id[:12],
+                        status="collection_error_in_cleanup",
+                        exc_info=True,
+                    )
+
+            # Ship collected logs even on execution failure so
+            # sidecar network decisions are always observable.
+            _stdout = result.stdout if result is not None else ""
+            _stderr = result.stderr if result is not None else ""
+            _ms = (result.execution_time_ms or 0) if result is not None else 0
+            await ship_container_logs(
+                config=cfg,
+                container_id=container_id,
+                sidecar_id=sidecar_id,
+                stdout=_stdout,
+                stderr=_stderr,
+                sidecar_logs=sidecar_logs,
+                execution_time_ms=_ms,
+            )
+
             sandbox_removed = await self._remove_container(
                 docker,
                 container_id,
@@ -730,6 +798,21 @@ class DockerSandbox:
                         sidecar_id=sidecar_id[:12],
                         error="removal failed, sidecar remains tracked",
                     )
+
+        # Enrich result with sidecar data and agent context.
+        # (Unreachable when _start_and_wait raises -- exception
+        # propagates through finally.)
+        assert result is not None  # noqa: S101
+        import structlog.contextvars  # noqa: PLC0415
+
+        ctx = structlog.contextvars.get_contextvars()
+        return result.model_copy(
+            update={
+                "sidecar_id": sidecar_id,
+                "sidecar_logs": sidecar_logs,
+                "agent_id": ctx.get("agent_id"),
+            },
+        )
 
     async def _start_and_wait(
         self,
@@ -764,12 +847,15 @@ class DockerSandbox:
             )
             raise SandboxStartError(msg) from exc
 
+        start_mono = time.monotonic()
         timed_out, returncode = await self._wait_for_exit(
             docker=docker,
             container_obj=container_obj,
             container_id=container_id,
             timeout=timeout,
         )
+        elapsed_ms = int((time.monotonic() - start_mono) * 1000)
+
         stdout, stderr = await self._safe_collect_logs(
             container_obj,
             container_id,
@@ -787,11 +873,15 @@ class DockerSandbox:
                 stderr=stderr or f"Container timed out after {timeout}s",
                 returncode=returncode,
                 timed_out=True,
+                container_id=container_id,
+                execution_time_ms=elapsed_ms,
             )
         return SandboxResult(
             stdout=stdout,
             stderr=stderr,
             returncode=returncode,
+            container_id=container_id,
+            execution_time_ms=elapsed_ms,
         )
 
     async def _wait_for_exit(
