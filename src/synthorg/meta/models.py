@@ -30,6 +30,7 @@ class ProposalAltitude(StrEnum):
     CONFIG_TUNING = "config_tuning"
     ARCHITECTURE = "architecture"
     PROMPT_TUNING = "prompt_tuning"
+    CODE_MODIFICATION = "code_modification"
 
 
 class ProposalStatus(StrEnum):
@@ -66,6 +67,14 @@ class RuleSeverity(StrEnum):
     INFO = "info"
     WARNING = "warning"
     CRITICAL = "critical"
+
+
+class CodeOperation(StrEnum):
+    """Type of source file change in a code modification proposal."""
+
+    CREATE = "create"
+    MODIFY = "modify"
+    DELETE = "delete"
 
 
 class GuardVerdict(StrEnum):
@@ -189,6 +198,76 @@ class PromptChange(BaseModel):
     description: NotBlankStr
 
 
+class CodeChange(BaseModel):
+    """A proposed change to a framework source file.
+
+    Uses full file content rather than line-level diffs: LLMs produce
+    complete content reliably, framework files are < 800 lines by
+    convention, and git shows the actual diff on the PR.
+
+    Attributes:
+        file_path: Relative path from project root.
+        operation: Type of file change (create, modify, delete).
+        old_content: Current file content (empty for create; captured
+            at proposal time for rollback on modify/delete).
+        new_content: Proposed file content (empty for delete).
+        description: What this change does.
+        reasoning: Why this change improves the system.
+    """
+
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
+
+    file_path: NotBlankStr
+    operation: CodeOperation
+    old_content: str = ""
+    new_content: str = ""
+    description: NotBlankStr
+    reasoning: NotBlankStr
+
+    @model_validator(mode="after")
+    def _validate_content_for_operation(self) -> Self:
+        """Ensure content fields match the operation type."""
+        _CODE_CHANGE_VALIDATORS[self.operation](self)
+        return self
+
+
+def _validate_create(change: CodeChange) -> None:
+    if change.old_content:
+        msg = "create operations must have empty old_content"
+        raise ValueError(msg)
+    if not change.new_content:
+        msg = "create operations must have non-empty new_content"
+        raise ValueError(msg)
+
+
+def _validate_modify(change: CodeChange) -> None:
+    if not change.old_content:
+        msg = "modify operations must have non-empty old_content"
+        raise ValueError(msg)
+    if not change.new_content:
+        msg = "modify operations must have non-empty new_content"
+        raise ValueError(msg)
+    if change.old_content == change.new_content:
+        msg = "modify operations must change the content"
+        raise ValueError(msg)
+
+
+def _validate_delete(change: CodeChange) -> None:
+    if not change.old_content:
+        msg = "delete operations must have non-empty old_content"
+        raise ValueError(msg)
+    if change.new_content:
+        msg = "delete operations must have empty new_content"
+        raise ValueError(msg)
+
+
+_CODE_CHANGE_VALIDATORS = {
+    CodeOperation.CREATE: _validate_create,
+    CodeOperation.MODIFY: _validate_modify,
+    CodeOperation.DELETE: _validate_delete,
+}
+
+
 # ── Proposal rationale ─────────────────────────────────────────────
 
 
@@ -229,6 +308,7 @@ class ImprovementProposal(BaseModel):
         config_changes: Config field changes (config_tuning altitude).
         architecture_changes: Structural changes (architecture altitude).
         prompt_changes: Prompt policy changes (prompt_tuning altitude).
+        code_changes: Source file changes (code_modification altitude).
         rollback_plan: Concrete rollback plan.
         rollout_strategy: How to deploy the change.
         confidence: Strategy's confidence in this proposal (0-1).
@@ -251,6 +331,7 @@ class ImprovementProposal(BaseModel):
     config_changes: tuple[ConfigChange, ...] = ()
     architecture_changes: tuple[ArchitectureChange, ...] = ()
     prompt_changes: tuple[PromptChange, ...] = ()
+    code_changes: tuple[CodeChange, ...] = ()
     rollback_plan: RollbackPlan
     rollout_strategy: RolloutStrategyType = RolloutStrategyType.BEFORE_AFTER
     confidence: float = Field(ge=0.0, le=1.0)
@@ -287,20 +368,38 @@ class ImprovementProposal(BaseModel):
     @model_validator(mode="after")
     def _validate_changes_match_altitude(self) -> Self:
         """Ensure only the declared altitude carries changes."""
+        other_code = self.code_changes
         if self.altitude == ProposalAltitude.CONFIG_TUNING and (
-            not self.config_changes or self.architecture_changes or self.prompt_changes
+            not self.config_changes
+            or self.architecture_changes
+            or self.prompt_changes
+            or other_code
         ):
             msg = "config_tuning proposals must contain only config_changes"
             raise ValueError(msg)
         if self.altitude == ProposalAltitude.ARCHITECTURE and (
-            not self.architecture_changes or self.config_changes or self.prompt_changes
+            not self.architecture_changes
+            or self.config_changes
+            or self.prompt_changes
+            or other_code
         ):
             msg = "architecture proposals must contain only architecture_changes"
             raise ValueError(msg)
         if self.altitude == ProposalAltitude.PROMPT_TUNING and (
-            not self.prompt_changes or self.config_changes or self.architecture_changes
+            not self.prompt_changes
+            or self.config_changes
+            or self.architecture_changes
+            or other_code
         ):
             msg = "prompt_tuning proposals must contain only prompt_changes"
+            raise ValueError(msg)
+        if self.altitude == ProposalAltitude.CODE_MODIFICATION and (
+            not self.code_changes
+            or self.config_changes
+            or self.architecture_changes
+            or self.prompt_changes
+        ):
+            msg = "code_modification proposals must contain only code_changes"
             raise ValueError(msg)
         return self
 
@@ -312,6 +411,7 @@ class ImprovementProposal(BaseModel):
             len(self.config_changes)
             + len(self.architecture_changes)
             + len(self.prompt_changes)
+            + len(self.code_changes)
         )
 
 
@@ -439,6 +539,46 @@ class ApplyResult(BaseModel):
         return self
 
 
+# ── CI validation result ──────────────────────────────────────────
+
+
+class CIValidationResult(BaseModel):
+    """Outcome of running CI checks against proposed code changes.
+
+    Attributes:
+        passed: Whether all checks passed.
+        lint_passed: Whether ruff lint passed.
+        typecheck_passed: Whether mypy type-check passed.
+        tests_passed: Whether pytest tests passed.
+        errors: Error descriptions from failed steps.
+        duration_seconds: Total wall-clock time for validation.
+    """
+
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
+
+    passed: bool
+    lint_passed: bool
+    typecheck_passed: bool
+    tests_passed: bool
+    errors: tuple[NotBlankStr, ...] = ()
+    duration_seconds: float = Field(ge=0.0)
+
+    @model_validator(mode="after")
+    def _validate_passed_consistent(self) -> Self:
+        """Passed must exactly match the conjunction of sub-checks."""
+        all_ok = self.lint_passed and self.typecheck_passed and self.tests_passed
+        if self.passed != all_ok:
+            msg = "passed must equal the conjunction of all sub-checks"
+            raise ValueError(msg)
+        if self.passed and self.errors:
+            msg = "passed CI validations must not include errors"
+            raise ValueError(msg)
+        if not self.passed and not self.errors:
+            msg = "failed CI validations must include at least one error"
+            raise ValueError(msg)
+        return self
+
+
 # ── Regression thresholds ──────────────────────────────────────────
 
 
@@ -509,273 +649,65 @@ class RegressionResult(BaseModel):
         return self
 
 
-# ── Signal summary models ──────────────────────────────────────────
-
-
-class TrendDirection(StrEnum):
-    """Direction of a metric trend."""
-
-    IMPROVING = "improving"
-    DECLINING = "declining"
-    STABLE = "stable"
-
-
-class MetricSummary(BaseModel):
-    """Summary of a single metric across the org.
-
-    Attributes:
-        name: Metric name.
-        value: Current aggregate value.
-        trend: Direction over the observation window.
-        window_days: How many days the trend covers.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    name: NotBlankStr
-    value: float
-    trend: TrendDirection = TrendDirection.STABLE
-    window_days: int = Field(default=7, ge=1)
-
-
-class OrgPerformanceSummary(BaseModel):
-    """Org-wide performance signal summary.
-
-    Attributes:
-        avg_quality_score: Org average quality (0-10).
-        avg_success_rate: Org average success rate (0-1).
-        avg_collaboration_score: Org average collaboration (0-10).
-        metrics: Per-metric summaries with trends.
-        agent_count: Number of active agents.
-        department_summaries: Per-department metric rollups.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    avg_quality_score: float = Field(ge=0.0, le=10.0)
-    avg_success_rate: float = Field(ge=0.0, le=1.0)
-    avg_collaboration_score: float = Field(ge=0.0, le=10.0)
-    metrics: tuple[MetricSummary, ...] = ()
-    agent_count: int = Field(ge=0)
-    department_summaries: dict[str, dict[str, float]] = Field(
-        default_factory=dict,
-    )
-
-
-class OrgBudgetSummary(BaseModel):
-    """Org-wide budget signal summary.
-
-    Attributes:
-        total_spend_usd: Total spend in current period.
-        productive_ratio: Fraction of spend on productive work.
-        coordination_ratio: Fraction of spend on coordination.
-        system_ratio: Fraction of spend on system overhead.
-        days_until_exhausted: Forecast days until budget runs out.
-        forecast_confidence: Confidence in the forecast (0-1).
-        orchestration_overhead: Coordination/productive token ratio.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    total_spend_usd: float = Field(ge=0.0)
-    productive_ratio: float = Field(ge=0.0, le=1.0)
-    coordination_ratio: float = Field(ge=0.0, le=1.0)
-    system_ratio: float = Field(ge=0.0, le=1.0)
-    days_until_exhausted: int | None = None
-    forecast_confidence: float = Field(ge=0.0, le=1.0)
-    orchestration_overhead: float = Field(ge=0.0)
-
-
-class OrgCoordinationSummary(BaseModel):
-    """Org-wide coordination metrics summary.
-
-    Attributes:
-        coordination_efficiency: Success-rate-adjusted turn efficiency.
-        coordination_overhead_pct: Percentage overhead for MAS vs SAS.
-        error_amplification: MAS/SAS error rate ratio.
-        message_density: Messages per reasoning turn.
-        redundancy_rate: Mean output similarity (0-1).
-        straggler_gap_ratio: Slowest/mean completion ratio.
-        sample_count: Number of tasks used for these metrics.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    coordination_efficiency: float | None = None
-    coordination_overhead_pct: float | None = None
-    error_amplification: float | None = None
-    message_density: float | None = None
-    redundancy_rate: float | None = None
-    straggler_gap_ratio: float | None = None
-    sample_count: int = Field(default=0, ge=0)
-
-
-class ScalingDecisionSummary(BaseModel):
-    """Summary of a recent scaling decision and its outcome.
-
-    Attributes:
-        action_type: What was proposed (hire/prune/hold).
-        outcome: What happened (executed/failed/deferred/rejected).
-        source_strategy: Which strategy proposed it.
-        rationale: Why.
-        created_at: When the decision was made.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    action_type: NotBlankStr
-    outcome: NotBlankStr
-    source_strategy: NotBlankStr
-    rationale: NotBlankStr
-    created_at: AwareDatetime
-
-
-class OrgScalingSummary(BaseModel):
-    """Org-wide scaling signal summary.
-
-    Attributes:
-        recent_decisions: Recent scaling decisions with outcomes.
-        total_decisions: Total decisions in the window.
-        success_rate: Fraction of decisions that were executed.
-        most_common_signal: Most frequently triggered signal.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    recent_decisions: tuple[ScalingDecisionSummary, ...] = ()
-    total_decisions: int = Field(default=0, ge=0)
-    success_rate: float = Field(default=0.0, ge=0.0, le=1.0)
-    most_common_signal: NotBlankStr | None = None
-
-
-class ErrorCategorySummary(BaseModel):
-    """Summary of errors in a single category.
-
-    Attributes:
-        category: Error category name.
-        count: Number of findings in this category.
-        avg_severity: Average severity (low=1, medium=2, high=3).
-        trend: Whether this category is increasing or decreasing.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    category: NotBlankStr
-    count: int = Field(ge=0)
-    avg_severity: float = Field(ge=1.0, le=3.0)
-    trend: TrendDirection = TrendDirection.STABLE
-
-
-class OrgErrorSummary(BaseModel):
-    """Org-wide error taxonomy signal summary.
-
-    Attributes:
-        total_findings: Total error findings in the window.
-        categories: Per-category summaries.
-        most_severe_category: Category with highest avg severity.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    total_findings: int = Field(default=0, ge=0)
-    categories: tuple[ErrorCategorySummary, ...] = ()
-    most_severe_category: NotBlankStr | None = None
-
-    @model_validator(mode="after")
-    def _validate_severe_category_exists(self) -> Self:
-        """Ensure most_severe_category references an actual category."""
-        if self.most_severe_category:
-            names = {c.category for c in self.categories}
-            if self.most_severe_category not in names:
-                msg = (
-                    f"most_severe_category '{self.most_severe_category}' "
-                    f"not found in categories"
-                )
-                raise ValueError(msg)
-        return self
-
-
-class EvolutionOutcomeSummary(BaseModel):
-    """Summary of a recent evolution outcome.
-
-    Attributes:
-        agent_id: Which agent was evolved.
-        axis: Which axis was adapted.
-        applied: Whether the adaptation was applied.
-        proposed_at: When the proposal was generated.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    agent_id: NotBlankStr
-    axis: NotBlankStr
-    applied: bool
-    proposed_at: AwareDatetime
-
-
-class OrgEvolutionSummary(BaseModel):
-    """Org-wide evolution signal summary.
-
-    Attributes:
-        recent_outcomes: Recent evolution outcomes.
-        total_proposals: Total proposals in the window.
-        approval_rate: Fraction of proposals approved/applied.
-        most_adapted_axis: Most frequently adapted axis.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    recent_outcomes: tuple[EvolutionOutcomeSummary, ...] = ()
-    total_proposals: int = Field(default=0, ge=0)
-    approval_rate: float = Field(default=0.0, ge=0.0, le=1.0)
-    most_adapted_axis: NotBlankStr | None = None
-
-
-class OrgTelemetrySummary(BaseModel):
-    """Org-wide telemetry signal summary.
-
-    Attributes:
-        event_count: Total telemetry events in the window.
-        top_event_types: Most frequent event type names.
-        error_event_count: Number of error-level events.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    event_count: int = Field(default=0, ge=0)
-    top_event_types: tuple[str, ...] = ()
-    error_event_count: int = Field(default=0, ge=0)
-
-
-# ── Composite signal snapshot ──────────────────────────────────────
-
-
-class OrgSignalSnapshot(BaseModel):
-    """Composite snapshot of all org-wide signals.
-
-    Assembled by the snapshot builder from all signal aggregators.
-    Passed to the rule engine and improvement strategies.
-
-    Attributes:
-        performance: Performance signal summary.
-        budget: Budget signal summary.
-        coordination: Coordination metrics summary.
-        scaling: Scaling signal summary.
-        errors: Error taxonomy summary.
-        evolution: Evolution signal summary.
-        telemetry: Telemetry signal summary.
-        collected_at: When the snapshot was assembled.
-    """
-
-    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
-
-    performance: OrgPerformanceSummary
-    budget: OrgBudgetSummary
-    coordination: OrgCoordinationSummary
-    scaling: OrgScalingSummary
-    errors: OrgErrorSummary
-    evolution: OrgEvolutionSummary
-    telemetry: OrgTelemetrySummary
-    collected_at: AwareDatetime = Field(
-        default_factory=lambda: datetime.now(UTC),
-    )
+# ── Signal summary models (re-exported from signal_models) ────────
+# Moved to signal_models.py to keep models.py under 800 lines.
+# All names remain importable from synthorg.meta.models via __all__.
+
+from synthorg.meta.signal_models import (  # noqa: E402
+    ErrorCategorySummary,
+    EvolutionOutcomeSummary,
+    MetricSummary,
+    OrgBudgetSummary,
+    OrgCoordinationSummary,
+    OrgErrorSummary,
+    OrgEvolutionSummary,
+    OrgPerformanceSummary,
+    OrgScalingSummary,
+    OrgSignalSnapshot,
+    OrgTelemetrySummary,
+    ScalingDecisionSummary,
+    TrendDirection,
+)
+
+__all__ = [
+    # Core models
+    "ApplyResult",
+    "ArchitectureChange",
+    "CIValidationResult",
+    "CodeChange",
+    # Enums
+    "CodeOperation",
+    "ConfigChange",
+    # Re-exported signal models
+    "ErrorCategorySummary",
+    "EvolutionMode",
+    "EvolutionOutcomeSummary",
+    "GuardResult",
+    "GuardVerdict",
+    "ImprovementProposal",
+    "MetricSummary",
+    "OrgBudgetSummary",
+    "OrgCoordinationSummary",
+    "OrgErrorSummary",
+    "OrgEvolutionSummary",
+    "OrgPerformanceSummary",
+    "OrgScalingSummary",
+    "OrgSignalSnapshot",
+    "OrgTelemetrySummary",
+    "PromptChange",
+    "ProposalAltitude",
+    "ProposalRationale",
+    "ProposalStatus",
+    "RegressionResult",
+    "RegressionThresholds",
+    "RegressionVerdict",
+    "RollbackOperation",
+    "RollbackPlan",
+    "RolloutOutcome",
+    "RolloutResult",
+    "RolloutStrategyType",
+    "RuleMatch",
+    "RuleSeverity",
+    "ScalingDecisionSummary",
+    "TrendDirection",
+]

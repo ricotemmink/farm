@@ -11,8 +11,11 @@ from synthorg.core.types import NotBlankStr  # noqa: TC001
 
 if TYPE_CHECKING:
     from datetime import datetime
+    from pathlib import Path
 from synthorg.meta.models import (
     ApplyResult,  # noqa: TC001
+    CIValidationResult,  # noqa: TC001
+    CodeChange,  # noqa: TC001
     GuardResult,  # noqa: TC001
     ImprovementProposal,  # noqa: TC001
     OrgBudgetSummary,  # noqa: TC001
@@ -265,5 +268,92 @@ class RegressionDetector(Protocol):
 
         Returns:
             Regression result with verdict and details.
+        """
+        ...
+
+
+@runtime_checkable
+class GitHubAPI(Protocol):
+    """Pushes code changes to a GitHub repository.
+
+    Used by ``CodeApplier`` to create branches, push file changes,
+    open draft PRs, and clean up branches -- all via the GitHub
+    REST API so no local ``git`` or ``gh`` CLI is required.
+    """
+
+    async def create_branch(self, name: str) -> None:
+        """Create a new branch from the default branch HEAD.
+
+        Args:
+            name: Branch name to create.
+        """
+        ...
+
+    async def push_change(
+        self,
+        *,
+        branch: str,
+        change: CodeChange,
+        message: str,
+    ) -> None:
+        """Push a single file change (create/modify/delete) to a branch.
+
+        Args:
+            branch: Target branch name.
+            change: The code change to push.
+            message: Commit message.
+        """
+        ...
+
+    async def create_draft_pr(
+        self,
+        *,
+        head: str,
+        title: str,
+        body: str,
+    ) -> str:
+        """Create a draft pull request.
+
+        Args:
+            head: Head branch name.
+            title: PR title.
+            body: PR body (Markdown).
+
+        Returns:
+            URL of the created PR.
+        """
+        ...
+
+    async def delete_branch(self, name: str) -> None:
+        """Delete a remote branch.
+
+        Args:
+            name: Branch name to delete.
+        """
+        ...
+
+
+@runtime_checkable
+class CIValidator(Protocol):
+    """Validates proposed code changes against CI checks.
+
+    Implementations run lint, type-check, and test commands
+    against the changed files and report aggregate results.
+    """
+
+    async def validate(
+        self,
+        *,
+        project_root: Path,
+        changed_files: tuple[str, ...],
+    ) -> CIValidationResult:
+        """Run CI validation against changed files.
+
+        Args:
+            project_root: Absolute path to the project root.
+            changed_files: Relative paths of files that changed.
+
+        Returns:
+            CI validation result with per-step outcomes.
         """
         ...

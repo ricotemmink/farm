@@ -1,6 +1,7 @@
 """Unit tests for meta-loop factory module."""
 
 import pytest
+from pydantic import ValidationError
 
 from synthorg.meta.chief_of_staff.learning import (
     BayesianConfidenceAdjuster,
@@ -79,7 +80,7 @@ class TestBuildStrategies:
         assert len(strategies) == 1
         assert strategies[0].altitude == ProposalAltitude.CONFIG_TUNING
 
-    def test_all_strategies_enabled(self) -> None:
+    def test_all_deployment_strategies_enabled(self) -> None:
         cfg = SelfImprovementConfig(
             enabled=True,
             config_tuning_enabled=True,
@@ -94,6 +95,39 @@ class TestBuildStrategies:
             ProposalAltitude.ARCHITECTURE,
             ProposalAltitude.PROMPT_TUNING,
         }
+
+    def test_code_modification_without_provider_skipped(self) -> None:
+        from synthorg.meta.config import CodeModificationConfig
+
+        cfg = SelfImprovementConfig(
+            enabled=True,
+            code_modification_enabled=True,
+            code_modification=CodeModificationConfig(
+                github_token="test-token",
+                github_repo="test/repo",
+            ),
+        )
+        strategies = build_strategies(cfg, provider=None)
+        altitudes = {s.altitude for s in strategies}
+        assert ProposalAltitude.CODE_MODIFICATION not in altitudes
+
+    def test_code_modification_with_provider_included(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from synthorg.meta.config import CodeModificationConfig
+
+        cfg = SelfImprovementConfig(
+            enabled=True,
+            code_modification_enabled=True,
+            code_modification=CodeModificationConfig(
+                github_token="test-token",
+                github_repo="test/repo",
+            ),
+        )
+        provider = AsyncMock()
+        strategies = build_strategies(cfg, provider=provider)
+        altitudes = {s.altitude for s in strategies}
+        assert ProposalAltitude.CODE_MODIFICATION in altitudes
 
     def test_none_enabled(self) -> None:
         cfg = SelfImprovementConfig(
@@ -129,12 +163,46 @@ class TestBuildGuards:
 class TestBuildAppliers:
     """Applier factory tests."""
 
-    def test_builds_3_appliers(self) -> None:
+    def test_builds_3_appliers_without_config(self) -> None:
         appliers = build_appliers()
         assert len(appliers) == 3
         assert ProposalAltitude.CONFIG_TUNING in appliers
         assert ProposalAltitude.ARCHITECTURE in appliers
         assert ProposalAltitude.PROMPT_TUNING in appliers
+
+    def test_builds_3_appliers_with_code_mod_disabled(self) -> None:
+        cfg = SelfImprovementConfig(
+            enabled=True,
+            code_modification_enabled=False,
+        )
+        appliers = build_appliers(cfg)
+        assert len(appliers) == 3
+        assert ProposalAltitude.CODE_MODIFICATION not in appliers
+
+    def test_code_mod_enabled_without_creds_rejects(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="code_modification_enabled requires",
+        ):
+            SelfImprovementConfig(
+                enabled=True,
+                code_modification_enabled=True,
+            )
+
+    def test_builds_4_appliers_with_code_mod_and_creds(self) -> None:
+        from synthorg.meta.config import CodeModificationConfig
+
+        cfg = SelfImprovementConfig(
+            enabled=True,
+            code_modification_enabled=True,
+            code_modification=CodeModificationConfig(
+                github_token="test-token",
+                github_repo="test/repo",
+            ),
+        )
+        appliers = build_appliers(cfg)
+        assert len(appliers) == 4
+        assert ProposalAltitude.CODE_MODIFICATION in appliers
 
 
 class TestBuildRegressionDetector:
