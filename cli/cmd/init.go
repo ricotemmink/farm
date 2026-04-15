@@ -480,8 +480,9 @@ func runSetupFormWithOverrides(cmd *cobra.Command, resolvedDataDir string) (setu
 		}
 	}
 
-	// Fine-tuning question (only when sandbox enabled -- requires Docker).
-	if a.sandbox {
+	// Fine-tuning question (only when sandbox enabled on amd64 -- the
+	// fine-tune image ships x86_64 only because GPU workloads require it).
+	if a.sandbox && runtime.GOARCH == "amd64" {
 		fineTuneForm := huh.NewForm(huh.NewGroup(
 			huh.NewConfirm().
 				Title("Enable embedding fine-tuning?").

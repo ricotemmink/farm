@@ -14,6 +14,11 @@ on:
       - "uv.lock"
       - ".dockerignore"
       - ".github/workflows/docker.yml"
+      - ".github/actions/build-apko-base/**"
+      - ".github/actions/cis-scan/**"
+      - ".github/actions/setup-apko/**"
+      - ".github/actions/setup-python-uv/**"
+      - "scripts/cis-scan.sh"
       - "docs/**"
       - "mkdocs.yml"
       - "scripts/export_openapi.py"
@@ -28,8 +33,6 @@ concurrency:
 env:
   # renovate: datasource=github-releases depName=aquasecurity/trivy
   TRIVY_VERSION: "0.69.3"
-  # renovate: datasource=github-releases depName=anchore/grype
-  GRYPE_VERSION: "0.111.0"
 
 jobs:
   # Detect which domains changed so docs-only PRs skip backend/sandbox builds
@@ -62,14 +65,26 @@ jobs:
               - 'uv.lock'
               - '.dockerignore'
               - '.github/workflows/docker.yml'
+              - '.github/actions/build-apko-base/**'
+              - '.github/actions/cis-scan/**'
+              - '.github/actions/setup-apko/**'
+              - 'scripts/cis-scan.sh'
             sandbox:
               - 'docker/sandbox/**'
               - '.dockerignore'
               - '.github/workflows/docker.yml'
+              - '.github/actions/build-apko-base/**'
+              - '.github/actions/cis-scan/**'
+              - '.github/actions/setup-apko/**'
+              - 'scripts/cis-scan.sh'
             sidecar:
               - 'docker/sidecar/**'
               - '.dockerignore'
               - '.github/workflows/docker.yml'
+              - '.github/actions/build-apko-base/**'
+              - '.github/actions/cis-scan/**'
+              - '.github/actions/setup-apko/**'
+              - 'scripts/cis-scan.sh'
             fine-tune:
               - 'docker/fine-tune/**'
               - 'src/synthorg/memory/embedding/**'
@@ -77,6 +92,10 @@ jobs:
               - 'uv.lock'
               - '.dockerignore'
               - '.github/workflows/docker.yml'
+              - '.github/actions/build-apko-base/**'
+              - '.github/actions/cis-scan/**'
+              - '.github/actions/setup-apko/**'
+              - 'scripts/cis-scan.sh'
             web:
               - 'docker/web/**'
               - 'web/**'
@@ -85,6 +104,11 @@ jobs:
               - 'scripts/export_openapi.py'
               - 'src/synthorg/api/**'
               - '.github/workflows/docker.yml'
+              - '.github/actions/build-apko-base/**'
+              - '.github/actions/cis-scan/**'
+              - '.github/actions/setup-apko/**'
+              - '.github/actions/setup-python-uv/**'
+              - 'scripts/cis-scan.sh'
 
   # Extract app version from pyproject.toml (single source of truth)
   version:
@@ -178,7 +202,6 @@ jobs:
           image-name: backend
           apko-yaml: docker/backend/apko.yaml
           trivy-version: ${{ env.TRIVY_VERSION }}
-          grype-version: ${{ env.GRYPE_VERSION }}
           ghcr-token: ${{ secrets.GITHUB_TOKEN }}
 
   build-sandbox-base:
@@ -208,7 +231,6 @@ jobs:
           image-name: sandbox
           apko-yaml: docker/sandbox/apko.yaml
           trivy-version: ${{ env.TRIVY_VERSION }}
-          grype-version: ${{ env.GRYPE_VERSION }}
           ghcr-token: ${{ secrets.GITHUB_TOKEN }}
 
   build-sidecar-base:
@@ -238,7 +260,6 @@ jobs:
           image-name: sidecar
           apko-yaml: docker/sidecar/apko.yaml
           trivy-version: ${{ env.TRIVY_VERSION }}
-          grype-version: ${{ env.GRYPE_VERSION }}
           ghcr-token: ${{ secrets.GITHUB_TOKEN }}
 
   build-fine-tune-base:
@@ -268,7 +289,7 @@ jobs:
           image-name: fine-tune
           apko-yaml: docker/fine-tune/apko.yaml
           trivy-version: ${{ env.TRIVY_VERSION }}
-          grype-version: ${{ env.GRYPE_VERSION }}
+          architectures: "amd64"
           ghcr-token: ${{ secrets.GITHUB_TOKEN }}
 
   # =========================================================================
@@ -406,30 +427,10 @@ jobs:
           sarif_file: trivy-backend.sarif
           category: trivy-backend
 
-      - name: Grype scan
-        id: grype-backend
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
-        with:
-          image: ${{ steps.scan-ref.outputs.ref }}
-          fail-build: true
-          severity-cutoff: critical
-          config: .github/.grype.yaml
-
-      - name: Grype table (diagnosis on failure)
-        if: failure() && steps.grype-backend.outcome == 'failure'
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
-        with:
-          image: ${{ steps.scan-ref.outputs.ref }}
-          fail-build: false
-          severity-cutoff: critical
-          output-format: table
-          config: .github/.grype.yaml
-
-      # CIS Docker Benchmark v1.6.0 compliance check.
-      # Informational for now -- remove continue-on-error once baseline is clean.
       - name: CIS Docker Benchmark (backend)
-        continue-on-error: true
-        run: scripts/cis-scan.sh "${{ steps.scan-ref.outputs.ref }}"
+        uses: ./.github/actions/cis-scan
+        with:
+          image-ref: ${{ steps.scan-ref.outputs.ref }}
 
       # Push only after scans pass -- prevents publishing vulnerable images.
       # NOTE: This is a separate build invocation from the scan step. GHA cache
@@ -677,13 +678,10 @@ jobs:
           sarif_file: trivy-web.sarif
           category: trivy-web
 
-      - name: Grype scan
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+      - name: CIS Docker Benchmark (web)
+        uses: ./.github/actions/cis-scan
         with:
-          image: ${{ steps.scan-ref.outputs.ref }}
-          fail-build: true
-          severity-cutoff: critical
-          config: .github/.grype.yaml
+          image-ref: ${{ steps.scan-ref.outputs.ref }}
 
       - name: Push web image (multi-arch manifest)
         if: github.event_name != 'pull_request'
@@ -906,30 +904,10 @@ jobs:
           sarif_file: trivy-sandbox.sarif
           category: trivy-sandbox
 
-      - name: Grype scan
-        id: grype-sandbox
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
-        with:
-          image: ${{ steps.scan-ref.outputs.ref }}
-          fail-build: true
-          severity-cutoff: critical
-          config: .github/.grype.yaml
-
-      - name: Grype table (diagnosis on failure)
-        if: failure() && steps.grype-sandbox.outcome == 'failure'
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
-        with:
-          image: ${{ steps.scan-ref.outputs.ref }}
-          fail-build: false
-          severity-cutoff: critical
-          output-format: table
-          config: .github/.grype.yaml
-
-      # CIS Docker Benchmark v1.6.0 compliance check.
-      # Informational for now -- remove continue-on-error once baseline is clean.
       - name: CIS Docker Benchmark (sandbox)
-        continue-on-error: true
-        run: scripts/cis-scan.sh "${{ steps.scan-ref.outputs.ref }}"
+        uses: ./.github/actions/cis-scan
+        with:
+          image-ref: ${{ steps.scan-ref.outputs.ref }}
 
       # Push only after scans pass -- prevents publishing vulnerable images.
       # NOTE: Separate build invocation; GHA cache ensures deterministic layers,
@@ -1128,31 +1106,10 @@ jobs:
           sarif_file: trivy-sidecar.sarif
           category: trivy-sidecar
 
-      - name: Grype scan
-        id: grype-sidecar
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
-        with:
-          image: ${{ steps.scan-ref.outputs.ref }}
-          fail-build: true
-          severity-cutoff: critical
-          config: .github/.grype.yaml
-
-      - name: Grype table (diagnosis on failure)
-        if: failure() && steps.grype-sidecar.outcome == 'failure'
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
-        with:
-          image: ${{ steps.scan-ref.outputs.ref }}
-          fail-build: false
-          severity-cutoff: critical
-          output-format: table
-          config: .github/.grype.yaml
-
-      # CIS Docker Benchmark -- sidecar runs as root (NET_ADMIN required for
-      # iptables DNAT). Root-user checks will flag; this is expected and
-      # mitigated by cap_drop + cap_add:NET_ADMIN + read_only rootfs.
       - name: CIS Docker Benchmark (sidecar)
-        continue-on-error: true
-        run: scripts/cis-scan.sh "${{ steps.scan-ref.outputs.ref }}"
+        uses: ./.github/actions/cis-scan
+        with:
+          image-ref: ${{ steps.scan-ref.outputs.ref }}
 
       - name: Push image
         if: github.event_name != 'pull_request'
@@ -1240,11 +1197,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up QEMU (ARM64 emulation)
-        if: github.event_name != 'pull_request'
-        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
-        with:
-          platforms: arm64
+      # QEMU ARM64 not needed -- fine-tune is amd64-only (GPU workloads).
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
@@ -1348,29 +1301,10 @@ jobs:
           sarif_file: trivy-fine-tune.sarif
           category: trivy-fine-tune
 
-      - name: Grype scan
-        id: grype-fine-tune
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
-        with:
-          image: ${{ steps.scan-ref.outputs.ref }}
-          fail-build: true
-          severity-cutoff: critical
-          config: .github/.grype.yaml
-
-      - name: Grype table (diagnosis on failure)
-        if: failure() && steps.grype-fine-tune.outcome == 'failure'
-        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
-        with:
-          image: ${{ steps.scan-ref.outputs.ref }}
-          fail-build: false
-          severity-cutoff: critical
-          output-format: table
-          config: .github/.grype.yaml
-
-      # CIS Docker Benchmark -- fine-tune runs as non-root (UID 10003).
       - name: CIS Docker Benchmark (fine-tune)
-        continue-on-error: true
-        run: scripts/cis-scan.sh "${{ steps.scan-ref.outputs.ref }}"
+        uses: ./.github/actions/cis-scan
+        with:
+          image-ref: ${{ steps.scan-ref.outputs.ref }}
 
       - name: Push image
         if: github.event_name != 'pull_request'
@@ -1385,7 +1319,7 @@ jobs:
           build-args: |
             BASE_IMAGE=${{ needs.build-fine-tune-base.outputs.digest != '' && format('ghcr.io/aureliolo/synthorg-fine-tune-base@{0}', needs.build-fine-tune-base.outputs.digest) || format('ghcr.io/aureliolo/synthorg-fine-tune-base:{0}', needs.build-fine-tune-base.outputs.tag) }}
           cache-from: type=gha
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           sbom: true
           provenance: true
 
