@@ -3,14 +3,18 @@
 from typing import Any
 
 from litestar import Controller, get, post
+from litestar.datastructures import State  # noqa: TC002
 from litestar.exceptions import NotFoundException
 
+from synthorg.api.controllers.custom_rules import rule_to_dict
 from synthorg.api.dto import ApiResponse
 from synthorg.api.guards import require_org_mutation, require_read_access
 from synthorg.meta.config import SelfImprovementConfig
 from synthorg.meta.mcp.server import get_server_config
 from synthorg.meta.mcp.tools import get_tool_definitions
 from synthorg.observability import get_logger
+from synthorg.observability.events.meta import META_CUSTOM_RULE_LIST_FAILED
+from synthorg.persistence.errors import QueryError
 
 logger = get_logger(__name__)
 
@@ -23,7 +27,7 @@ class MetaController(Controller):
     triggers and proposal approval/rejection.
     """
 
-    path = "/api/meta"
+    path = "/meta"
     tags = ["meta"]  # noqa: RUF012
     guards = [require_read_access]  # noqa: RUF012
 
@@ -42,11 +46,14 @@ class MetaController(Controller):
         )
 
     @get("/rules")
-    async def list_rules(self) -> ApiResponse[list[dict[str, Any]]]:
-        """List configured signal rules with enabled status.
+    async def list_rules(
+        self,
+        state: State,
+    ) -> ApiResponse[list[dict[str, Any]]]:
+        """List all signal rules (built-in + custom) with status.
 
         Returns:
-            List of rule names and their enabled status.
+            List of rule names, enabled status, and type.
         """
         from synthorg.meta.rules.builtin import default_rules  # noqa: PLC0415
 
@@ -54,14 +61,26 @@ class MetaController(Controller):
         # TODO: inject runtime config via Litestar DI.
         config = SelfImprovementConfig()
         disabled = set(config.rules.disabled_rules)
-        rule_list = [
+        rule_list: list[dict[str, Any]] = [
             {
                 "name": r.name,
                 "enabled": r.name not in disabled,
                 "target_altitudes": [a.value for a in r.target_altitudes],
+                "type": "builtin",
             }
             for r in rules
         ]
+        # Append custom rules from persistence.
+        repo = state.app_state.persistence.custom_rules
+        try:
+            custom = await repo.list_rules()
+        except (QueryError, NotImplementedError) as exc:
+            logger.warning(
+                META_CUSTOM_RULE_LIST_FAILED,
+                error=str(exc),
+            )
+        else:
+            rule_list.extend({**rule_to_dict(cr), "type": "custom"} for cr in custom)
         return ApiResponse[list[dict[str, Any]]](data=rule_list)
 
     @get("/mcp/tools")

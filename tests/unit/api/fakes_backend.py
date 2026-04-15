@@ -11,6 +11,7 @@ from pydantic import AwareDatetime
 
 from synthorg.core.types import NotBlankStr
 from synthorg.hr.training.models import TrainingPlan, TrainingPlanStatus, TrainingResult
+from synthorg.meta.rules.custom import CustomRuleDefinition
 from synthorg.persistence.errors import DuplicateRecordError
 from synthorg.persistence.integration_stubs import (
     StubConnectionRepository,
@@ -301,6 +302,59 @@ class FakeTrainingResultRepository:
         return max(agent_results, key=lambda r: r.completed_at)
 
 
+class FakeCustomRuleRepository:
+    """In-memory fake for ``CustomRuleRepository``."""
+
+    def __init__(self) -> None:
+        self._rules: dict[str, CustomRuleDefinition] = {}
+
+    async def save(self, rule: CustomRuleDefinition) -> None:
+        from synthorg.persistence.errors import (
+            ConstraintViolationError,
+        )
+
+        for existing in self._rules.values():
+            if existing.name == rule.name and existing.id != rule.id:
+                msg = f"Custom rule name '{rule.name}' already exists"
+                raise ConstraintViolationError(
+                    msg,
+                    constraint="custom_rules_name_unique",
+                )
+        self._rules[str(rule.id)] = rule
+
+    async def get(
+        self,
+        rule_id: NotBlankStr,
+    ) -> CustomRuleDefinition | None:
+        return self._rules.get(str(rule_id))
+
+    async def get_by_name(
+        self,
+        name: NotBlankStr,
+    ) -> CustomRuleDefinition | None:
+        for r in self._rules.values():
+            if r.name == name:
+                return r
+        return None
+
+    async def list_rules(
+        self,
+        *,
+        enabled_only: bool = False,
+    ) -> tuple[CustomRuleDefinition, ...]:
+        rules = list(self._rules.values())
+        if enabled_only:
+            rules = [r for r in rules if r.enabled]
+        return tuple(sorted(rules, key=lambda r: r.name))
+
+    async def delete(self, rule_id: NotBlankStr) -> bool:
+        key = str(rule_id)
+        if key in self._rules:
+            del self._rules[key]
+            return True
+        return False
+
+
 class FakePersistenceBackend:
     """In-memory persistence backend for tests."""
 
@@ -339,6 +393,7 @@ class FakePersistenceBackend:
         self._settings_repo = FakeSettingsRepository()
         self._training_plans_repo = FakeTrainingPlanRepository()
         self._training_results_repo = FakeTrainingResultRepository()
+        self._custom_rules_repo = FakeCustomRuleRepository()
         self._connections_stub = StubConnectionRepository()
         self._connection_secrets_stub = StubConnectionSecretRepository()
         self._oauth_states_stub = StubOAuthStateRepository()
@@ -541,6 +596,11 @@ class FakePersistenceBackend:
     def training_results(self) -> FakeTrainingResultRepository:
         """Fake training result repository."""
         return self._training_results_repo
+
+    @property
+    def custom_rules(self) -> FakeCustomRuleRepository:
+        """Fake custom rule repository."""
+        return self._custom_rules_repo
 
     async def get_setting(self, key: str) -> str | None:
         return self._settings.get(key)
