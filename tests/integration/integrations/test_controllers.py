@@ -350,7 +350,10 @@ class TestMCPCatalogController:
         assert len(response.data) >= 8
 
     async def test_install_connectionless_entry(self) -> None:
-        from synthorg.api.controllers.mcp_catalog import MCPCatalogController
+        from synthorg.api.controllers.mcp_catalog import (
+            InstallEntryRequest,
+            MCPCatalogController,
+        )
         from synthorg.integrations.mcp_catalog.service import CatalogService
         from synthorg.integrations.mcp_catalog.sqlite_repo import (
             InMemoryMcpInstallationRepository,
@@ -368,27 +371,30 @@ class TestMCPCatalogController:
         response = await ctrl.install_entry.fn(
             ctrl,
             state=state,
-            data={"catalog_entry_id": "filesystem-mcp"},
+            data=InstallEntryRequest(catalog_entry_id="filesystem-mcp"),
         )
-        assert response.data["status"] == "installed"
-        assert response.data["server_name"] == "Filesystem"
-        assert response.data["catalog_entry_id"] == "filesystem-mcp"
+        assert response.data.status == "installed"
+        assert response.data.server_name == "Filesystem"
+        assert response.data.catalog_entry_id == "filesystem-mcp"
         # tool_count matches filesystem-mcp capabilities:
         # file_read, file_write, directory_listing.
-        assert response.data["tool_count"] == 3
+        assert response.data.tool_count == 3
         stored = await repo.get(NotBlankStr("filesystem-mcp"))
         assert stored is not None
         # Repeat install must be idempotent -- same row, same response.
         second = await ctrl.install_entry.fn(
             ctrl,
             state=state,
-            data={"catalog_entry_id": "filesystem-mcp"},
+            data=InstallEntryRequest(catalog_entry_id="filesystem-mcp"),
         )
         assert second.data == response.data
         assert len(await repo.list_all()) == 1
 
     async def test_install_missing_entry_raises_404(self) -> None:
-        from synthorg.api.controllers.mcp_catalog import MCPCatalogController
+        from synthorg.api.controllers.mcp_catalog import (
+            InstallEntryRequest,
+            MCPCatalogController,
+        )
         from synthorg.integrations.mcp_catalog.service import CatalogService
         from synthorg.integrations.mcp_catalog.sqlite_repo import (
             InMemoryMcpInstallationRepository,
@@ -406,29 +412,14 @@ class TestMCPCatalogController:
             await ctrl.install_entry.fn(
                 ctrl,
                 state=state,
-                data={"catalog_entry_id": "nope"},
+                data=InstallEntryRequest(catalog_entry_id="nope"),
             )
 
-    async def test_install_requires_catalog_entry_id(self) -> None:
-        from synthorg.api.controllers.mcp_catalog import MCPCatalogController
-        from synthorg.integrations.mcp_catalog.service import CatalogService
-        from synthorg.integrations.mcp_catalog.sqlite_repo import (
-            InMemoryMcpInstallationRepository,
-        )
-
-        state = {
-            "app_state": MagicMock(
-                mcp_catalog_service=CatalogService(),
-                mcp_installations_repo=InMemoryMcpInstallationRepository(),
-                has_connection_catalog=False,
-            ),
-        }
-        ctrl = MCPCatalogController(owner=MCPCatalogController)  # type: ignore[arg-type]
-        with pytest.raises(ApiValidationError):
-            await ctrl.install_entry.fn(ctrl, state=state, data={})
-
     async def test_install_connection_type_mismatch_400(self) -> None:
-        from synthorg.api.controllers.mcp_catalog import MCPCatalogController
+        from synthorg.api.controllers.mcp_catalog import (
+            InstallEntryRequest,
+            MCPCatalogController,
+        )
         from synthorg.integrations.mcp_catalog.service import CatalogService
         from synthorg.integrations.mcp_catalog.sqlite_repo import (
             InMemoryMcpInstallationRepository,
@@ -455,10 +446,10 @@ class TestMCPCatalogController:
             await ctrl.install_entry.fn(
                 ctrl,
                 state=state,
-                data={
-                    "catalog_entry_id": "github-mcp",
-                    "connection_name": "slacky",
-                },
+                data=InstallEntryRequest(
+                    catalog_entry_id="github-mcp",
+                    connection_name="slacky",
+                ),
             )
 
     async def test_uninstall_existing_entry(self) -> None:

@@ -662,7 +662,7 @@ def _expand_single_agent(  # noqa: PLR0913
         msg = f"Agent at index {idx} is missing required 'role' field"
         logger.warning(TEMPLATE_RENDER_VARIABLE_ERROR, index=idx, field="role")
         raise TemplateRenderError(msg)
-    name = str(agent.get("name", "")).strip()
+    name = str(agent.get("name") or "").strip()
 
     if not name or name.startswith("{{") or "__JINJA2__" in name:
         name = generate_auto_name(role, seed=idx, locales=locales)
@@ -710,7 +710,8 @@ def _expand_single_agent(  # noqa: PLR0913
     # Preserve merge_id when inheritance is active or when rendering
     # as a parent (so child templates can target agents by merge_id).
     keep_merge = preserve_merge_id or has_extends
-    merge_id = str(agent.get("merge_id", "")).strip()
+    merge_id_raw = agent.get("merge_id") or ""
+    merge_id = str(merge_id_raw).strip()
     if keep_merge and merge_id:
         agent_dict["merge_id"] = merge_id
 

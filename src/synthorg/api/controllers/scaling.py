@@ -38,7 +38,7 @@ class ScalingStrategyResponse(BaseModel):
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
-    name: str = Field(description="Strategy identifier")
+    name: NotBlankStr = Field(description="Strategy identifier")
     enabled: bool = Field(description="Whether this strategy is active")
     priority: int = Field(ge=0, description="Priority rank")
 
@@ -48,14 +48,14 @@ class ScalingSignalResponse(BaseModel):
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
-    name: str = Field(description="Signal name")
+    name: NotBlankStr = Field(description="Signal name")
     value: float = Field(description="Current value")
-    source: str = Field(description="Signal source")
+    source: NotBlankStr = Field(description="Signal source")
     threshold: float | None = Field(
         default=None,
         description="Configured threshold for this signal",
     )
-    timestamp: str = Field(description="ISO timestamp when collected")
+    timestamp: NotBlankStr = Field(description="ISO timestamp when collected")
 
 
 class ScalingDecisionResponse(BaseModel):
@@ -63,22 +63,22 @@ class ScalingDecisionResponse(BaseModel):
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
-    id: str = Field(description="Decision identifier")
-    action_type: str = Field(description="Action type")
-    source_strategy: str = Field(description="Strategy that proposed this")
-    target_agent_id: str | None = Field(
+    id: NotBlankStr = Field(description="Decision identifier")
+    action_type: NotBlankStr = Field(description="Action type")
+    source_strategy: NotBlankStr = Field(description="Strategy that proposed this")
+    target_agent_id: NotBlankStr | None = Field(
         default=None,
         description="Agent targeted for pruning",
     )
-    target_role: str | None = Field(
+    target_role: NotBlankStr | None = Field(
         default=None,
         description="Role to hire for",
     )
-    target_skills: tuple[str, ...] = Field(
+    target_skills: tuple[NotBlankStr, ...] = Field(
         default=(),
         description="Skills required for the hire target",
     )
-    target_department: str | None = Field(
+    target_department: NotBlankStr | None = Field(
         default=None,
         description="Department for the hire target",
     )
@@ -88,7 +88,7 @@ class ScalingDecisionResponse(BaseModel):
         default=(),
         description="Signals that informed the decision",
     )
-    created_at: str = Field(description="ISO timestamp")
+    created_at: NotBlankStr = Field(description="ISO timestamp")
 
 
 class StrategyUpdateRequest(BaseModel):

@@ -18,9 +18,15 @@ class TestNotificationCategory:
         assert NotificationCategory.APPROVAL.value == "approval"
         assert NotificationCategory.BUDGET.value == "budget"
         assert NotificationCategory.SECURITY.value == "security"
-        assert NotificationCategory.STAGNATION.value == "stagnation"
         assert NotificationCategory.SYSTEM.value == "system"
         assert NotificationCategory.AGENT.value == "agent"
+        assert NotificationCategory.HEALTH.value == "health"
+
+    def test_stagnation_removed(self) -> None:
+        """Regression guard: STAGNATION was unused and removed in favour of HEALTH."""
+        with pytest.raises(AttributeError):
+            _ = NotificationCategory.STAGNATION  # type: ignore[attr-defined]
+        assert "stagnation" not in {c.value for c in NotificationCategory}
 
 
 @pytest.mark.unit

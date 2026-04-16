@@ -1,7 +1,11 @@
 """Tests for provider health tracking."""
 
 import asyncio
+import operator
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -347,7 +351,50 @@ class TestGetAllSummaries:
     async def test_empty_tracker(self) -> None:
         tracker = ProviderHealthTracker()
         result = await tracker.get_all_summaries()
-        assert result == {}
+        assert isinstance(result, MappingProxyType)
+        assert len(result) == 0
+
+    @pytest.mark.parametrize(
+        ("mutation", "expected_exception"),
+        [
+            pytest.param(
+                lambda r: operator.setitem(r, "injected", ProviderHealthSummary()),
+                TypeError,
+                id="setitem",
+            ),
+            pytest.param(
+                lambda r: operator.delitem(r, "test-provider"),
+                TypeError,
+                id="delitem",
+            ),
+            pytest.param(
+                lambda r: r.pop("test-provider"),
+                AttributeError,
+                id="pop",
+            ),
+            pytest.param(lambda r: r.clear(), AttributeError, id="clear"),
+            pytest.param(
+                lambda r: r.update({"injected": ProviderHealthSummary()}),
+                AttributeError,
+                id="update",
+            ),
+        ],
+    )
+    async def test_returned_mapping_is_immutable(
+        self,
+        mutation: Callable[[Any], object],
+        expected_exception: type[Exception],
+    ) -> None:
+        tracker = ProviderHealthTracker()
+        now = datetime.now(UTC)
+        await tracker.record(
+            _make_record(timestamp=now, response_time_ms=100.0),
+        )
+        result = await tracker.get_all_summaries(now=now)
+
+        assert isinstance(result, MappingProxyType)
+        with pytest.raises(expected_exception):
+            mutation(result)
 
     async def test_single_provider(self) -> None:
         tracker = ProviderHealthTracker()

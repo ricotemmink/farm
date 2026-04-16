@@ -442,10 +442,12 @@ class TestGetProviderConfigs:
 
         assert "shape-safe" in result
 
-    async def test_fallback_returns_defensive_copy(
+    async def test_fallback_returns_immutable_mapping(
         self, mock_settings: AsyncMock
     ) -> None:
-        """Returned dict must be a copy -- mutating it must not affect config."""
+        """Returned mapping must be an immutable MappingProxyType view."""
+        from types import MappingProxyType
+
         mock_settings.get.return_value = _make_value(
             "null",
             namespace=SettingNamespace.PROVIDERS,
@@ -458,7 +460,21 @@ class TestGetProviderConfigs:
             config=config,  # type: ignore[arg-type]
         )
         result = await resolver.get_provider_configs()
-        result["injected"] = FakeProviderConfig(driver="evil")  # type: ignore[assignment]
+
+        # Concrete type guarantees cannot silently regress to a mutable dict.
+        assert isinstance(result, MappingProxyType)
+
+        # Every mutation pathway must raise TypeError.
+        with pytest.raises(TypeError):
+            result["injected"] = FakeProviderConfig(driver="evil")  # type: ignore[index]
+        with pytest.raises(TypeError):
+            del result["p"]  # type: ignore[attr-defined]
+        with pytest.raises(AttributeError):
+            result.pop("p")  # type: ignore[attr-defined]
+        with pytest.raises(AttributeError):
+            result.clear()  # type: ignore[attr-defined]
+        with pytest.raises(AttributeError):
+            result.update({"x": FakeProviderConfig()})  # type: ignore[attr-defined]
 
         fresh = await resolver.get_provider_configs()
         assert "injected" not in fresh
