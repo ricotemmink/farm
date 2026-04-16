@@ -922,7 +922,11 @@ Every bullet is a strategy behind a ``@runtime_checkable Protocol``:
   version store), ``StrategySelectionAdapter`` (preference memory), ``PromptTemplateAdapter``
   (prompt injection)
 - **Guards** (``engine/evolution/guards/``): ``RateLimitGuard``, ``ReviewGateGuard``,
-  ``RollbackGuard``, ``ShadowEvaluationGuard`` (stub), ``CompositeGuard`` (chains ALL)
+  ``RollbackGuard``, ``ShadowEvaluationGuard`` (runs adapted agent on a probe
+  task suite via a pluggable ``ShadowTaskProvider`` + ``ShadowAgentRunner`` and
+  rejects when score or pass rate regresses beyond configured tolerances),
+  ``ApproveAllGuard`` (no-op fallback used when every real guard is disabled),
+  ``CompositeGuard`` (chains ALL)
 
 ### Identity Version Store
 
@@ -982,7 +986,15 @@ evolution:
     rollback_regression_threshold: 0.1
     rate_limit: true
     rate_limit_per_day: 3
-    shadow_evaluation: false
+    shadow_evaluation: null        # null disables; set a ShadowEvaluationConfig to enable
+    # shadow_evaluation:
+    #   task_provider: configured  # configured | recent_history
+    #   probe_tasks: [...]         # curated tasks (required when provider=configured)
+    #   sample_size: 5
+    #   timeout_per_task_seconds: 60.0
+    #   score_regression_tolerance: 0.05
+    #   pass_rate_regression_tolerance: 0.10
+    #   evaluator_agent_id: shadow-evaluator
   memory:
     capture:
       type: hybrid           # failure | success | hybrid
