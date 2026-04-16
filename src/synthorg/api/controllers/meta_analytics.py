@@ -1,0 +1,137 @@
+"""Cross-deployment analytics API controller.
+
+Provides endpoints for event ingestion (collector role),
+pattern querying, and threshold recommendations.
+"""
+
+from litestar import Controller, get, post
+from litestar.params import Parameter
+
+from synthorg.api.dto import ApiResponse
+from synthorg.api.errors import ServiceUnavailableError
+from synthorg.api.guards import require_read_access, require_write_access
+from synthorg.meta.telemetry.collector import InMemoryAnalyticsCollector  # noqa: TC001
+from synthorg.meta.telemetry.models import (
+    AggregatedPattern,
+    EventBatch,
+    ThresholdRecommendation,
+)
+from synthorg.meta.telemetry.recommender import (
+    DefaultThresholdRecommender,  # noqa: TC001
+)
+from synthorg.observability import get_logger
+
+logger = get_logger(__name__)
+
+# Module-level singleton instances.
+# Created lazily by the app startup hook; None when collector is disabled.
+_collector: InMemoryAnalyticsCollector | None = None
+_recommender: DefaultThresholdRecommender | None = None
+_min_deployments_floor: int = 3
+
+
+def configure_analytics_controller(
+    collector: InMemoryAnalyticsCollector | None,
+    recommender: DefaultThresholdRecommender | None,
+    *,
+    min_deployments_floor: int = 3,
+) -> None:
+    """Configure the analytics controller with collector and recommender.
+
+    Called during app startup when the collector role is enabled.
+
+    Args:
+        collector: Collector instance, or None if disabled.
+        recommender: Recommender instance, or None if disabled.
+        min_deployments_floor: Minimum deployments for pattern queries
+            (from ``CrossDeploymentAnalyticsConfig.min_deployments_for_pattern``).
+    """
+    global _collector, _recommender, _min_deployments_floor  # noqa: PLW0603
+    _collector = collector
+    _recommender = recommender
+    _min_deployments_floor = min_deployments_floor
+
+
+def _require_collector() -> InMemoryAnalyticsCollector:
+    """Get the collector or raise ServiceUnavailableError."""
+    if _collector is None:
+        msg = "Cross-deployment analytics collector is not enabled"
+        raise ServiceUnavailableError(msg)
+    return _collector
+
+
+class MetaAnalyticsController(Controller):
+    """Cross-deployment analytics API endpoints.
+
+    Provides event ingestion for the collector role and
+    pattern/recommendation queries.
+    """
+
+    path = "/meta/analytics"
+    tags = ["meta-analytics"]  # noqa: RUF012
+    guards = [require_read_access]  # noqa: RUF012
+
+    @post("/events", guards=[require_write_access])
+    async def ingest_events(
+        self,
+        data: EventBatch,
+    ) -> ApiResponse[dict[str, int]]:
+        """Ingest a batch of anonymized outcome events.
+
+        Only available when ``collector_enabled=True``.
+        Requires write access.
+
+        Args:
+            data: Batch of anonymized events.
+
+        Returns:
+            Number of events ingested.
+        """
+        collector = _require_collector()
+        count = await collector.ingest(data.events)
+        return ApiResponse[dict[str, int]](
+            data={"ingested": count},
+        )
+
+    @get("/patterns")
+    async def get_patterns(
+        self,
+        min_deployments: int = Parameter(default=3, ge=1, le=100),
+    ) -> ApiResponse[list[AggregatedPattern]]:
+        """Query aggregated cross-deployment patterns.
+
+        Args:
+            min_deployments: Minimum unique deployments for pattern.
+
+        Returns:
+            Aggregated patterns.
+        """
+        collector = _require_collector()
+        # Clamp to configured privacy floor so callers cannot
+        # request patterns below the deployment-count minimum.
+        effective = max(min_deployments, _min_deployments_floor)
+        patterns = await collector.query_patterns(
+            min_deployments=effective,
+        )
+        return ApiResponse[list[AggregatedPattern]](
+            data=list(patterns),
+        )
+
+    @get("/recommendations")
+    async def get_recommendations(
+        self,
+    ) -> ApiResponse[list[ThresholdRecommendation]]:
+        """Get threshold recommendations from aggregated data.
+
+        Returns:
+            Threshold recommendations sorted by confidence.
+        """
+        collector = _require_collector()
+        if _recommender is None:
+            return ApiResponse[list[ThresholdRecommendation]](data=[])
+        recs = await _recommender.get_recommendations(
+            collector=collector,
+        )
+        return ApiResponse[list[ThresholdRecommendation]](
+            data=list(recs),
+        )

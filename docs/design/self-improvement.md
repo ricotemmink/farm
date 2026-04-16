@@ -112,6 +112,17 @@ src/synthorg/meta/
     monitor.py         -- OrgInflectionMonitor (async background loop)
     alerts.py          -- ProactiveAlertService + LoggingAlertSink
     chat.py            -- ChiefOfStaffChat (LLM-powered explanations)
+
+  telemetry/           -- Cross-deployment analytics (opt-in, anonymized)
+    config.py          -- CrossDeploymentAnalyticsConfig (disabled by default)
+    models.py          -- AnonymizedOutcomeEvent, EventBatch, AggregatedPattern, ThresholdRecommendation
+    protocol.py        -- AnalyticsEmitter, AnalyticsCollector, RecommendationProvider
+    anonymizer.py      -- Pure anonymization functions (strict allowlist)
+    emitter.py         -- HttpAnalyticsEmitter (async httpx, batching, retry)
+    collector.py       -- InMemoryAnalyticsCollector (event storage + pattern queries)
+    aggregator.py      -- aggregate_patterns() (cross-deployment pattern identification)
+    recommender.py     -- DefaultThresholdRecommender (pattern-to-threshold recommendations)
+    factory.py         -- Component construction from config
 ```
 
 ## Design Decisions
@@ -128,6 +139,9 @@ src/synthorg/meta/
 | Signals consumed | All 7 domains | Performance, budget, coordination, scaling, errors, evolution, telemetry |
 | Evolution boundary | Org-wide default; override + advisory alternatives | Clear separation from per-agent #243 |
 | Safe defaults | Disabled, opt-in, mandatory approval | Never auto-applies without human review |
+| Cross-deployment analytics | Dedicated protocol in `meta/telemetry/` | Domain events, not log records; follows meta/ pluggable pattern |
+| Analytics anonymization | Strict allowlist (enums + numerics only) | Maximum privacy; free text dropped, UUIDs hashed, timestamps coarsened |
+| Analytics aggregation | In-process API endpoints | Zero extra infra; any deployment can be emitter and/or collector |
 
 ## Signal Domains
 
@@ -200,6 +214,18 @@ self_improvement:
   guards:
     proposal_rate_limit: 10
     rate_limit_window_hours: 24
+  # Cross-deployment analytics (#1341) -- opt-in, disabled by default.
+  cross_deployment_analytics:
+    enabled: false                       # Master switch
+    collector_url: null                  # HTTPS endpoint for event POST (required when enabled)
+    deployment_id_salt: null             # Secret salt for SHA-256 deployment hash (required when enabled)
+    collector_enabled: false             # Also act as a collector receiving events
+    industry_tag: null                   # Optional industry category (max 100 chars)
+    batch_size: 50                       # Max events buffered before flush
+    flush_interval_seconds: 30.0         # Periodic flush interval
+    http_timeout_seconds: 10.0           # HTTP POST timeout
+    min_deployments_for_pattern: 3       # Min unique deployments for pattern reporting
+    recommendation_min_observations: 10  # Min events for threshold recommendations
 ```
 
 ## Safety Mechanisms
@@ -217,6 +243,6 @@ self_improvement:
 
 1. ~~Full API-as-MCP server~~ -- completed via #1353 (issue #1339; 204 tools, 15 domains, capability-based scoping)
 2. ~~Product-level improvement~~ -- completed via #1340 (CODE_MODIFICATION altitude, LLM code gen, CI validation, draft PR creation)
-3. Cross-deployment analytics (anonymized multi-org patterns)
+3. ~~Cross-deployment analytics~~ -- completed via #1341 (opt-in anonymized telemetry, pattern aggregation, threshold recommendations; see `docs/cross-deployment-privacy.md`)
 4. ~~Chief of Staff advanced capabilities~~ -- completed via #1342 (outcome learning, proactive alerts, NL chat)
 5. ~~Custom rule authoring UI (visual rule builder)~~ -- shipped in v0.6.5 (#1343 / PR #1355)
