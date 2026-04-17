@@ -5,6 +5,7 @@ import { Avatar } from '@/components/ui/avatar'
 import { TaskStatusIndicator } from '@/components/ui/task-status-indicator'
 import { PriorityBadge } from '@/components/ui/task-status-indicator'
 import { useFlash } from '@/hooks/useFlash'
+import { DEFAULT_CURRENCY } from '@/utils/currencies'
 import { formatRelativeTime, formatCurrency } from '@/utils/format'
 import type { Task } from '@/api/types'
 
@@ -34,6 +35,8 @@ export function TaskCard({ task, onSelect, isDragging, isOverlay, className, ref
       role="button"
       tabIndex={0}
       aria-label={`Task: ${task.title}`}
+      aria-roledescription="draggable task"
+      data-dragging={isDragging ? 'true' : undefined}
       onClick={() => onSelect(task.id)}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -44,10 +47,12 @@ export function TaskCard({ task, onSelect, isDragging, isOverlay, className, ref
       style={flashStyle}
       className={cn(
         'cursor-pointer rounded-lg border border-border bg-card p-card transition-colors',
-        'hover:border-border-bright hover:bg-card-hover hover:-translate-y-px hover:shadow-[0_4px_24px_var(--so-accent-8)]',
+        'hover:border-border-bright hover:bg-card-hover hover:-translate-y-px hover:shadow-[var(--so-shadow-card-hover)]',
         FOCUS_RING,
-        isDragging && 'scale-[1.02] opacity-50 shadow-lg',
-        isOverlay && 'scale-[1.02] shadow-lg border-accent/50',
+        // Elevated shadow while drag/overlay is active -- same token the
+        // hover state uses, keeps shadow weight consistent across states.
+        isDragging && 'scale-[1.02] opacity-50 shadow-[var(--so-shadow-card-hover)]',
+        isOverlay && 'scale-[1.02] shadow-[var(--so-shadow-card-hover)] border-accent/50',
         className,
       )}
       {...props}
@@ -85,7 +90,7 @@ export function TaskCard({ task, onSelect, isDragging, isOverlay, className, ref
 
           {task.cost_usd != null && task.cost_usd > 0 && (
             <span className="text-[10px] font-mono">
-              {formatCurrency(task.cost_usd, 'USD')}
+              {formatCurrency(task.cost_usd, DEFAULT_CURRENCY)}
             </span>
           )}
 

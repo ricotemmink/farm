@@ -33,6 +33,12 @@ vi.mock('@/pages/agents/TaskHistory', () => ({
 vi.mock('@/pages/agents/ActivityLog', () => ({
   ActivityLog: () => <div data-testid="activity-log" />,
 }))
+// Stub TrainingSection so its useEffect doesn't kick off real HTTP calls
+// into the training store, which leave pending promises that the test
+// harness (`--detect-async-leaks`) flags as unhandled rejections.
+vi.mock('@/pages/agents/TrainingSection', () => ({
+  TrainingSection: () => <div data-testid="training-section" />,
+}))
 
 
 const defaultHookReturn: UseAgentDetailDataReturn = {
@@ -100,6 +106,14 @@ describe('AgentDetailPage', () => {
     renderDetail()
     expect(screen.getByText('Partial failure')).toBeInTheDocument()
     expect(screen.getByTestId('identity-header')).toBeInTheDocument()
+  })
+
+  it('composes the mocked TrainingSection for an agent', () => {
+    renderDetail()
+    // Guards against regressions where AgentDetailPage removes or
+    // re-routes the per-agent training panel. The mock is declared
+    // above; this assertion checks the composition still happens.
+    expect(screen.getByTestId('training-section')).toBeInTheDocument()
   })
 
   it('shows WebSocket disconnect warning when not connected', () => {

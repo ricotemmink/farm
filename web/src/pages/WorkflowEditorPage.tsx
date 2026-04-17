@@ -311,8 +311,69 @@ function WorkflowEditorInner() {
       {editorMode === 'visual' ? (
         <>
           <div className="relative min-h-0 flex-1 rounded-lg border border-border">
+            {/*
+             * Accessible text summary of the graph. ReactFlow's visual
+             * canvas is mouse-first; screen-reader users get a
+             * sr-only outline of nodes and edges here, referenced via
+             * `aria-describedby` on the canvas. The YAML editor below
+             * the canvas is the full-fidelity keyboard-accessible
+             * alternative for editing.
+             */}
+            <section
+              id="workflow-editor-node-summary"
+              aria-labelledby="workflow-editor-node-summary-heading"
+              className="sr-only"
+            >
+              <h2 id="workflow-editor-node-summary-heading">
+                Workflow graph summary
+              </h2>
+              <h3 id="workflow-editor-node-summary-nodes">
+                Nodes ({nodes.length})
+              </h3>
+              <ul aria-labelledby="workflow-editor-node-summary-nodes">
+                {nodes.map((node) => {
+                  const label =
+                    (node.data && typeof node.data === 'object' && 'label' in node.data
+                      ? String((node.data as { label?: unknown }).label ?? '')
+                      : '') ||
+                    node.type ||
+                    node.id
+                  return (
+                    <li key={node.id}>
+                      {`Node ${node.id} (${node.type ?? 'unknown'}): ${label}`}
+                    </li>
+                  )
+                })}
+              </ul>
+              <h3 id="workflow-editor-node-summary-edges">
+                Edges ({edges.length})
+              </h3>
+              <ul aria-labelledby="workflow-editor-node-summary-edges">
+                {edges.map((edge) => {
+                  // Always expose topology (source → target); append
+                  // the human label in parens when it is set, so the
+                  // screen-reader summary retains both the graph shape
+                  // and any branch semantics. Labels may live on
+                  // ``edge.label`` (xyflow default) or on
+                  // ``edge.data.label`` when the persistence layer
+                  // stores branch metadata under ``data``.
+                  const topology = `${edge.source} → ${edge.target}`
+                  const dataLabel =
+                    edge.data && typeof edge.data === 'object' &&
+                      'label' in edge.data &&
+                      typeof (edge.data as { label?: unknown }).label === 'string'
+                      ? ((edge.data as { label: string }).label)
+                      : ''
+                  const rawLabel =
+                    (typeof edge.label === 'string' && edge.label) || dataLabel
+                  const text = rawLabel ? `${topology} (${rawLabel})` : topology
+                  return <li key={edge.id}>{`Edge: ${text}`}</li>
+                })}
+              </ul>
+            </section>
             <ReactFlow
               aria-label="Workflow editor canvas"
+              aria-describedby="workflow-editor-node-summary"
               nodes={nodes}
               edges={edges}
               nodeTypes={nodeTypes}

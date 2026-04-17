@@ -62,9 +62,20 @@ export function SidebarNavItem({
   )
 
   if (external) {
+    // When collapsed the visible label is hidden, so the sr-only span
+    // has to carry both the destination name and the new-tab hint.
+    // Expanded renders the label visibly, so only the hint is needed.
+    const srText = collapsed ? `${label} (opens in new tab)` : '(opens in new tab)'
     return (
-      <a href={to} title={collapsed ? label : undefined} className={baseClass}>
+      <a
+        href={to}
+        title={collapsed ? label : undefined}
+        className={baseClass}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
         {content}
+        <span className="sr-only">{srText}</span>
       </a>
     )
   }

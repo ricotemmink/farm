@@ -102,6 +102,35 @@ HARDCODED_MOTION_DURATION_RE = re.compile(
     re.DOTALL,
 )
 
+# BCP 47 language-region literals used inside Intl or toLocale* calls.
+# Formatter helpers should accept `locale?: string` with getLocale() default;
+# hardcoded literals bypass the i18n-ready pipeline.
+HARDCODED_LOCALE_RE = re.compile(
+    r"""['"](?P<locale>[a-z]{2}-[A-Z]{2})['"]""",
+)
+
+# Bare `.toLocaleString(`, `.toLocaleDateString(`, `.toLocaleTimeString(`
+# calls that do not pass an explicit locale argument. These fall back to
+# the browser default and diverge in dev vs prod. Use format.ts helpers.
+BARE_TOLOCALE_RE = re.compile(
+    r"\.toLocale(?:Date|Time)?String\(\s*\)",
+)
+
+# Any use of Intl.* or .toLocale*String(...) anywhere in the file.
+# If present, every hardcoded BCP 47 literal in the file is suspicious
+# even when not adjacent to the call site (e.g. `const locale = 'en-US'`
+# later passed to `new Intl.NumberFormat(locale)`).
+LOCALE_USAGE_RE = re.compile(
+    r"\bIntl\.|\.toLocale(?:Date|Time)?String\(",
+)
+
+# Allowlist files where `'en-US'` is the legitimate default constant or
+# the centralized helper itself.
+_LOCALE_SKIP_PATHS: set[str] = {
+    "web/src/utils/locale.ts",
+    "web/src/utils/format.ts",
+}
+
 # Files where inline Motion durations are intentional (relative paths).
 _MOTION_DURATION_SKIP_PATHS: set[str] = {
     "web/src/lib/motion.ts",
@@ -284,6 +313,94 @@ def check_hardcoded_motion_transitions(
             f"    {line_text}"
         )
 
+    return warnings
+
+
+def _locate(stripped: str, lines: list[str], start: int) -> tuple[int, int, str, str]:
+    """Resolve a match offset to (line_num, col, original_line, line_text)."""
+    line_num = stripped[:start].count("\n") + 1
+    col = start - stripped.rfind("\n", 0, start) - 1
+    original_line = lines[line_num - 1]
+    return line_num, col, original_line, original_line.strip()
+
+
+def _collect_hardcoded_locale_literals(
+    stripped: str,
+    lines: list[str],
+    rel_path: Path,
+) -> list[str]:
+    """Flag BCP 47 literals (matches already come from Intl-using files)."""
+    warnings: list[str] = []
+    for m in HARDCODED_LOCALE_RE.finditer(stripped):
+        line_num, col, original_line, line_text = _locate(stripped, lines, m.start())
+        if line_text.startswith(_COMMENT_PREFIXES):
+            continue
+        if _is_in_comment_context(original_line, col):
+            continue
+        warnings.append(
+            f"  {rel_path}:{line_num}: Hardcoded locale `{m.group('locale')}` "
+            f"-- use a helper from `@/utils/format` (reads `getLocale()`) "
+            f"or pass the locale explicitly via the helper parameter.\n"
+            f"    {line_text}"
+        )
+    return warnings
+
+
+def _collect_bare_tolocale_calls(
+    stripped: str,
+    lines: list[str],
+    rel_path: Path,
+) -> list[str]:
+    """Flag ``.toLocale*String()`` calls that omit an explicit locale."""
+    warnings: list[str] = []
+    for m in BARE_TOLOCALE_RE.finditer(stripped):
+        line_num, col, original_line, line_text = _locate(stripped, lines, m.start())
+        if line_text.startswith(_COMMENT_PREFIXES):
+            continue
+        if _is_in_comment_context(original_line, col):
+            continue
+        warnings.append(
+            f"  {rel_path}:{line_num}: Bare `.toLocaleString()` call "
+            f"-- use `formatNumber`, `formatDateTime`, `formatDateOnly`, "
+            f"`formatTime`, `formatTokenCount`, or another helper from "
+            f"`@/utils/format` so output is deterministic and locale-aware.\n"
+            f"    {line_text}"
+        )
+    return warnings
+
+
+def check_hardcoded_locale(
+    content: str,
+    file_path: Path,
+    project_root: Path,
+) -> list[str]:
+    """Find hardcoded BCP 47 locale literals and bare ``.toLocale*String`` calls.
+
+    Formatters live in ``@/utils/format`` and accept an optional
+    ``locale?: string`` parameter that defaults to ``getLocale()``.
+    Hardcoded ``'en-US'`` literals and locale-less ``.toLocaleString()``
+    calls bypass the i18n-ready pipeline. Any BCP 47 literal in a file
+    that uses ``Intl.*`` or ``.toLocale*String(...)`` anywhere is treated
+    as suspicious (catches ``const locale = 'en-US'; Intl.X(locale)``
+    patterns the previous heuristic missed).
+    """
+    rel_str = file_path.relative_to(project_root).as_posix()
+    if rel_str in _LOCALE_SKIP_PATHS:
+        return []
+    if file_path.suffix not in {".tsx", ".ts"}:
+        return []
+    if not LOCALE_USAGE_RE.search(content):
+        return []
+
+    rel_path = file_path.relative_to(project_root)
+    lines = content.splitlines()
+    stripped = _BLOCK_COMMENT_RE.sub(
+        lambda cm: "".join(" " if c != "\n" else "\n" for c in cm.group()),
+        content,
+    )
+
+    warnings = _collect_hardcoded_locale_literals(stripped, lines, rel_path)
+    warnings.extend(_collect_bare_tolocale_calls(stripped, lines, rel_path))
     return warnings
 
 
@@ -475,6 +592,7 @@ def check_file(file_path: Path, project_root: Path) -> list[str]:
     all_warnings.extend(
         check_hardcoded_motion_transitions(content, file_path, project_root),
     )
+    all_warnings.extend(check_hardcoded_locale(content, file_path, project_root))
     all_warnings.extend(check_missing_story(file_path, project_root))
     all_warnings.extend(check_duplicate_patterns(content, file_path, project_root))
     all_warnings.extend(propose_shared_components(content, file_path, project_root))
