@@ -696,3 +696,135 @@ func FuzzIsValidOutputMode(f *testing.F) {
 		}
 	})
 }
+
+// TestFineTuneVariantFromIndex covers the TUI-index -> persisted-string
+// mapping. The TUI only ever sets index 0 or 1 (toggled via `1 - variant`),
+// but the helper has a defensive fallback so an unexpected index produces a
+// valid default rather than an invalid variant string.
+func TestFineTuneVariantFromIndex(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		idx  int
+		want string
+	}{
+		{0, FineTuneVariantGPU},
+		{1, FineTuneVariantCPU},
+		{-1, FineTuneVariantGPU},
+		{2, FineTuneVariantGPU},
+		{42, FineTuneVariantGPU},
+	}
+	for _, tc := range cases {
+		if got := FineTuneVariantFromIndex(tc.idx); got != tc.want {
+			t.Errorf("FineTuneVariantFromIndex(%d) = %q, want %q", tc.idx, got, tc.want)
+		}
+	}
+}
+
+// TestFineTuneVariantOrDefault covers the persisted-string -> resolved-variant
+// mapping. Empty / unknown values resolve to "gpu" for forward compat with
+// pre-split configs.
+func TestFineTuneVariantOrDefault(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		variant string
+		want    string
+	}{
+		{"empty", "", FineTuneVariantGPU},
+		{"gpu", FineTuneVariantGPU, FineTuneVariantGPU},
+		{"cpu", FineTuneVariantCPU, FineTuneVariantCPU},
+		{"unknown-falls-back-to-gpu", "tpu", FineTuneVariantGPU},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := State{FineTuningVariant: tc.variant}
+			if got := s.FineTuneVariantOrDefault(); got != tc.want {
+				t.Errorf("FineTuneVariantOrDefault() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidate_FineTuningVariant covers State.Validate's variant validation:
+// invalid variants are rejected unconditionally (typos in a persisted config
+// must not survive silently until someone flips fine_tuning on), while the
+// empty string passes as a forward-compat shim for pre-split configs and the
+// two canonical values ("gpu", "cpu") are always accepted.
+//
+// Split into arch-independent and amd64-only groups because cross-field
+// rules like `fine_tuning=true requires amd64` would trip every enabled
+// case on ARM CI runners.
+func TestValidate_FineTuningVariant(t *testing.T) {
+	t.Parallel()
+
+	base := DefaultState()
+	base.JWTSecret = ""   // avoid JWT validation path
+	base.SettingsKey = "" // avoid settings-key validation path
+	base.MasterKey = ""   // avoid master-key validation path
+	base.EncryptSecrets = false
+	base.Sandbox = true
+
+	// Arch-independent: variant enum validation runs regardless of
+	// FineTuning or GOARCH, so exercise these on every runner.
+	archAgnostic := []struct {
+		name       string
+		fineTuning bool
+		variant    string
+		wantErr    bool
+	}{
+		{"disabled+empty", false, "", false},
+		{"disabled+gpu-accepted", false, FineTuneVariantGPU, false},
+		{"disabled+cpu-accepted", false, FineTuneVariantCPU, false},
+		{"disabled+invalid-rejected", false, "invalid", true},
+		{"disabled+typo-rejected", false, "GPU", true},
+	}
+	for _, tc := range archAgnostic {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := base
+			s.FineTuning = tc.fineTuning
+			s.FineTuningVariant = tc.variant
+			err := s.Validate()
+			if tc.wantErr && err == nil {
+				t.Errorf("Validate() returned nil, want error for variant=%q", tc.variant)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("Validate() = %v, want nil for variant=%q", err, tc.variant)
+			}
+		})
+	}
+
+	if runtime.GOARCH != "amd64" {
+		t.Skip("fine_tuning=true cases require amd64 architecture")
+	}
+	amd64Only := []struct {
+		name       string
+		fineTuning bool
+		variant    string
+		wantErr    bool
+	}{
+		{"enabled+empty-accepted", true, "", false},
+		{"enabled+gpu", true, FineTuneVariantGPU, false},
+		{"enabled+cpu", true, FineTuneVariantCPU, false},
+		{"enabled+invalid-rejected", true, "tpu", true},
+		{"enabled+typo-rejected", true, "GPU", true},
+	}
+	for _, tc := range amd64Only {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := base
+			s.FineTuning = tc.fineTuning
+			s.FineTuningVariant = tc.variant
+			err := s.Validate()
+			if tc.wantErr && err == nil {
+				t.Errorf("Validate() returned nil, want error for variant=%q", tc.variant)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("Validate() = %v, want nil for variant=%q", err, tc.variant)
+			}
+		})
+	}
+}

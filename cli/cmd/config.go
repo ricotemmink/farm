@@ -28,6 +28,7 @@ var supportedConfigKeys = []string{
 	"channel", "color",
 	"default_nats_stream_prefix", "default_nats_url",
 	"dhi_registry", "docker_sock",
+	"fine_tuning", "fine_tuning_variant",
 	"health_check_timeout",
 	"hints", "image_repo_prefix", "image_tag", "log_level",
 	"max_api_response_bytes", "max_archive_entry_bytes", "max_binary_bytes",
@@ -76,6 +77,8 @@ Supported keys:
   channel               Update channel
   color                 Color output mode
   docker_sock           Docker socket path
+  fine_tuning           Fine-tuning pipeline enabled
+  fine_tuning_variant   Fine-tune image variant ("gpu" or "cpu")
   hints                 Hint display mode
   image_tag             Current container image tag
   log_level             Log verbosity
@@ -110,6 +113,8 @@ Supported keys:
   channel                Update channel: "stable" or "dev"
   color                  Color output: "always", "auto", "never"
   docker_sock            Docker socket path (absolute)
+  fine_tuning            Enable fine-tuning: "true" or "false" (requires sandbox=true, amd64)
+  fine_tuning_variant    Fine-tune image variant: "gpu" (default) or "cpu"
   hints                  Hint display: "always", "auto", "never"
   image_tag              Container image tag
   log_level              Log verbosity: "debug", "info", "warn", "error"
@@ -127,8 +132,8 @@ tuf_fetch_timeout, attestation_http_timeout, max_api_response_bytes,
 max_binary_bytes, max_archive_entry_bytes). See cli/CLAUDE.md for formats.
 
 Keys that affect Docker compose (backend_port, web_port, sandbox, docker_sock,
-image_tag, log_level, telemetry_opt_in, and the registry/NATS tunables)
-trigger automatic compose.yml regeneration.`,
+image_tag, log_level, telemetry_opt_in, fine_tuning, fine_tuning_variant, and
+the registry/NATS tunables) trigger automatic compose.yml regeneration.`,
 	Args:              cobra.ExactArgs(2),
 	RunE:              runConfigSet,
 	ValidArgsFunction: completeConfigSetKeys,
@@ -216,6 +221,14 @@ func printConfigFields(out *ui.UI, state config.State) {
 	if state.Sandbox && state.DockerSock != "" {
 		out.KeyValue("Docker socket", state.DockerSock)
 	}
+	out.KeyValue("Fine-tuning", strconv.FormatBool(state.FineTuning))
+	// Show the persisted variant whenever the user has set it, even if
+	// fine-tuning is currently off -- otherwise `config set
+	// fine_tuning_variant cpu` on an off-by-default install looks like
+	// it was silently discarded.
+	if state.FineTuning || state.FineTuningVariant != "" {
+		out.KeyValue("Fine-tuning variant", state.FineTuneVariantOrDefault())
+	}
 	out.KeyValue("Persistence backend", state.PersistenceBackend)
 	out.KeyValue("Memory backend", state.MemoryBackend)
 	out.KeyValue("Auto cleanup", strconv.FormatBool(state.AutoCleanup))
@@ -256,6 +269,7 @@ var gettableConfigKeys = []string{
 	"channel", "color",
 	"default_nats_stream_prefix", "default_nats_url",
 	"dhi_registry", "docker_sock",
+	"fine_tuning", "fine_tuning_variant",
 	"health_check_timeout",
 	"hints", "image_repo_prefix", "image_tag", "log_level",
 	"max_api_response_bytes", "max_archive_entry_bytes", "max_binary_bytes",
@@ -326,6 +340,17 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 
 	if err := applyConfigValue(&state, key, value); err != nil {
 		return fmt.Errorf("applying config value: %w", err)
+	}
+
+	// Cross-field invariant guard (e.g. fine_tuning=true requires sandbox=true,
+	// variant enum). applyConfigValue only validates the single mutated field;
+	// toggling an unrelated key like `sandbox false` on a config that already
+	// has `fine_tuning true` would otherwise persist an invalid state whose
+	// next Load() fails. regenerateCompose also validates via ParamsFromState,
+	// but it is a no-op pre-init (when compose.yml does not exist yet), so we
+	// need an explicit check here to cover that path too.
+	if err := state.Validate(); err != nil {
+		return fmt.Errorf("config set would leave state invalid: %w", err)
 	}
 
 	if invalidatesVerifiedDigests(key) {
@@ -440,6 +465,17 @@ func applyConfigValue(state *config.State, key, value string) error {
 		return setEnum(value, key, config.IsValidOutputMode, config.OutputModeNames, &state.Output)
 	case "sandbox":
 		return setBool(value, key, &state.Sandbox)
+	case "fine_tuning":
+		// Cross-field validation (requires sandbox + amd64) runs in
+		// runConfigSet via State.Validate() after every apply, so this
+		// branch only needs to parse the bool.
+		return setBool(value, key, &state.FineTuning)
+	case "fine_tuning_variant":
+		if value != config.FineTuneVariantGPU && value != config.FineTuneVariantCPU {
+			return fmt.Errorf("invalid fine_tuning_variant %q: must be %q or %q", value, config.FineTuneVariantGPU, config.FineTuneVariantCPU)
+		}
+		state.FineTuningVariant = value
+		return nil
 	case "telemetry_opt_in":
 		return setBool(value, key, &state.TelemetryOptIn)
 	case "timestamps":
@@ -534,6 +570,8 @@ var composeAffectingKeys = map[string]bool{
 	"nats_image_tag":             true,
 	"default_nats_url":           true,
 	"default_nats_stream_prefix": true,
+	"fine_tuning":                true,
+	"fine_tuning_variant":        true,
 }
 
 // regenerateCompose regenerates compose.yml from the current state.
@@ -641,6 +679,14 @@ func resetConfigValue(state *config.State, key string) error {
 		state.Output = ""
 	case "sandbox":
 		state.Sandbox = defaults.Sandbox
+	case "fine_tuning":
+		state.FineTuning = defaults.FineTuning
+		// Clearing FineTuning also clears the variant so a re-enable via
+		// `config set fine_tuning true` picks up the configured default
+		// instead of a stale variant from a previous enable cycle.
+		state.FineTuningVariant = defaults.FineTuningVariant
+	case "fine_tuning_variant":
+		state.FineTuningVariant = defaults.FineTuningVariant
 	case "telemetry_opt_in":
 		state.TelemetryOptIn = defaults.TelemetryOptIn
 	case "timestamps":
@@ -766,6 +812,14 @@ func configGetValue(state config.State, key string) string {
 		return state.PersistenceBackend
 	case "sandbox":
 		return strconv.FormatBool(state.Sandbox)
+	case "fine_tuning":
+		return strconv.FormatBool(state.FineTuning)
+	case "fine_tuning_variant":
+		// Return the raw persisted value so runConfigList's source
+		// comparison ("config" vs "default") can distinguish an
+		// explicit `gpu` from an unset field. Callers that need the
+		// effective variant call FineTuneVariantOrDefault() themselves.
+		return state.FineTuningVariant
 	case "telemetry_opt_in":
 		return strconv.FormatBool(state.TelemetryOptIn)
 	case "timestamps":

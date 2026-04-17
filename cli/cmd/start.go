@@ -290,10 +290,11 @@ func pullAllImages(ctx context.Context, info docker.Info, safeDir string, state 
 	}
 	fineTuneIdx := -1
 	if refreshed.FineTuning {
+		fineTuneSvc := verify.FineTuneServiceName(refreshed.FineTuneVariantOrDefault())
 		fineTuneIdx = len(items)
 		items = append(items, pullItem{
-			name: "fine-tune",
-			ref:  verify.FormatImageRef("fine-tune", refreshed.ImageTag, refreshed.VerifiedDigests["fine-tune"]),
+			name: fineTuneSvc,
+			ref:  verify.FormatImageRef(fineTuneSvc, refreshed.ImageTag, refreshed.VerifiedDigests[fineTuneSvc]),
 		})
 	}
 
@@ -454,7 +455,7 @@ func verifyAndPinImages(ctx context.Context, _ *cobra.Command, state config.Stat
 		return nil
 	}
 
-	imageRefs := verify.BuildImageRefs(state.ImageTag, state.Sandbox, state.FineTuning)
+	imageRefs := verify.BuildImageRefs(state.ImageTag, state.Sandbox, state.FineTuning, state.FineTuneVariantOrDefault())
 	labels := make([]string, len(imageRefs))
 	for i, ref := range imageRefs {
 		labels[i] = ref.Name()
@@ -504,7 +505,7 @@ func hasSynthOrgDigests(state config.State) bool {
 	if len(state.VerifiedDigests) == 0 {
 		return false
 	}
-	for _, ref := range verify.BuildImageRefs(state.ImageTag, state.Sandbox, state.FineTuning) {
+	for _, ref := range verify.BuildImageRefs(state.ImageTag, state.Sandbox, state.FineTuning, state.FineTuneVariantOrDefault()) {
 		if _, ok := state.VerifiedDigests[ref.Name()]; !ok {
 			return false
 		}
@@ -533,7 +534,7 @@ func hasDHIDigests(state config.State) bool {
 }
 
 func renderCachedSynthOrgBox(out *ui.UI, state config.State) {
-	refs := verify.BuildImageRefs(state.ImageTag, state.Sandbox, state.FineTuning)
+	refs := verify.BuildImageRefs(state.ImageTag, state.Sandbox, state.FineTuning, state.FineTuneVariantOrDefault())
 	lines := make([]string, len(refs))
 	for i, ref := range refs {
 		lines[i] = fmt.Sprintf("  %-12s sig %s  slsa %s", ref.Name(), ui.IconSuccess, ui.IconSuccess)

@@ -211,7 +211,7 @@ func buildSummaryFromState(state config.State) summaryData {
 		d.busMode = "internal"
 	}
 	if state.FineTuning {
-		d.fineTuning = "enabled"
+		d.fineTuning = "enabled (" + state.FineTuneVariantOrDefault() + ")"
 	} else {
 		d.fineTuning = "disabled"
 	}
@@ -376,9 +376,10 @@ type setupAnswers struct {
 	channel            string // optional override (empty = default "stable")
 	imageTag           string // optional override (empty = use CLI version)
 	telemetryOptIn     bool
-	fineTuning         bool // enable fine-tuning pipeline (requires sandbox/Docker)
-	encryptSecrets     bool // encrypt connection secrets at rest (default true)
-	reinitConfirmed    bool // TUI reinit phase was shown and user confirmed
+	fineTuning         bool   // enable fine-tuning pipeline (requires sandbox/Docker)
+	fineTuneVariant    string // "gpu" (default) or "cpu"; ignored unless fineTuning is true
+	encryptSecrets     bool   // encrypt connection secrets at rest (default true)
+	reinitConfirmed    bool   // TUI reinit phase was shown and user confirmed
 }
 
 // validateInitFlags checks that provided CLI flag values are valid before
@@ -637,6 +638,7 @@ func runInteractiveInit(_ *cobra.Command, opts *GlobalOpts) (*interactiveResult,
 			postgresPort:       pgPort,
 			telemetryOptIn:     final.telemetry,
 			fineTuning:         final.fineTuning,
+			fineTuneVariant:    config.FineTuneVariantFromIndex(final.fineTuneVariant),
 			encryptSecrets:     final.encryptSecrets,
 			reinitConfirmed:    final.needReinit && !final.cancelled,
 		},
@@ -749,6 +751,7 @@ func buildState(a setupAnswers) (config.State, error) {
 		PostgresPassword:   postgresPassword,
 		TelemetryOptIn:     a.telemetryOptIn,
 		FineTuning:         a.fineTuning,
+		FineTuningVariant:  a.fineTuneVariant,
 	}, nil
 }
 

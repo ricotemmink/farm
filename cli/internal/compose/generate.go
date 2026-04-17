@@ -53,6 +53,7 @@ type Params struct {
 	PostgresPassword   string
 	DigestPins         map[string]string // image name suffix → digest (e.g. "backend" → "sha256:abc...")
 	FineTuning         bool
+	FineTuningVariant  string // "gpu" (default) or "cpu"; selects which fine-tune image the compose file references
 
 	// Registry and image tag tunables resolved at generation time.
 	// RegistryHost + ImageRepoPrefix form the prefix for the backend/web
@@ -92,6 +93,16 @@ type Params struct {
 // rather than silently emitting a compose.yml built from compiled-in
 // defaults that masks the user's broken override.
 func ParamsFromState(s config.State) (Params, error) {
+	// The compose template only emits SYNTHORG_FINE_TUNE_IMAGE behind
+	// `and .Sandbox .FineTuning`, so fine-tuning without sandbox renders a
+	// half-configured backend (flag set, image env missing). State.Validate
+	// enforces the coupling at load time; repeat the check here so callers
+	// that construct State directly (tests, in-memory mutation) fail fast
+	// instead of producing a broken compose.yml.
+	if s.FineTuning && !s.Sandbox {
+		return Params{}, fmt.Errorf("fine_tuning requires sandbox to be enabled")
+	}
+
 	busBackend := s.BusBackend
 	if busBackend == "" {
 		busBackend = "internal"
@@ -151,6 +162,7 @@ func ParamsFromState(s config.State) (Params, error) {
 		PostgresPort:          s.PostgresPort,
 		PostgresPassword:      s.PostgresPassword,
 		FineTuning:            s.FineTuning,
+		FineTuningVariant:     s.FineTuneVariantOrDefault(),
 		RegistryHost:          tun.RegistryHost,
 		ImageRepoPrefix:       tun.ImageRepoPrefix,
 		DHIRegistry:           tun.DHIRegistry,
@@ -194,7 +206,7 @@ func Generate(p Params) ([]byte, error) {
 		"digestPin":          digestPin(p.DigestPins),
 		"sandboxImageRef":    sandboxImageRef(p.DigestPins),
 		"sidecarImageRef":    sidecarImageRef(p.DigestPins),
-		"fineTuneImageRef":   fineTuneImageRef(p.DigestPins),
+		"fineTuneImageRef":   fineTuneImageRef(p.DigestPins, p.FineTuningVariant),
 		"distributedEnabled": p.DistributedEnabled,
 		"postgresEnabled":    p.PostgresEnabled,
 		"pgDSN":              func() string { return pgDSN(p) },
@@ -434,12 +446,26 @@ func sidecarImageRef(pins map[string]string) func(tag string) string {
 }
 
 // fineTuneImageRef returns a template function that resolves the fine-tune
-// image to its digest-pinned or tag-based reference. Wired into the backend's
-// SYNTHORG_FINE_TUNE_IMAGE env var so the backend spawns version-locked
-// fine-tuning pipeline containers.
-func fineTuneImageRef(pins map[string]string) func(tag string) string {
+// image for the requested variant to its digest-pinned or tag-based
+// reference. Wired into the backend's SYNTHORG_FINE_TUNE_IMAGE env var so
+// the backend spawns version-locked fine-tuning pipeline containers.
+//
+// variant must be "gpu", "cpu", or empty (forward-compat shim that
+// resolves to "gpu"); any other value produces a template function that
+// fails rendering with a clear error instead of silently defaulting.
+func fineTuneImageRef(pins map[string]string, variant string) func(tag string) string {
+	if variant != "" && variant != config.FineTuneVariantGPU && variant != config.FineTuneVariantCPU {
+		// Surface the misconfiguration at template render time. Going
+		// through panic keeps the template signature simple (no error
+		// return) while ensuring a typo in a hand-built Params fails
+		// loudly instead of silently pulling the GPU image.
+		return func(string) string {
+			panic(fmt.Sprintf("fineTuneImageRef: invalid fine-tuning variant %q: must be %q or %q", variant, config.FineTuneVariantGPU, config.FineTuneVariantCPU))
+		}
+	}
+	service := verify.FineTuneServiceName(variant)
 	return func(tag string) string {
-		return verify.FormatImageRef("fine-tune", tag, pins["fine-tune"])
+		return verify.FormatImageRef(service, tag, pins[service])
 	}
 }
 
