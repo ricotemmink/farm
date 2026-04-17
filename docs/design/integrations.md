@@ -43,16 +43,20 @@ Credentials are encrypted at rest via a pluggable `SecretBackend`:
 
 | Backend | Description | Status |
 |---------|------------|--------|
-| `encrypted_sqlite` | Fernet-encrypted in same DB (default) | Implemented |
-| `env_var` | Read-only, env var passthrough | Implemented |
+| `encrypted_sqlite` | Fernet-encrypted rows in the SQLite `connection_secrets` table (default when persistence = SQLite) | Implemented |
+| `encrypted_postgres` | Fernet-encrypted rows in the Postgres `connection_secrets` table (auto-selected when persistence = Postgres) | Implemented |
+| `env_var` | Read-only, env var passthrough (no at-rest storage, no OAuth persistence) | Implemented |
 | `secret_manager_vault` | External secret manager adapter | Stub |
 | `secret_manager_cloud_a` | Cloud secret manager (variant A) | Stub |
 | `secret_manager_cloud_b` | Cloud secret manager (variant B) | Stub |
 
-The master key is read from the environment variable named by
-`EncryptedSqliteConfig.master_key_env` (default `SYNTHORG_MASTER_KEY`).
-Set that field to use a different variable name when deploying
-multiple instances that each need their own isolated key.
+Both `encrypted_*` backends share the same Fernet key material (AES-128-CBC + HMAC-SHA256, 32 bytes of key, URL-safe base64). The key is read from the environment variable named by `master_key_env` on each backend's config (default `SYNTHORG_MASTER_KEY`). **Per-secret rotation** (via `SecretBackend.rotate`) writes a new Fernet token under a fresh `secret_id` without touching other rows -- losing the key loses only the stored secrets, not the rest of the org data. **Master-key rotation is not currently supported**: changing `SYNTHORG_MASTER_KEY` makes every previously stored ciphertext undecryptable, so the master key is treated as permanent for the life of the install (re-init preserves it for the same reason).
+
+`create_app` auto-promotes the default `encrypted_sqlite` config to `encrypted_postgres` when the active persistence backend is Postgres, so operators do not have to keep the secret backend and persistence backend in manual sync. This automatic selection is the normal path -- the only cases that require explicit config are operators who want `env_var` (no at-rest storage) or a custom `master_key_env` variable name. When `SYNTHORG_MASTER_KEY` is unset, both encrypted backends log an **error** and downgrade to `env_var` so the integrations subsystem still boots in a degraded-but-functional state; set the key and restart to re-enable at-rest encryption. The selection logic lives in `resolve_secret_backend_config` (`integrations/connections/secret_backends/factory.py`) and is covered by unit tests for each branch.
+
+`synthorg init` generates a fresh Fernet master key, writes it to `config.json` (`master_key`), and wires it into the backend container as `SYNTHORG_MASTER_KEY` whenever the `Encrypt secrets at rest` advanced toggle is ON (the default). Re-init preserves the existing key so already-stored ciphertext stays decryptable. The toggle can also be flipped via `--encrypt-secrets=true|false` in non-interactive mode.
+
+At-rest protection of the *rest* of the database (non-secret rows, full-text backups, snapshots) is the operator's responsibility -- use disk/filesystem encryption (LUKS, BitLocker, FileVault, cloud-provider encrypted volumes, RDS-style encryption at rest). Column-level encryption in the app is deliberately narrow: its goal is to prevent a SQL-level reader from lifting OAuth tokens and API keys, not to substitute for OS/volume encryption.
 
 ### API Endpoints
 

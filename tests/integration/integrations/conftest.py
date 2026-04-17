@@ -7,6 +7,20 @@ import pytest
 from synthorg.communication.bus.memory import InMemoryMessageBus
 from synthorg.communication.config import MessageBusConfig
 
+# Re-export Postgres integration fixtures so tests in this directory can
+# mount a real Postgres testcontainer via ``postgres_backend``. pytest
+# resolves fixtures by their module-level names, so importing the
+# fixture functions here makes them visible to every test below this
+# conftest -- without needing the forbidden ``pytest_plugins`` in a
+# non-root conftest. We also re-export ``event_loop_policy`` because
+# the Postgres backend relies on the Windows-selector policy defined
+# there.
+from tests.integration.persistence.conftest import (  # noqa: F401
+    event_loop_policy,
+    postgres_backend,
+    postgres_container,
+)
+
 # Fixed valid Fernet key so PKCE verifier encrypt/decrypt works in
 # every integration test that exercises the authorization code flow.
 _TEST_MASTER_KEY = "lKzZcMznksIF8A_2HFFUnKxhxhz9_bxTvVJoZ6mvZrk="

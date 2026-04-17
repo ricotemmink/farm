@@ -8,6 +8,8 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from synthorg.core.types import NotBlankStr  # noqa: TC001
+
 
 class ConnectionsConfig(BaseModel):
     """Connection catalog configuration.
@@ -25,14 +27,36 @@ class EncryptedSqliteConfig(BaseModel):
     """Config for the encrypted SQLite secret backend.
 
     Attributes:
-        master_key_env: Environment variable holding the base64-encoded
-            32-byte master key.  When unset, a random key is generated
-            at first startup and written to ``$SYNTHORG_DATA_DIR/.master_key``.
+        master_key_env: Environment variable holding the URL-safe
+            base64-encoded 32-byte Fernet key. The operator must set
+            this before the backend is used; when unset the backend
+            raises :class:`MasterKeyError` at construction time and
+            the app auto-downgrades to ``env_var`` with an ERROR log
+            (see ``resolve_secret_backend_config``). There is no
+            auto-generation of key material on disk -- losing the
+            key orphans all previously stored ciphertext.
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
-    master_key_env: str = "SYNTHORG_MASTER_KEY"
+    master_key_env: NotBlankStr = "SYNTHORG_MASTER_KEY"
+
+
+class EncryptedPostgresConfig(BaseModel):
+    """Config for the encrypted Postgres secret backend.
+
+    Uses the same Fernet key material as ``encrypted_sqlite``; secrets
+    are stored as Fernet ciphertext in the ``connection_secrets``
+    Postgres table alongside the rest of the persistence data.
+
+    Attributes:
+        master_key_env: Environment variable holding the base64-encoded
+            32-byte Fernet key.
+    """
+
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
+
+    master_key_env: NotBlankStr = "SYNTHORG_MASTER_KEY"
 
 
 class EnvVarConfig(BaseModel):
@@ -44,7 +68,7 @@ class EnvVarConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
-    prefix: str = "SYNTHORG_SECRET_"
+    prefix: NotBlankStr = "SYNTHORG_SECRET_"
 
 
 class SecretBackendConfig(BaseModel):
@@ -52,7 +76,8 @@ class SecretBackendConfig(BaseModel):
 
     Attributes:
         backend_type: Which backend to use.
-        encrypted_sqlite: Settings for the default backend.
+        encrypted_sqlite: Settings for the SQLite-backed Fernet backend.
+        encrypted_postgres: Settings for the Postgres-backed Fernet backend.
         env_var: Settings for the env-var backend.
     """
 
@@ -61,13 +86,21 @@ class SecretBackendConfig(BaseModel):
     # Neutral, vendor-agnostic discriminators so the public config
     # surface does not embed specific vendor names. The factory maps
     # these to concrete adapters internally:
-    #   - ``encrypted_sqlite``: bundled Fernet+SQLite backend (default)
-    #   - ``env_var``: environment variable backend
+    #   - ``encrypted_sqlite``: Fernet ciphertext in a SQLite DB (default)
+    #   - ``encrypted_postgres``: Fernet ciphertext in a Postgres table
+    #   - ``env_var``: read-only environment variable backend
     #   - ``secret_manager_vault``: HashiCorp Vault adapter (stub)
     #   - ``secret_manager_cloud_a``: AWS Secrets Manager adapter (stub)
     #   - ``secret_manager_cloud_b``: Azure Key Vault adapter (stub)
+    #
+    # ``encrypted_sqlite`` is the config default so a bare install with
+    # SQLite persistence just works. ``create_app`` auto-promotes this
+    # default to ``encrypted_postgres`` when the active persistence
+    # backend is Postgres, so operators do not have to keep the secret
+    # backend and persistence backend in manual sync.
     backend_type: Literal[
         "encrypted_sqlite",
+        "encrypted_postgres",
         "env_var",
         "secret_manager_vault",
         "secret_manager_cloud_a",
@@ -75,6 +108,9 @@ class SecretBackendConfig(BaseModel):
     ] = "encrypted_sqlite"
     encrypted_sqlite: EncryptedSqliteConfig = Field(
         default_factory=EncryptedSqliteConfig,
+    )
+    encrypted_postgres: EncryptedPostgresConfig = Field(
+        default_factory=EncryptedPostgresConfig,
     )
     env_var: EnvVarConfig = Field(
         default_factory=EnvVarConfig,
@@ -163,7 +199,7 @@ class TunnelConfig(BaseModel):
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
     enabled: bool = False
-    auth_token_env: str = "NGROK_AUTHTOKEN"  # noqa: S105
+    auth_token_env: NotBlankStr = "NGROK_AUTHTOKEN"  # noqa: S105
 
 
 class McpCatalogConfig(BaseModel):
