@@ -1,0 +1,345 @@
+"""Unit tests for ConfigResolver bridge-config composed-read helpers.
+
+Each helper assembles a frozen Pydantic dataclass from a namespace's
+bridged settings using :meth:`ConfigResolver._resolve_bridge_fields`.
+These tests verify the typed-return contract:
+
+1. The returned dataclass matches the mocked resolved values.
+2. Out-of-range or pattern-mismatched values raise a
+   ``ValidationError`` at dataclass construction, so misconfigured
+   operator values never escape the settings layer.
+
+The mock-side assertions intentionally focus on the typed return
+value; the exact ``SettingsService.get`` call signature and the
+parallel ``asyncio.TaskGroup`` resolution are covered by the
+lower-level ``tests/unit/settings/test_resolver.py`` suite.
+"""
+
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from synthorg.settings.bridge_configs import (
+    A2ABridgeConfig,
+    ApiBridgeConfig,
+    CommunicationBridgeConfig,
+    EngineBridgeConfig,
+    IntegrationsBridgeConfig,
+    MemoryBridgeConfig,
+    MetaBridgeConfig,
+    NotificationsBridgeConfig,
+    ObservabilityBridgeConfig,
+    SettingsDispatcherBridgeConfig,
+    ToolsBridgeConfig,
+)
+from synthorg.settings.enums import SettingNamespace, SettingSource
+from synthorg.settings.models import SettingValue
+from synthorg.settings.resolver import ConfigResolver
+
+
+class _FakeRootConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+
+@pytest.fixture
+def mock_settings() -> AsyncMock:
+    return AsyncMock()
+
+
+@pytest.fixture
+def resolver(mock_settings: AsyncMock) -> ConfigResolver:
+    return ConfigResolver(
+        settings_service=mock_settings,
+        config=_FakeRootConfig(),  # type: ignore[arg-type]
+    )
+
+
+def _value(namespace: SettingNamespace, key: str, value: str) -> SettingValue:
+    return SettingValue(
+        namespace=namespace, key=key, value=value, source=SettingSource.DEFAULT
+    )
+
+
+def _static_responses(
+    mapping: dict[tuple[str, str], str],
+) -> Any:
+    """Build an AsyncMock side-effect that returns values from ``mapping``."""
+
+    async def _side_effect(namespace: str, key: str) -> SettingValue:
+        try:
+            value_str = mapping[(namespace, key)]
+        except KeyError as exc:  # pragma: no cover - test misconfiguration
+            msg = f"unexpected settings lookup: {namespace}/{key}"
+            raise AssertionError(msg) from exc
+        return _value(SettingNamespace(namespace), key, value_str)
+
+    return _side_effect
+
+
+# ── Happy-path matrix ────────────────────────────────────────────
+#
+# Each row is a single bridge-config helper:
+#   (method_name, expected_class, mock_settings_mapping, expected_attrs).
+# ``expected_attrs`` is the subset of resolved fields we cross-check
+# against the mock values; covering every field per namespace is the
+# job of ``test_definitions_config_bridge.py``, so we only spot-check
+# representative typed values here.
+
+_HAPPY_CASES: tuple[
+    tuple[str, type[BaseModel], dict[tuple[str, str], str], dict[str, object]],
+    ...,
+] = (
+    (
+        "get_api_bridge_config",
+        ApiBridgeConfig,
+        {
+            ("api", "ticket_cleanup_interval_seconds"): "60.0",
+            ("api", "ws_ticket_max_pending_per_user"): "5",
+            ("api", "max_rpm_default"): "60",
+            ("api", "compression_minimum_size_bytes"): "1000",
+            ("api", "request_max_body_size_bytes"): "52428800",
+            ("api", "max_lifecycle_events_per_query"): "10000",
+            ("api", "max_audit_records_per_query"): "10000",
+            ("api", "max_metrics_per_query"): "10000",
+            ("api", "max_meeting_context_keys"): "20",
+        },
+        {
+            "ticket_cleanup_interval_seconds": 60.0,
+            "ws_ticket_max_pending_per_user": 5,
+            "max_rpm_default": 60,
+            "compression_minimum_size_bytes": 1000,
+            "request_max_body_size_bytes": 52_428_800,
+            "max_lifecycle_events_per_query": 10_000,
+            "max_audit_records_per_query": 10_000,
+            "max_metrics_per_query": 10_000,
+            "max_meeting_context_keys": 20,
+        },
+    ),
+    (
+        "get_communication_bridge_config",
+        CommunicationBridgeConfig,
+        {
+            ("communication", "bus_bridge_poll_timeout_seconds"): "1.0",
+            ("communication", "bus_bridge_max_consecutive_errors"): "30",
+            ("communication", "webhook_bridge_poll_timeout_seconds"): "1.0",
+            ("communication", "webhook_bridge_max_consecutive_errors"): "30",
+            ("communication", "nats_history_batch_size"): "100",
+            ("communication", "nats_history_fetch_timeout_seconds"): "0.5",
+            ("communication", "delegation_record_store_max_size"): "10000",
+            ("communication", "event_stream_max_queue_size"): "256",
+            ("communication", "loop_prevention_window_seconds"): "60.0",
+        },
+        {
+            "bus_bridge_poll_timeout_seconds": 1.0,
+            "bus_bridge_max_consecutive_errors": 30,
+            "nats_history_batch_size": 100,
+            "event_stream_max_queue_size": 256,
+        },
+    ),
+    (
+        "get_a2a_bridge_config",
+        A2ABridgeConfig,
+        {
+            ("a2a", "client_timeout_seconds"): "45.0",
+            ("a2a", "push_verification_clock_skew_seconds"): "120",
+        },
+        {
+            "client_timeout_seconds": 45.0,
+            "push_verification_clock_skew_seconds": 120,
+        },
+    ),
+    (
+        "get_engine_bridge_config",
+        EngineBridgeConfig,
+        {
+            ("engine", "approval_interrupt_timeout_seconds"): "600.0",
+            ("engine", "health_quality_degradation_threshold"): "5",
+        },
+        {
+            "approval_interrupt_timeout_seconds": 600.0,
+            "health_quality_degradation_threshold": 5,
+        },
+    ),
+    (
+        "get_memory_bridge_config",
+        MemoryBridgeConfig,
+        {("memory", "consolidation_enforce_batch_size"): "2500"},
+        {"consolidation_enforce_batch_size": 2500},
+    ),
+    (
+        "get_integrations_bridge_config",
+        IntegrationsBridgeConfig,
+        {
+            ("integrations", "health_probe_interval_seconds"): "300",
+            ("integrations", "oauth_http_timeout_seconds"): "45.0",
+            ("integrations", "oauth_device_flow_max_wait_seconds"): "900",
+            (
+                "integrations",
+                "rate_limit_coordinator_poll_timeout_seconds",
+            ): "0.5",
+        },
+        {
+            "oauth_http_timeout_seconds": 45.0,
+            "oauth_device_flow_max_wait_seconds": 900,
+        },
+    ),
+    (
+        "get_meta_bridge_config",
+        MetaBridgeConfig,
+        {
+            ("meta", "ci_timeout_seconds"): "300",
+            ("meta", "proposal_rate_limit_max"): "25",
+            ("meta", "outcome_store_default_limit"): "50",
+        },
+        {
+            "ci_timeout_seconds": 300,
+            "proposal_rate_limit_max": 25,
+            "outcome_store_default_limit": 50,
+        },
+    ),
+    (
+        "get_notifications_bridge_config",
+        NotificationsBridgeConfig,
+        {
+            ("notifications", "slack_webhook_timeout_seconds"): "15.0",
+            ("notifications", "ntfy_webhook_timeout_seconds"): "10.0",
+            ("notifications", "email_smtp_timeout_seconds"): "30.0",
+        },
+        {
+            "slack_webhook_timeout_seconds": 15.0,
+            "email_smtp_timeout_seconds": 30.0,
+        },
+    ),
+    (
+        "get_tools_bridge_config",
+        ToolsBridgeConfig,
+        {
+            ("tools", "git_kill_grace_timeout_seconds"): "5.0",
+            ("tools", "atlas_kill_grace_timeout_seconds"): "5.0",
+            ("tools", "docker_sidecar_health_poll_interval_seconds"): "0.2",
+            ("tools", "docker_sidecar_health_timeout_seconds"): "15.0",
+            ("tools", "docker_sidecar_memory_limit"): "128m",
+            ("tools", "docker_sidecar_cpu_limit"): "1.0",
+            ("tools", "docker_sidecar_max_pids"): "64",
+            ("tools", "docker_stop_grace_timeout_seconds"): "10",
+            ("tools", "subprocess_kill_grace_timeout_seconds"): "5.0",
+        },
+        {
+            "docker_sidecar_memory_limit": "128m",
+            "docker_sidecar_cpu_limit": 1.0,
+            "docker_sidecar_max_pids": 64,
+        },
+    ),
+    (
+        "get_observability_bridge_config",
+        ObservabilityBridgeConfig,
+        {
+            ("observability", "http_batch_size"): "250",
+            ("observability", "http_flush_interval_seconds"): "2.5",
+            ("observability", "http_timeout_seconds"): "10.0",
+            ("observability", "http_max_retries"): "5",
+            ("observability", "audit_chain_signing_timeout_seconds"): "10.0",
+        },
+        {
+            "http_batch_size": 250,
+            "http_max_retries": 5,
+            "audit_chain_signing_timeout_seconds": 10.0,
+        },
+    ),
+    (
+        "get_settings_dispatcher_bridge_config",
+        SettingsDispatcherBridgeConfig,
+        {
+            ("settings", "dispatcher_poll_timeout_seconds"): "0.25",
+            ("settings", "dispatcher_error_backoff_seconds"): "2.0",
+            ("settings", "dispatcher_max_consecutive_errors"): "50",
+        },
+        {
+            "poll_timeout_seconds": 0.25,
+            "error_backoff_seconds": 2.0,
+            "max_consecutive_errors": 50,
+        },
+    ),
+)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("method_name", "expected_cls", "mapping", "expected_attrs"),
+    _HAPPY_CASES,
+    ids=[case[0] for case in _HAPPY_CASES],
+)
+async def test_bridge_config_happy_path(  # noqa: PLR0913
+    resolver: ConfigResolver,
+    mock_settings: AsyncMock,
+    method_name: str,
+    expected_cls: type[BaseModel],
+    mapping: dict[tuple[str, str], str],
+    expected_attrs: dict[str, object],
+) -> None:
+    """Each bridge-config helper returns the right typed dataclass.
+
+    Drives the 11 ``ConfigResolver.get_<ns>_bridge_config()`` methods
+    through a single parametrized case matrix: mocked settings lookup
+    returns the values in ``mapping``; the resolved dataclass must be
+    an instance of ``expected_cls`` with the fields from
+    ``expected_attrs`` set to the expected typed values.
+    """
+    mock_settings.get.side_effect = _static_responses(mapping)
+    method = getattr(resolver, method_name)
+    cfg = await method()
+    assert isinstance(cfg, expected_cls)
+    for attr, expected_value in expected_attrs.items():
+        actual = getattr(cfg, attr)
+        assert actual == expected_value, (
+            f"{method_name}: {attr} expected {expected_value!r}, got {actual!r}"
+        )
+
+
+# ── Validation-failure cases ────────────────────────────────────
+
+
+@pytest.mark.unit
+async def test_get_api_bridge_config_rejects_out_of_range(
+    resolver: ConfigResolver, mock_settings: AsyncMock
+) -> None:
+    mock_settings.get.side_effect = _static_responses(
+        {
+            ("api", "ticket_cleanup_interval_seconds"): "60.0",
+            ("api", "ws_ticket_max_pending_per_user"): "5",
+            ("api", "max_rpm_default"): "60",
+            ("api", "compression_minimum_size_bytes"): "1000",
+            # 10 GiB - way over the 512 MiB cap.
+            ("api", "request_max_body_size_bytes"): "10737418240",
+            ("api", "max_lifecycle_events_per_query"): "10000",
+            ("api", "max_audit_records_per_query"): "10000",
+            ("api", "max_metrics_per_query"): "10000",
+            ("api", "max_meeting_context_keys"): "20",
+        }
+    )
+    with pytest.raises(ValidationError):
+        await resolver.get_api_bridge_config()
+
+
+@pytest.mark.unit
+async def test_get_tools_bridge_config_rejects_bad_memory_literal(
+    resolver: ConfigResolver, mock_settings: AsyncMock
+) -> None:
+    mock_settings.get.side_effect = _static_responses(
+        {
+            ("tools", "git_kill_grace_timeout_seconds"): "5.0",
+            ("tools", "atlas_kill_grace_timeout_seconds"): "5.0",
+            ("tools", "docker_sidecar_health_poll_interval_seconds"): "0.2",
+            ("tools", "docker_sidecar_health_timeout_seconds"): "15.0",
+            # invalid format (not a size string: non-digit prefix).
+            ("tools", "docker_sidecar_memory_limit"): "invalid",
+            ("tools", "docker_sidecar_cpu_limit"): "0.5",
+            ("tools", "docker_sidecar_max_pids"): "32",
+            ("tools", "docker_stop_grace_timeout_seconds"): "5",
+            ("tools", "subprocess_kill_grace_timeout_seconds"): "5.0",
+        }
+    )
+    with pytest.raises(ValidationError):
+        await resolver.get_tools_bridge_config()

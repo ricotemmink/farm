@@ -43,6 +43,14 @@ from synthorg.observability.events.consolidation import (
 logger = get_logger(__name__)
 
 _MAX_ENFORCE_BATCH = 1000
+_MAX_ENFORCE_BATCH_MIN = 100
+_MAX_ENFORCE_BATCH_MAX = 10_000
+# ``MemoryQuery.limit`` has its own schema bound (``le=1000``); the
+# max-enforce batch settings allows up to 10k records, so each
+# per-batch fetch has to be clamped to the query-layer bound before
+# constructing the MemoryQuery below. The enforce loop just issues
+# more MemoryQuery fetches to cover any excess.
+_MEMORY_QUERY_MAX_LIMIT = 1000
 
 
 class MemoryConsolidationService:
@@ -55,6 +63,12 @@ class MemoryConsolidationService:
             step if ``None``).
         archival_store: Optional archival store (skips archival if
             ``None`` or disabled in config).
+        max_enforce_batch: Maximum memories to enforce retention on per
+            invocation. Must match the bounds of the
+            ``memory.consolidation_enforce_batch_size`` setting
+            (``MemoryBridgeConfig``): between 100 and 10000 inclusive.
+            Defaults to the module constant so the service still works
+            standalone when the settings layer is not wired in.
     """
 
     def __init__(
@@ -64,11 +78,20 @@ class MemoryConsolidationService:
         config: ConsolidationConfig,
         strategy: ConsolidationStrategy | None = None,
         archival_store: ArchivalStore | None = None,
+        max_enforce_batch: int = _MAX_ENFORCE_BATCH,
     ) -> None:
+        if not (_MAX_ENFORCE_BATCH_MIN <= max_enforce_batch <= _MAX_ENFORCE_BATCH_MAX):
+            msg = (
+                "max_enforce_batch must be between "
+                f"{_MAX_ENFORCE_BATCH_MIN} and {_MAX_ENFORCE_BATCH_MAX}, "
+                f"got {max_enforce_batch}"
+            )
+            raise ValueError(msg)
         self._backend = backend
         self._config = config
         self._strategy = strategy
         self._archival_store = archival_store
+        self._max_enforce_batch = max_enforce_batch
         self._retention = RetentionEnforcer(
             config=config.retention,
             backend=backend,
@@ -165,8 +188,13 @@ class MemoryConsolidationService:
             deleted = 0
             remaining = excess
             while remaining > 0:
-                batch_size = min(remaining, _MAX_ENFORCE_BATCH)
-                query = MemoryQuery(limit=batch_size)
+                batch_size = min(remaining, self._max_enforce_batch)
+                # Cap the per-fetch size to MemoryQuery's own upper
+                # bound; ``self._max_enforce_batch`` can exceed it
+                # (up to 10k) and the query would then fail
+                # validation before hitting the backend.
+                effective_limit = min(batch_size, _MEMORY_QUERY_MAX_LIMIT)
+                query = MemoryQuery(limit=effective_limit)
                 entries = await self._backend.retrieve(agent_id, query)
                 if not entries:
                     break

@@ -1,6 +1,7 @@
 """ntfy notification sink -- HTTP POST to an ntfy server."""
 
 import ipaddress
+import math
 import re
 from urllib.parse import urlparse
 
@@ -62,9 +63,16 @@ class NtfyNotificationSink:
         server_url: ntfy server base URL (e.g. ``"https://ntfy.sh"``).
         topic: ntfy topic name.
         token: Optional authentication token.
+        webhook_timeout_seconds: HTTP timeout for ntfy POST calls, in
+            seconds. Mirrors the
+            ``notifications.ntfy_webhook_timeout_seconds`` setting;
+            the notification factory threads the resolved value in at
+            construction so operator tuning takes effect on restart.
+            Must be positive.
 
     Raises:
-        ValueError: If *server_url* targets a private/loopback host.
+        ValueError: If *server_url* targets a private/loopback host,
+            or if *webhook_timeout_seconds* is not positive.
     """
 
     __slots__ = ("_client", "_server_url", "_token", "_topic")
@@ -75,13 +83,20 @@ class NtfyNotificationSink:
         server_url: str,
         topic: str,
         token: str | None = None,
+        webhook_timeout_seconds: float = 10.0,
     ) -> None:
         _validate_outbound_url(server_url, "server_url")
+        if not math.isfinite(webhook_timeout_seconds) or webhook_timeout_seconds <= 0:
+            msg = (
+                "webhook_timeout_seconds must be a finite number > 0, got "
+                f"{webhook_timeout_seconds}"
+            )
+            raise ValueError(msg)
         self._server_url = server_url.rstrip("/")
         self._topic = topic
         self._token = token
         self._client = httpx.AsyncClient(
-            timeout=10.0,
+            timeout=webhook_timeout_seconds,
             follow_redirects=False,
         )
 

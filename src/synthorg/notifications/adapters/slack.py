@@ -1,5 +1,6 @@
 """Slack notification sink -- webhook POST."""
 
+import math
 from typing import TYPE_CHECKING
 
 import httpx
@@ -55,18 +56,36 @@ class SlackNotificationSink:
 
     Args:
         webhook_url: Slack incoming webhook URL.
+        webhook_timeout_seconds: HTTP timeout for webhook POST calls,
+            in seconds. Mirrors the
+            ``notifications.slack_webhook_timeout_seconds`` setting;
+            the notification factory threads the resolved value in at
+            construction so operator tuning takes effect on restart.
+            Must be positive.
 
     Raises:
-        ValueError: If *webhook_url* targets a private/loopback host.
+        ValueError: If *webhook_url* targets a private/loopback host,
+            or if *webhook_timeout_seconds* is not positive.
     """
 
     __slots__ = ("_client", "_webhook_url")
 
-    def __init__(self, *, webhook_url: str) -> None:
+    def __init__(
+        self,
+        *,
+        webhook_url: str,
+        webhook_timeout_seconds: float = 10.0,
+    ) -> None:
         _validate_outbound_url(webhook_url, "webhook_url")
+        if not math.isfinite(webhook_timeout_seconds) or webhook_timeout_seconds <= 0:
+            msg = (
+                "webhook_timeout_seconds must be a finite number > 0, got "
+                f"{webhook_timeout_seconds}"
+            )
+            raise ValueError(msg)
         self._webhook_url = webhook_url
         self._client = httpx.AsyncClient(
-            timeout=10.0,
+            timeout=webhook_timeout_seconds,
             follow_redirects=False,
         )
 

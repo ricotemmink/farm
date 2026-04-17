@@ -4,6 +4,7 @@ Exposes ``GET /coordination/metrics`` for querying stored
 coordination metrics from completed multi-agent runs.
 """
 
+import asyncio
 from datetime import datetime  # noqa: TC003
 from typing import Annotated
 
@@ -26,11 +27,51 @@ from synthorg.observability.events.api import (
     API_COORDINATION_METRICS_QUERIED,
     API_VALIDATION_FAILED,
 )
+from synthorg.settings.enums import SettingNamespace
 
 logger = get_logger(__name__)
 
 _MAX_METRICS_QUERY = 10_000
-"""Safety cap on metrics records fetched per request."""
+"""Fallback cap applied when no settings resolver is wired in."""
+
+# Module-level log-once guard for the settings-resolution fallback;
+# see ``activities._resolve_lifecycle_cap`` for the rationale.
+_metrics_cap_fallback_logged: bool = False
+
+
+async def _resolve_metrics_cap(state: State) -> int:
+    """Resolve the active metrics-query cap, falling back to the constant.
+
+    A settings outage or malformed value must not fail the endpoint;
+    the fallback constant keeps the DB-side ``LIMIT`` bounded. Warnings
+    are log-once per run of failures (cleared on recovery).
+    """
+    global _metrics_cap_fallback_logged  # noqa: PLW0603
+    app_state = state.app_state
+    if not app_state.has_config_resolver:
+        return _MAX_METRICS_QUERY
+    try:
+        result: int = await app_state.config_resolver.get_int(
+            SettingNamespace.API.value, "max_metrics_per_query"
+        )
+    except asyncio.CancelledError:
+        raise
+    except MemoryError, RecursionError:
+        raise
+    except Exception as exc:
+        if not _metrics_cap_fallback_logged:
+            logger.warning(
+                API_VALIDATION_FAILED,
+                error=(
+                    "failed to resolve max_metrics_per_query;"
+                    f" using fallback ({type(exc).__name__})"
+                ),
+                cap=_MAX_METRICS_QUERY,
+            )
+            _metrics_cap_fallback_logged = True
+        return _MAX_METRICS_QUERY
+    _metrics_cap_fallback_logged = False
+    return result
 
 
 class CoordinationMetricsController(Controller):
@@ -95,14 +136,15 @@ class CoordinationMetricsController(Controller):
                 detail="'since' must not be after 'until'",
             )
         app_state = state.app_state
+        metrics_cap = await _resolve_metrics_cap(state)
         entries, total_matches = app_state.coordination_metrics_store.query(
             task_id=task_id,
             agent_id=agent_id,
             since=since,
             until=until,
-            limit=_MAX_METRICS_QUERY,
+            limit=metrics_cap,
         )
-        effective_total = min(total_matches, _MAX_METRICS_QUERY)
+        effective_total = min(total_matches, metrics_cap)
         page, meta = paginate(
             entries,
             offset=offset,

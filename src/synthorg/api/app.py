@@ -139,6 +139,7 @@ from synthorg.security.trust.config import TrustConfig
 from synthorg.security.trust.disabled_strategy import DisabledTrustStrategy
 from synthorg.security.trust.service import TrustService
 from synthorg.settings.dispatcher import SettingsChangeDispatcher
+from synthorg.settings.enums import SettingNamespace
 from synthorg.settings.subscribers import (
     BackupSettingsSubscriber,
     MemorySettingsSubscriber,
@@ -444,10 +445,40 @@ def make_personality_trim_notifier(
     return _on_personality_trimmed
 
 
+async def _resolve_ticket_cleanup_interval(app_state: AppState) -> float:
+    """Resolve the ticket cleanup interval, falling back to 60 seconds.
+
+    A settings-backend outage, missing setting, or malformed value must
+    not kill the cleanup task -- otherwise expired WS tickets and
+    sessions accumulate indefinitely until the next restart. Any
+    resolver failure is logged and the built-in default is returned.
+    """
+    if not app_state.has_config_resolver:
+        return 60.0
+    try:
+        return await app_state.config_resolver.get_float(
+            SettingNamespace.API.value, "ticket_cleanup_interval_seconds"
+        )
+    except asyncio.CancelledError:
+        raise
+    except MemoryError, RecursionError:
+        raise
+    except Exception:
+        logger.warning(
+            API_WS_TICKET_CLEANUP,
+            error=(
+                "Failed to resolve ticket_cleanup_interval_seconds;"
+                " falling back to 60.0 seconds"
+            ),
+            exc_info=True,
+        )
+        return 60.0
+
+
 async def _ticket_cleanup_loop(app_state: AppState) -> None:
     """Periodically prune expired WS tickets and sessions."""
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(await _resolve_ticket_cleanup_interval(app_state))
         try:
             app_state.ticket_store.cleanup_expired()
         except MemoryError, RecursionError:
@@ -864,6 +895,148 @@ def _build_lifecycle(  # noqa: PLR0913, PLR0915, C901
                 raise
             except Exception:  # noqa: S110 -- already logged via done-callback
                 pass
+        # Apply operator-tuned API bridge settings to mutable stores
+        # that outlive this startup frame. Failure is non-fatal so the
+        # app still boots with built-in defaults. Guarded by
+        # ``bridge_config_applied`` so a re-entering Litestar lifespan
+        # (shared-app test fixtures, multi-lifespan runs) does not
+        # churn httpx/SMTP clients in the notification-dispatcher
+        # sinks or rebuild the OAuth flow on every startup.
+        if app_state.has_config_resolver and not app_state.bridge_config_applied:
+            try:
+                app_state.ticket_store.set_max_pending_per_user(
+                    await app_state.config_resolver.get_int(
+                        SettingNamespace.API.value,
+                        "ws_ticket_max_pending_per_user",
+                    )
+                )
+            except MemoryError, RecursionError:
+                raise
+            except Exception:
+                logger.warning(
+                    API_APP_STARTUP,
+                    error=(
+                        "Failed to apply ws_ticket_max_pending_per_user;"
+                        " using built-in default"
+                    ),
+                    exc_info=True,
+                )
+
+            # Inject the resolver into services that were constructed
+            # before AppState so their polling / refresh loops honour
+            # operator-tuned settings.
+            if app_state.oauth_token_manager is not None:
+                app_state.oauth_token_manager.set_config_resolver(
+                    app_state.config_resolver,
+                )
+            if app_state.webhook_event_bridge is not None:
+                app_state.webhook_event_bridge.set_config_resolver(
+                    app_state.config_resolver,
+                )
+            # Inject the resolver into the JetStream bus so history
+            # queries honour the operator-tuned scan batch-size and
+            # fetch timeout.
+            _bus = app_state.message_bus if app_state.has_message_bus else None
+            if _bus is not None:
+                _set_resolver = getattr(_bus, "set_config_resolver", None)
+                if callable(_set_resolver):
+                    _set_resolver(app_state.config_resolver)
+
+            # Resolve the audit-chain signing timeout and push it onto
+            # every live ``AuditChainSink`` handler so runtime signing
+            # calls honour the operator setting.
+            try:
+                signing_timeout = await app_state.config_resolver.get_float(
+                    SettingNamespace.OBSERVABILITY.value,
+                    "audit_chain_signing_timeout_seconds",
+                )
+            except MemoryError, RecursionError:
+                raise
+            except Exception:
+                logger.warning(
+                    API_APP_STARTUP,
+                    error=(
+                        "Failed to resolve"
+                        " audit_chain_signing_timeout_seconds;"
+                        " keeping sink default"
+                    ),
+                    exc_info=True,
+                )
+            else:
+                from synthorg.observability.audit_chain.sink import (  # noqa: PLC0415
+                    AuditChainSink,
+                )
+                from synthorg.observability.startup_wiring import (  # noqa: PLC0415
+                    _iter_logging_handlers,
+                )
+
+                for _handler in _iter_logging_handlers():
+                    if isinstance(_handler, AuditChainSink):
+                        try:
+                            _handler.set_signing_timeout_seconds(signing_timeout)
+                        except MemoryError, RecursionError:
+                            raise
+                        except Exception:
+                            logger.warning(
+                                API_APP_STARTUP,
+                                error=(
+                                    "Failed to apply"
+                                    " audit_chain_signing_timeout_seconds"
+                                    " to handler"
+                                ),
+                                exc_info=True,
+                            )
+
+            # Rebuild the notification dispatcher with resolved adapter
+            # timeouts so webhook/SMTP calls honour operator tuning.
+            try:
+                notif_bridge = (
+                    await app_state.config_resolver.get_notifications_bridge_config()
+                )
+            except MemoryError, RecursionError:
+                raise
+            except Exception:
+                logger.warning(
+                    API_APP_STARTUP,
+                    error=(
+                        "Failed to resolve notifications bridge config;"
+                        " keeping dispatcher default timeouts"
+                    ),
+                    exc_info=True,
+                )
+            else:
+                if (
+                    app_state.has_notification_dispatcher
+                    and effective_config is not None
+                ):
+                    _new_dispatcher = build_notification_dispatcher(
+                        effective_config.notifications,
+                        bridge_config=notif_bridge,
+                    )
+                    _old_dispatcher = app_state.swap_notification_dispatcher(
+                        _new_dispatcher
+                    )
+                    # Close the pre-startup dispatcher's sinks so their
+                    # httpx clients do not leak. The swap returned the
+                    # old instance atomically, so closing it now cannot
+                    # race a concurrent reader landing on the new one.
+                    if _old_dispatcher is not None:
+                        try:
+                            await _old_dispatcher.close()
+                        except MemoryError, RecursionError:
+                            raise
+                        except Exception:
+                            logger.warning(
+                                API_APP_STARTUP,
+                                error=(
+                                    "Failed to close pre-startup notification"
+                                    " dispatcher sinks after rebuild"
+                                ),
+                                exc_info=True,
+                            )
+
+            app_state.mark_bridge_config_applied()
+
         _ticket_cleanup_task = asyncio.create_task(
             _ticket_cleanup_loop(app_state),
             name="ws-ticket-cleanup",
@@ -1663,6 +1836,9 @@ def create_app(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     WebhookEventBridge,
                 )
 
+                # config_resolver is injected in on_startup via
+                # ``WebhookEventBridge.set_config_resolver`` once the
+                # AppState (and therefore the resolver) has been built.
                 webhook_event_bridge = WebhookEventBridge(
                     bus=message_bus,
                     ceremony_scheduler=ceremony_scheduler,
@@ -1681,16 +1857,18 @@ def create_app(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 _bus = message_bus
                 _catalog = connection_catalog
 
+                # Fallback RPM when the catalog does not carry a
+                # per-connection limiter. Resolved once at wiring time
+                # from api.max_rpm_default (restart_required=True).
+                _default_rpm = api_config.rate_limit.max_rpm_default
+
                 def _make_coordinator(
                     name: str,
                 ) -> SharedRateLimitCoordinator:
                     # Honour the connection's configured rate
                     # limiter so each coordinator enforces the
-                    # correct per-connection global budget. Previously
-                    # the default 60 RPM was hard-coded, which
-                    # silently ignored any higher/lower setting on
-                    # the connection row.
-                    max_rpm = 60
+                    # correct per-connection global budget.
+                    max_rpm = _default_rpm
                     try:
                         conn = _catalog._cache.get(name)  # noqa: SLF001
                         if (
@@ -1778,7 +1956,13 @@ def create_app(  # noqa: C901, PLR0912, PLR0913, PLR0915
         app_state.set_distributed_task_queue(distributed_task_queue)
 
     bridge = (
-        MessageBusBridge(message_bus, channels_plugin)
+        MessageBusBridge(
+            message_bus,
+            channels_plugin,
+            config_resolver=(
+                app_state.config_resolver if app_state.has_config_resolver else None
+            ),
+        )
         if message_bus is not None
         else None
     )
@@ -1918,7 +2102,9 @@ def create_app(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 )
 
                 peer_registry = PeerRegistry()
-                a2a_http_client = httpx.AsyncClient(timeout=30.0)
+                a2a_http_client = httpx.AsyncClient(
+                    timeout=effective_config.a2a.client_timeout_seconds
+                )
                 from synthorg.tools.network_validator import (  # noqa: PLC0415
                     NetworkPolicy,
                 )
@@ -1928,6 +2114,7 @@ def create_app(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     connection_catalog,
                     network_validator=a2a_network_policy,
                     http_client=a2a_http_client,
+                    timeout_seconds=effective_config.a2a.client_timeout_seconds,
                 )
 
                 app_state.set_a2a_peer_registry(peer_registry)
@@ -2018,11 +2205,11 @@ def create_app(  # noqa: C901, PLR0912, PLR0913, PLR0915
         ),
         compression_config=CompressionConfig(
             backend="brotli",
-            minimum_size=1000,
+            minimum_size=api_config.server.compression_minimum_size_bytes,
         ),
         # Must be >= artifact API max payload (50 MB) so endpoint-level
         # validation can enforce exact storage limits.
-        request_max_body_size=52_428_800,  # 50 MB
+        request_max_body_size=api_config.server.request_max_body_size_bytes,
         before_send=[security_headers_hook],
         middleware=middleware,
         plugins=plugins,

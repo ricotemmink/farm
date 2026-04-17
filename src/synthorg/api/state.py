@@ -117,6 +117,7 @@ class AppState:
         "_audit_log",
         "_auth_service",
         "_backup_service",
+        "_bridge_config_applied",
         "_ceremony_scheduler",
         "_client_simulation_state",
         "_config_resolver",
@@ -259,6 +260,13 @@ class AppState:
         self._trace_handler: TraceHandler | None = None
         self._fine_tune_orchestrator: FineTuneOrchestrator | None = None
         self._config_resolver: ConfigResolver | None = None
+        # One-shot flag: on_startup applies bridge-config settings
+        # exactly once per ``AppState`` lifetime, even when the
+        # Litestar lifespan re-enters (shared-app test fixtures or
+        # multiple lifespan cycles). Preserves the httpx/SMTP clients
+        # built into the notification-dispatcher sinks rather than
+        # rebuilding and closing them on every startup.
+        self._bridge_config_applied: bool = False
         self._provider_management: ProviderManagementService | None = None
         self._org_mutation_service: OrgMutationService | None = None
         self._init_derived_services(
@@ -867,6 +875,55 @@ class AppState:
         return self._require_service(
             self._notification_dispatcher, "notification_dispatcher"
         )
+
+    def swap_notification_dispatcher(
+        self,
+        dispatcher: NotificationDispatcher,
+    ) -> NotificationDispatcher | None:
+        """Swap the active notification dispatcher and return the prior one.
+
+        Called from the API startup hook after the ConfigResolver
+        produces the operator-tuned
+        :class:`NotificationsBridgeConfig` so adapter timeouts
+        (webhook/SMTP) take effect. Returns the previous dispatcher
+        (or ``None`` if none was configured) so the caller can close
+        its sinks without reaching back through the accessor -- this
+        makes the handoff race-free: the new dispatcher is already
+        installed by the time the caller starts closing httpx
+        clients on the old sinks.
+
+        Emits ``SETTINGS_SERVICE_SWAPPED`` with the same field shape
+        as :meth:`swap_provider_registry` / :meth:`swap_model_router`
+        so the operator-facing audit trail records every swap in one
+        place.
+        """
+        previous = self._notification_dispatcher
+        self._notification_dispatcher = dispatcher
+        logger.info(
+            SETTINGS_SERVICE_SWAPPED,
+            service="notification_dispatcher",
+            old_id=id(previous) if previous is not None else None,
+            new_id=id(dispatcher),
+        )
+        return previous
+
+    @property
+    def bridge_config_applied(self) -> bool:
+        """Whether the API startup hook has applied bridge settings.
+
+        Set to ``True`` by the startup hook after it has resolved the
+        operator-tuned settings (OAuth HTTP timeout, audit-chain
+        signing timeout, notification adapter timeouts, etc.) and
+        wired them into their consumer services. Subsequent lifespan
+        re-entries (shared-app test fixtures, multi-lifespan runs)
+        use this flag to short-circuit the rebuild so sinks / flows
+        are not churned.
+        """
+        return self._bridge_config_applied
+
+    def mark_bridge_config_applied(self) -> None:
+        """Flip :attr:`bridge_config_applied` to ``True`` (one-way)."""
+        self._bridge_config_applied = True
 
     @property
     def ontology_service(self) -> OntologyService:

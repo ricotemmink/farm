@@ -7,7 +7,7 @@ sprints.
 
 import asyncio
 import contextlib
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from synthorg.communication.bus_protocol import MessageBus  # noqa: TC001
 from synthorg.communication.message import DataPart
@@ -23,12 +23,18 @@ from synthorg.observability.events.integrations import (
     WEBHOOK_BRIDGE_STARTED,
     WEBHOOK_BRIDGE_STOPPED,
 )
+from synthorg.settings.enums import SettingNamespace
+
+if TYPE_CHECKING:
+    from synthorg.settings.resolver import ConfigResolver
 
 logger = get_logger(__name__)
 
 _SUBSCRIBER_ID: Final[str] = "__webhook_bridge__"
 _POLL_TIMEOUT: Final[float] = 1.0
+"""Fallback poll timeout used when no resolver is wired in."""
 _MAX_CONSECUTIVE_ERRORS: Final[int] = 30
+"""Fallback error budget used when no resolver is wired in."""
 
 
 class WebhookEventBridge:
@@ -47,11 +53,100 @@ class WebhookEventBridge:
         self,
         bus: MessageBus,
         ceremony_scheduler: CeremonyScheduler,
+        *,
+        config_resolver: ConfigResolver | None = None,
     ) -> None:
         self._bus = bus
         self._scheduler = ceremony_scheduler
+        self._config_resolver = config_resolver
         self._task: asyncio.Task[None] | None = None
         self._lifecycle_lock = asyncio.Lock()
+        # Resolver-failure warnings are log-once per run of failures
+        # to keep the polling loop from flooding logs during a
+        # prolonged settings outage. Flags reset on the first
+        # successful resolution so a later failure is visible again.
+        self._poll_timeout_fallback_logged: bool = False
+        self._max_errors_fallback_logged: bool = False
+
+    def set_config_resolver(self, resolver: ConfigResolver) -> None:
+        """Inject the ConfigResolver after construction.
+
+        ``WebhookEventBridge`` is instantiated before ``AppState`` in
+        :func:`synthorg.api.app.create_app` (because ``AppState``
+        takes it as a constructor argument), so the resolver is not
+        available at construction time. The API startup hook calls
+        this setter after ``AppState`` is built and before
+        :meth:`start` so polling-loop reads of the operator-tuned
+        poll timeout and error budget are honoured.
+        """
+        self._config_resolver = resolver
+
+    async def _get_poll_timeout(self) -> float:
+        """Resolve the current poll timeout, falling back to the constant.
+
+        A transient settings outage or malformed value must not crash
+        the polling loop. Warnings are log-once per run of failures
+        (cleared on recovery) so a prolonged outage cannot flood logs.
+        """
+        if self._config_resolver is None:
+            return _POLL_TIMEOUT
+        try:
+            value = await self._config_resolver.get_float(
+                SettingNamespace.COMMUNICATION.value,
+                "webhook_bridge_poll_timeout_seconds",
+            )
+        except asyncio.CancelledError:
+            raise
+        except MemoryError, RecursionError:
+            raise
+        except Exception:
+            if not self._poll_timeout_fallback_logged:
+                logger.warning(
+                    WEBHOOK_BRIDGE_POLL_ERROR,
+                    error=(
+                        "failed to resolve webhook_bridge_poll_timeout_seconds;"
+                        " using fallback (logging suppressed until recovery)"
+                    ),
+                    poll_timeout=_POLL_TIMEOUT,
+                    exc_info=True,
+                )
+                self._poll_timeout_fallback_logged = True
+            return _POLL_TIMEOUT
+        self._poll_timeout_fallback_logged = False
+        return value
+
+    async def _get_max_consecutive_errors(self) -> int:
+        """Resolve the current error budget, falling back to the constant.
+
+        Same guard and log-once-per-failure-run semantics as
+        :meth:`_get_poll_timeout`.
+        """
+        if self._config_resolver is None:
+            return _MAX_CONSECUTIVE_ERRORS
+        try:
+            value = await self._config_resolver.get_int(
+                SettingNamespace.COMMUNICATION.value,
+                "webhook_bridge_max_consecutive_errors",
+            )
+        except asyncio.CancelledError:
+            raise
+        except MemoryError, RecursionError:
+            raise
+        except Exception:
+            if not self._max_errors_fallback_logged:
+                logger.warning(
+                    WEBHOOK_BRIDGE_POLL_ERROR,
+                    error=(
+                        "failed to resolve webhook_bridge_max_consecutive_errors;"
+                        " using fallback (logging suppressed until recovery)"
+                    ),
+                    max_errors=_MAX_CONSECUTIVE_ERRORS,
+                    exc_info=True,
+                )
+                self._max_errors_fallback_logged = True
+            return _MAX_CONSECUTIVE_ERRORS
+        self._max_errors_fallback_logged = False
+        return value
 
     async def start(self) -> None:
         """Subscribe and start the polling task."""
@@ -106,14 +201,21 @@ class WebhookEventBridge:
             logger.info(WEBHOOK_BRIDGE_STOPPED)
 
     async def _poll_loop(self) -> None:
-        """Poll ``#webhooks`` and forward events."""
+        """Poll ``#webhooks`` and forward events.
+
+        Poll timeout and max-error budget are cached per iteration so
+        the receive call and the error-budget check observe the same
+        values even if the operator edits the setting mid-iteration.
+        """
         consecutive_errors = 0
         while True:
+            poll_timeout = await self._get_poll_timeout()
+            max_errors = await self._get_max_consecutive_errors()
             try:
                 envelope = await self._bus.receive(
                     WEBHOOK_CHANNEL.name,
                     _SUBSCRIBER_ID,
-                    timeout=_POLL_TIMEOUT,
+                    timeout=poll_timeout,
                 )
                 if envelope is None:
                     continue
@@ -123,7 +225,7 @@ class WebhookEventBridge:
                 raise
             except Exception:
                 consecutive_errors += 1
-                if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                if consecutive_errors >= max_errors:
                     logger.exception(
                         WEBHOOK_BRIDGE_POLL_ERROR,
                         error="too many consecutive errors, stopping",
@@ -161,6 +263,9 @@ class WebhookEventBridge:
                     consecutive_errors=consecutive_errors,
                     exc_info=True,
                 )
+                # Back off for one poll interval before retrying so the
+                # loop does not tight-spin on a hot error path.
+                await asyncio.sleep(poll_timeout)
 
     async def _forward(self, message: object) -> None:
         """Extract event data and call on_external_event."""

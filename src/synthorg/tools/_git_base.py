@@ -48,6 +48,18 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _DEFAULT_TIMEOUT: Final[float] = 30.0
+_DEFAULT_KILL_GRACE_SECONDS: Final[float] = 5.0
+"""Hardcoded fallback kill-grace for git subprocess teardown.
+
+The value matches the default of the
+``tools.git_kill_grace_timeout_seconds`` setting, but the runtime
+wiring from ``ConfigResolver`` -> the git tool classes is not in
+place yet -- this constant is the only source of truth used by
+``_wait_or_kill`` today. Threading the setting through
+``_build_git_tools`` / the git tool constructors is tracked as
+follow-up work on #1398/#1400; until then a change to the setting
+has no effect on git subprocess teardown.
+"""
 
 # Matches http(s)://userinfo@host patterns in git URLs.
 _CREDENTIAL_RE = re.compile(r"(https?://)[^@/]+@")
@@ -360,7 +372,7 @@ class _BaseGitTool(BaseTool, ABC):
             try:
                 _, raw_stderr = await asyncio.wait_for(
                     proc.communicate(),
-                    timeout=5.0,
+                    timeout=_DEFAULT_KILL_GRACE_SECONDS,
                 )
                 raw = raw_stderr.decode("utf-8", errors="replace").strip()
                 # Sanitize: strip control chars and truncate for safety.

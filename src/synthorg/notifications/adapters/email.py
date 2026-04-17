@@ -1,6 +1,7 @@
 """Email notification sink -- SMTP via asyncio.to_thread."""
 
 import asyncio
+import math
 import re
 import smtplib
 import ssl
@@ -37,6 +38,14 @@ class EmailNotificationSink:
         from_addr: Sender email address.
         to_addrs: Recipient email addresses.
         use_tls: Whether to use STARTTLS.
+        smtp_timeout_seconds: SMTP connection timeout in seconds.
+            Mirrors the ``notifications.email_smtp_timeout_seconds``
+            setting; the notification factory threads the resolved
+            value in at construction so operator tuning takes effect
+            on restart. Must be positive.
+
+    Raises:
+        ValueError: If *smtp_timeout_seconds* is not positive.
     """
 
     __slots__ = (
@@ -44,6 +53,7 @@ class EmailNotificationSink:
         "_host",
         "_password",
         "_port",
+        "_smtp_timeout_seconds",
         "_to_addrs",
         "_use_tls",
         "_username",
@@ -59,7 +69,14 @@ class EmailNotificationSink:
         from_addr: str,
         to_addrs: tuple[str, ...],
         use_tls: bool = True,
+        smtp_timeout_seconds: float = 10.0,
     ) -> None:
+        if not math.isfinite(smtp_timeout_seconds) or smtp_timeout_seconds <= 0:
+            msg = (
+                "smtp_timeout_seconds must be a finite number > 0, got "
+                f"{smtp_timeout_seconds}"
+            )
+            raise ValueError(msg)
         self._host = host
         self._port = port
         self._username = username
@@ -67,6 +84,7 @@ class EmailNotificationSink:
         self._from_addr = from_addr
         self._to_addrs = to_addrs
         self._use_tls = use_tls
+        self._smtp_timeout_seconds = smtp_timeout_seconds
 
     @property
     def sink_name(self) -> str:
@@ -113,7 +131,9 @@ class EmailNotificationSink:
             f"Timestamp: {notification.timestamp.isoformat()}"
         )
 
-        with smtplib.SMTP(self._host, self._port, timeout=10) as smtp:
+        with smtplib.SMTP(
+            self._host, self._port, timeout=self._smtp_timeout_seconds
+        ) as smtp:
             if self._use_tls:
                 context = ssl.create_default_context()
                 smtp.starttls(context=context)
