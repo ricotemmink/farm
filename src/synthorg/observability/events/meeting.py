@@ -15,6 +15,7 @@ MEETING_PHASE_COMPLETED: Final[str] = "meeting.phase.completed"
 # Agent interaction
 MEETING_AGENT_CALLED: Final[str] = "meeting.agent.called"
 MEETING_AGENT_RESPONDED: Final[str] = "meeting.agent.responded"
+MEETING_AGENT_CALL_FAILED: Final[str] = "meeting.agent.call_failed"
 MEETING_CONTRIBUTION_RECORDED: Final[str] = "meeting.contribution.recorded"
 
 # Conflict detection
@@ -57,9 +58,6 @@ MEETING_EVENT_COOLDOWN_SKIPPED: Final[str] = "meeting.scheduler.event_cooldown_s
 
 # Task capping
 MEETING_TASKS_CAPPED: Final[str] = "meeting.task.capped"
-
-# Auto-wiring
-MEETING_STUB_AGENT_CALLER: Final[str] = "meeting.auto_wire.stub_agent_caller"
 
 # Strategy integration
 MEETING_LENS_ASSIGNMENT_FAILED: Final[str] = "meeting.strategy.lens_assignment_failed"

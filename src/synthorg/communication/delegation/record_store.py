@@ -6,6 +6,7 @@ count exceeds ``max_records``, oldest entries are evicted (FIFO).
 """
 
 import asyncio
+import threading
 from collections import deque
 from typing import TYPE_CHECKING
 
@@ -36,12 +37,21 @@ class DelegationRecordStore:
     ``max_records``, oldest entries are evicted (FIFO) via bounded
     ``deque``.
 
-    Concurrency note: ``record_sync`` does not acquire ``_lock``.
-    The lock serialises concurrent async readers only.  Cooperative
-    asyncio scheduling and deque's internal maxlen enforcement make
-    single-call sync writes safe (``deque.append`` cannot be
-    interrupted).  The eviction warning is best-effort under this
-    model.
+    Concurrency note: ``record_sync`` does not acquire the async
+    ``_lock`` (which serialises concurrent async readers only).
+    Cooperative asyncio scheduling and deque's internal maxlen
+    enforcement make single-call sync writes safe
+    (``deque.append`` cannot be interrupted).  The eviction warning
+    flag and the record buffer mutations are both held under
+    ``_warning_lock`` (``threading.Lock``) so the check-then-set on
+    ``_eviction_warned`` and the subsequent ``deque.append`` /
+    ``deque.clear`` happen as a single atomic unit.  This prevents
+    duplicate warnings caused by interleaving between checking the
+    flag and updating it, and it keeps the flag in step with the
+    buffer length -- ``clear()`` resets the flag for subsequent
+    writes under the same lock.  Concurrent fill cycles may still
+    observe each other's clears; the lock protects atomicity, not
+    sequencing across independent cycles.
 
     Args:
         max_records: Maximum records before oldest are evicted.
@@ -62,13 +72,15 @@ class DelegationRecordStore:
             maxlen=max_records,
         )
         self._lock: asyncio.Lock = asyncio.Lock()
+        self._warning_lock: threading.Lock = threading.Lock()
         self._eviction_warned: bool = False
 
     def clear(self) -> None:
         """Reset all delegation records for test isolation."""
-        cleared_count = len(self._records)
-        self._records.clear()
-        self._eviction_warned = False
+        with self._warning_lock:
+            cleared_count = len(self._records)
+            self._records.clear()
+            self._eviction_warned = False
         logger.info(
             DELEGATION_RECORD_STORE_CLEARED,
             cleared_count=cleared_count,
@@ -84,13 +96,14 @@ class DelegationRecordStore:
         Args:
             delegation: Immutable delegation record to store.
         """
-        if not self._eviction_warned and len(self._records) == self._records.maxlen:
-            logger.warning(
-                DELEGATION_RECORD_EVICTED,
-                max_records=self._records.maxlen,
-            )
-            self._eviction_warned = True
-        self._records.append(delegation)
+        with self._warning_lock:
+            if not self._eviction_warned and len(self._records) == self._records.maxlen:
+                logger.warning(
+                    DELEGATION_RECORD_EVICTED,
+                    max_records=self._records.maxlen,
+                )
+                self._eviction_warned = True
+            self._records.append(delegation)
         logger.debug(
             DELEGATION_RECORD_STORED,
             delegation_id=delegation.delegation_id,
@@ -183,9 +196,16 @@ class DelegationRecordStore:
         return _filter(snapshot, start=start, end=end)
 
     async def _snapshot(self) -> tuple[DelegationRecord, ...]:
-        """Return an immutable snapshot of all current records."""
+        """Return an immutable snapshot of all current records.
+
+        The async ``_lock`` serialises overlapping async readers, and
+        the sync ``_warning_lock`` is also taken briefly while copying
+        the deque so the snapshot cannot race with writes done under
+        the same sync lock (``record_sync`` / ``clear``).
+        """
         async with self._lock:
-            return tuple(self._records)
+            with self._warning_lock:
+                return tuple(self._records)
 
 
 # ── Module-level pure helpers ────────────────────────────────────

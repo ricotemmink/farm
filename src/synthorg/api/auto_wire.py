@@ -16,8 +16,11 @@ from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 from synthorg.api.channels import ALL_CHANNELS
 from synthorg.budget.tracker import CostTracker
+from synthorg.communication.meeting.agent_caller import (
+    build_meeting_agent_caller,
+    build_unconfigured_meeting_agent_caller,
+)
 from synthorg.communication.meeting.enums import MeetingProtocolType
-from synthorg.communication.meeting.models import AgentResponse
 from synthorg.communication.meeting.orchestrator import MeetingOrchestrator
 from synthorg.communication.meeting.scheduler import MeetingScheduler
 from synthorg.engine.task_engine import TaskEngine
@@ -27,7 +30,6 @@ from synthorg.observability.events.api import (
     API_APP_STARTUP,
     API_SERVICE_AUTO_WIRED,
 )
-from synthorg.observability.events.meeting import MEETING_STUB_AGENT_CALLER
 from synthorg.providers.health import ProviderHealthTracker
 from synthorg.providers.registry import ProviderRegistry
 
@@ -71,14 +73,19 @@ class Phase1Result(NamedTuple):
 class MeetingWireResult(NamedTuple):
     """Services created during meeting auto-wiring.
 
-    All fields are guaranteed non-``None`` after
-    ``auto_wire_meetings()`` returns -- explicit values pass through
-    and ``None`` inputs are replaced with auto-wired instances.
+    ``meeting_orchestrator`` is always non-``None``.  ``meeting_scheduler``
+    and ``ceremony_scheduler`` are ``None`` when auto-wiring discovered
+    missing dependencies (agent_registry / provider_registry) and so the
+    caller is known-failing -- running scheduled meetings against a
+    caller that is guaranteed to raise would produce background noise
+    with no useful output, so the schedulers are intentionally not
+    wired until the operator provides the missing dependencies.
+    Explicit values always pass through unchanged.
     """
 
     meeting_orchestrator: MeetingOrchestrator
-    meeting_scheduler: MeetingScheduler
-    ceremony_scheduler: CeremonyScheduler
+    meeting_scheduler: MeetingScheduler | None
+    ceremony_scheduler: CeremonyScheduler | None
 
 
 class BuildDispatcherFn(Protocol):
@@ -359,6 +366,7 @@ def auto_wire_meetings(
     meeting_orchestrator: MeetingOrchestrator | None,
     meeting_scheduler: MeetingScheduler | None,
     agent_registry: AgentRegistryService | None,
+    provider_registry: ProviderRegistry | None,
 ) -> MeetingWireResult:
     """Auto-wire meeting orchestrator and scheduler.
 
@@ -367,19 +375,48 @@ def auto_wire_meetings(
     lifecycle stage as Phase 1 -- meeting services don't need
     connected persistence.
 
+    When auto-wiring the orchestrator without an agent registry or
+    provider registry, the resulting agent caller is guaranteed to
+    raise :class:`MeetingAgentCallerNotConfiguredError` at call time.
+    Running scheduled meetings against a known-failing caller only
+    produces background noise, so ``meeting_scheduler`` and
+    ``ceremony_scheduler`` are intentionally left ``None`` in that
+    case.  Providing the missing dependencies on a subsequent app
+    build wires the schedulers for real.
+
     Args:
         effective_config: Root company configuration.
         meeting_orchestrator: Explicit orchestrator or ``None`` to
             auto-wire.
         meeting_scheduler: Explicit scheduler or ``None`` to auto-wire.
-        agent_registry: Agent registry (may be ``None``).  When
-            ``None``, a passthrough participant resolver is used.
+        agent_registry: Agent registry.  Required when auto-wiring the
+            orchestrator so meeting turns can resolve agent identities.
+            May be ``None`` when *meeting_orchestrator* is supplied
+            explicitly; in that case a passthrough participant resolver
+            is used for scheduling.
+        provider_registry: Provider registry.  Used for real LLM
+            dispatch per meeting turn when auto-wiring.  When ``None``,
+            an unconfigured caller is wired that raises
+            :class:`MeetingAgentCallerNotConfiguredError` at first
+            invocation -- the REST surface stays available but agent
+            calls fail loudly with actionable error context.
 
     Returns:
-        A ``MeetingWireResult`` with both services.
+        A ``MeetingWireResult``.  ``meeting_scheduler`` and
+        ``ceremony_scheduler`` may be ``None`` when the auto-wired
+        orchestrator has a known-failing caller (see docstring).
     """
+    orchestrator_was_auto_wired = meeting_orchestrator is None
+    missing_dependencies: tuple[str, ...] = _missing_meeting_dependencies(
+        agent_registry=agent_registry,
+        provider_registry=provider_registry,
+    )
+
     if meeting_orchestrator is None:
-        meeting_orchestrator = _wire_meeting_orchestrator()
+        meeting_orchestrator = _wire_meeting_orchestrator(
+            agent_registry=agent_registry,
+            provider_registry=provider_registry,
+        )
         if meeting_scheduler is not None:
             logger.warning(
                 API_APP_STARTUP,
@@ -391,6 +428,34 @@ def auto_wire_meetings(
                 ),
             )
 
+    # Skip scheduler/ceremony wiring only when the auto-wired
+    # orchestrator has a guaranteed-failing caller AND the operator
+    # did not supply an explicit scheduler.  Explicit schedulers always
+    # pass through unchanged so operators can mix wiring strategies.
+    skip_scheduler_wiring = (
+        orchestrator_was_auto_wired
+        and bool(missing_dependencies)
+        and meeting_scheduler is None
+    )
+
+    if skip_scheduler_wiring:
+        logger.warning(
+            API_APP_STARTUP,
+            note=(
+                "Skipping MeetingScheduler and CeremonyScheduler wiring "
+                "because meeting agent caller is unconfigured -- "
+                "scheduled meetings would invoke a caller guaranteed "
+                "to raise MeetingAgentCallerNotConfiguredError.  Provide "
+                "the missing dependencies to wire the full meeting stack"
+            ),
+            missing_dependencies=missing_dependencies,
+        )
+        return MeetingWireResult(
+            meeting_orchestrator=meeting_orchestrator,
+            meeting_scheduler=None,
+            ceremony_scheduler=None,
+        )
+
     if meeting_scheduler is None:
         meeting_scheduler = _wire_meeting_scheduler(
             effective_config,
@@ -398,9 +463,16 @@ def auto_wire_meetings(
             agent_registry,
         )
 
-    ceremony_scheduler = CeremonyScheduler(
-        meeting_scheduler=meeting_scheduler,
-    )
+    try:
+        ceremony_scheduler = CeremonyScheduler(
+            meeting_scheduler=meeting_scheduler,
+        )
+    except Exception:
+        logger.exception(
+            API_APP_STARTUP,
+            error="Failed to auto-wire ceremony scheduler",
+        )
+        raise
     logger.info(API_SERVICE_AUTO_WIRED, service="ceremony_scheduler")
 
     return MeetingWireResult(
@@ -408,6 +480,20 @@ def auto_wire_meetings(
         meeting_scheduler=meeting_scheduler,
         ceremony_scheduler=ceremony_scheduler,
     )
+
+
+def _missing_meeting_dependencies(
+    *,
+    agent_registry: AgentRegistryService | None,
+    provider_registry: ProviderRegistry | None,
+) -> tuple[str, ...]:
+    """Return the names of meeting dependencies that are ``None``."""
+    missing: list[str] = []
+    if agent_registry is None:
+        missing.append("agent_registry")
+    if provider_registry is None:
+        missing.append("provider_registry")
+    return tuple(missing)
 
 
 def _build_protocol_registry() -> Mapping[MeetingProtocolType, MeetingProtocol]:
@@ -458,51 +544,56 @@ def _build_protocol_registry() -> Mapping[MeetingProtocolType, MeetingProtocol]:
     return registry
 
 
-def _build_stub_agent_caller() -> AgentCaller:
-    """Create a stub agent caller for auto-wired meetings.
+def _wire_meeting_orchestrator(
+    *,
+    agent_registry: AgentRegistryService | None,
+    provider_registry: ProviderRegistry | None,
+) -> MeetingOrchestrator:
+    """Create a MeetingOrchestrator wired to real LLM dispatch.
 
-    Returns an async callback that produces placeholder
-    ``AgentResponse`` instances with zero tokens and empty content.
-    This allows the meeting subsystem to be structurally available
-    (no 503) while actual agent invocation requires a coordinator.
+    When both *agent_registry* and *provider_registry* are available,
+    the orchestrator dispatches real LLM calls per turn.  When either
+    is missing, the orchestrator is still constructed so the REST
+    surface stays available, but any attempt to invoke an agent raises
+    :class:`MeetingAgentCallerNotConfiguredError` at call time -- no
+    silent empty responses.
 
-    Returns:
-        An ``AgentCaller`` compatible async callback.
-    """
-
-    async def _stub_caller(
-        agent_id: str,
-        _prompt: str,
-        _max_tokens: int,
-    ) -> AgentResponse:
-        logger.warning(
-            MEETING_STUB_AGENT_CALLER,
-            agent_id=agent_id,
-            note=(
-                "Stub agent caller invoked -- response will be "
-                "empty until a coordinator is configured"
-            ),
-        )
-        return AgentResponse(
-            agent_id=agent_id,
-            content="",
-            input_tokens=0,
-            output_tokens=0,
-            cost_usd=0.0,
-        )
-
-    return _stub_caller
-
-
-def _wire_meeting_orchestrator() -> MeetingOrchestrator:
-    """Create a MeetingOrchestrator with all protocols registered.
+    Args:
+        agent_registry: Source of truth for agent identity lookup,
+            or ``None`` when not yet available.
+        provider_registry: Source of truth for LLM providers,
+            or ``None`` when not yet available.
 
     Returns:
-        A configured ``MeetingOrchestrator`` instance.
+        A configured ``MeetingOrchestrator``.
     """
     try:
         protocol_registry = _build_protocol_registry()
-        agent_caller = _build_stub_agent_caller()
+        missing = _missing_meeting_dependencies(
+            agent_registry=agent_registry,
+            provider_registry=provider_registry,
+        )
+        if missing:
+            logger.warning(
+                API_APP_STARTUP,
+                note=(
+                    "MeetingOrchestrator wired with an unconfigured agent "
+                    "caller; agent invocation will fail at call time until "
+                    "the missing dependencies are provided"
+                ),
+                missing_dependencies=missing,
+            )
+            agent_caller: AgentCaller = build_unconfigured_meeting_agent_caller(
+                missing_dependencies=missing,
+            )
+        else:
+            # Both registries are non-None (the `missing` check above).
+            assert agent_registry is not None  # noqa: S101
+            assert provider_registry is not None  # noqa: S101
+            agent_caller = build_meeting_agent_caller(
+                agent_registry=agent_registry,
+                provider_registry=provider_registry,
+            )
         orchestrator = MeetingOrchestrator(
             protocol_registry=protocol_registry,
             agent_caller=agent_caller,
