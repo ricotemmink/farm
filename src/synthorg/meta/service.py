@@ -70,6 +70,10 @@ if TYPE_CHECKING:
         ProposalApplier,
         RolloutStrategy,
     )
+    from synthorg.meta.rollout.before_after import SnapshotBuilder
+    from synthorg.meta.rollout.clock import Clock
+    from synthorg.meta.rollout.group_aggregator import GroupSignalAggregator
+    from synthorg.meta.rollout.roster import OrgRoster
     from synthorg.meta.telemetry.protocol import AnalyticsEmitter
     from synthorg.providers.base import BaseCompletionProvider
 
@@ -104,6 +108,21 @@ class SelfImprovementService:
             ``ArchitectureApplier.dry_run``.  Callers that omit it
             get an applier whose ``dry_run`` rejects with an explicit
             error.
+        clock: Time source for rollout observation loops. Defaults to
+            ``RealClock`` when omitted; tests inject ``FakeClock`` for
+            deterministic sleep behavior.
+        roster: Live agent enumeration used to assign control/treatment
+            groups and canary subsets. Defaults to ``NoOpOrgRoster``
+            (empty roster); the engine layer should inject a real
+            roster bound to the live agent registry.
+        snapshot_builder: Async factory producing the current
+            ``OrgSignalSnapshot`` during observation windows. Defaults
+            to an empty snapshot; callers should wire this to the
+            signal aggregator they use for rule evaluation.
+        group_aggregator: Per-group metric sampler for A/B tests.
+            Defaults to a null aggregator that emits no samples; the
+            service layer wires ``TrackerGroupAggregator`` when the
+            performance tracker is available.
     """
 
     def __init__(  # noqa: PLR0913
@@ -115,6 +134,10 @@ class SelfImprovementService:
         config_provider: ConfigProvider | None = None,
         prompt_context: PromptApplierContext | None = None,
         architecture_context: ArchitectureApplierContext | None = None,
+        clock: Clock | None = None,
+        roster: OrgRoster | None = None,
+        snapshot_builder: SnapshotBuilder | None = None,
+        group_aggregator: GroupSignalAggregator | None = None,
     ) -> None:
         self._config = config
         self._rule_engine = build_rule_engine(config)
@@ -127,7 +150,13 @@ class SelfImprovementService:
             architecture_context=architecture_context,
         )
         self._detector = build_regression_detector()
-        self._rollout_strategies = build_rollout_strategies(config)
+        self._rollout_strategies = build_rollout_strategies(
+            config,
+            clock=clock,
+            roster=roster,
+            snapshot_builder=snapshot_builder,
+            group_aggregator=group_aggregator,
+        )
 
         # Cross-deployment analytics emitter.
         builtin_names = frozenset(r.name for r in default_rules())

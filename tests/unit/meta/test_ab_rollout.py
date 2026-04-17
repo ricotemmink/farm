@@ -29,6 +29,7 @@ from synthorg.meta.rollout.ab_models import (
     GroupMetrics,
 )
 from synthorg.meta.rollout.ab_test import ABTestRollout
+from tests.unit.meta.rollout._ramp import ramp as _ramp
 
 pytestmark = pytest.mark.unit
 
@@ -80,20 +81,63 @@ def _group_metrics(  # noqa: PLR0913
     success: float = 0.85,
     spend: float = 100.0,
     observations: int = 20,
-    agents: int = 10,
+    agents: int = 20,
 ) -> GroupMetrics:
+    """Build sample-backed GroupMetrics matching the legacy aggregates.
+
+    Expands scalar ``quality``/``success``/``spend`` into deterministic
+    aligned sample tuples. The sample mean equals the requested
+    ``quality``/``success`` and the sum of ``spend_samples`` equals
+    the requested ``spend`` (both exactly when ``observations`` is
+    even). Samples ramp symmetrically so Welch's t-test sees non-zero
+    variance.
+    """
+    per_agent_spend = spend / observations if observations > 0 else 0.0
     return GroupMetrics(
         group=group,
         agent_count=agents,
-        observation_count=observations,
-        avg_quality_score=quality,
-        avg_success_rate=success,
-        total_spend=spend,
+        quality_samples=_ramp(quality, observations, 0.2),
+        success_samples=_ramp(success, observations, 0.02),
+        spend_samples=_ramp(per_agent_spend, observations, 0.0),
     )
 
 
 def _thresholds() -> RegressionThresholds:
     return RegressionThresholds()
+
+
+class _StaticRoster:
+    """OrgRoster yielding a fixed agent tuple."""
+
+    def __init__(self, count: int = 10) -> None:
+        from synthorg.core.types import NotBlankStr
+
+        self._agents = tuple(NotBlankStr(f"agent-{i}") for i in range(count))
+
+    async def list_agent_ids(self) -> tuple[str, ...]:
+        return self._agents
+
+
+def _ab_rollout(
+    *,
+    control_fraction: float = 0.5,
+    min_agents_per_group: int = 1,
+    min_observations_per_group: int = 10,
+    improvement_threshold: float = 0.15,
+    roster_size: int = 10,
+) -> ABTestRollout:
+    """Construct an ABTestRollout wired with FakeClock + static roster."""
+    from tests.unit.meta.rollout._fake_clock import FakeClock
+
+    return ABTestRollout(
+        control_fraction=control_fraction,
+        min_agents_per_group=min_agents_per_group,
+        min_observations_per_group=min_observations_per_group,
+        improvement_threshold=improvement_threshold,
+        clock=FakeClock(),
+        roster=_StaticRoster(roster_size),
+        check_interval_hours=4.0,
+    )
 
 
 class _StubApplier:
@@ -236,24 +280,58 @@ class TestGroupMetrics:
     def test_valid_metrics(self) -> None:
         m = _group_metrics(ABTestGroup.CONTROL)
         assert m.group == ABTestGroup.CONTROL
-        assert m.agent_count == 10
+        assert m.agent_count == 20
         assert m.observation_count == 20
 
     def test_quality_bounds(self) -> None:
-        with pytest.raises(ValueError, match="greater than or equal"):
-            _group_metrics(ABTestGroup.CONTROL, quality=-1.0)
-        with pytest.raises(ValueError, match="less than or equal"):
-            _group_metrics(ABTestGroup.CONTROL, quality=11.0)
+        # Inject samples directly: the _ramp helper rejects negative
+        # centers so we can't use the _group_metrics fixture to force
+        # out-of-range values. Using direct tuples isolates the
+        # GroupMetrics validator from the ramp input guard.
+        with pytest.raises(ValueError, match=r"quality_samples must be in"):
+            GroupMetrics(
+                group=ABTestGroup.CONTROL,
+                agent_count=3,
+                quality_samples=(-1.0, 0.0, 1.0),
+                success_samples=(0.5, 0.5, 0.5),
+                spend_samples=(1.0, 1.0, 1.0),
+            )
+        with pytest.raises(ValueError, match=r"quality_samples must be in"):
+            GroupMetrics(
+                group=ABTestGroup.CONTROL,
+                agent_count=3,
+                quality_samples=(11.0, 5.0, 5.0),
+                success_samples=(0.5, 0.5, 0.5),
+                spend_samples=(1.0, 1.0, 1.0),
+            )
 
     def test_success_rate_bounds(self) -> None:
-        with pytest.raises(ValueError, match="greater than or equal"):
-            _group_metrics(ABTestGroup.CONTROL, success=-0.1)
-        with pytest.raises(ValueError, match="less than or equal"):
-            _group_metrics(ABTestGroup.CONTROL, success=1.1)
+        with pytest.raises(ValueError, match=r"success_samples must be in"):
+            GroupMetrics(
+                group=ABTestGroup.CONTROL,
+                agent_count=3,
+                quality_samples=(5.0, 5.0, 5.0),
+                success_samples=(-0.1, 0.5, 0.5),
+                spend_samples=(1.0, 1.0, 1.0),
+            )
+        with pytest.raises(ValueError, match=r"success_samples must be in"):
+            GroupMetrics(
+                group=ABTestGroup.CONTROL,
+                agent_count=3,
+                quality_samples=(5.0, 5.0, 5.0),
+                success_samples=(1.1, 0.5, 0.5),
+                spend_samples=(1.0, 1.0, 1.0),
+            )
 
-    def test_observations_without_agents_rejected(self) -> None:
+    def test_observations_exceeding_agents_rejected(self) -> None:
         with pytest.raises(ValueError, match="observation_count"):
-            _group_metrics(ABTestGroup.CONTROL, agents=0, observations=5)
+            GroupMetrics(
+                group=ABTestGroup.CONTROL,
+                agent_count=0,
+                quality_samples=(5.0, 5.0),
+                success_samples=(0.5, 0.5),
+                spend_samples=(1.0, 1.0),
+            )
 
 
 # -- ABTestComparison model -----------------------------------------------
@@ -553,6 +631,49 @@ class TestABTestComparator:
         assert result.effect_size is not None
         assert result.p_value is not None
 
+    async def test_zero_control_equals_zero_treatment(self) -> None:
+        comparator = ABTestComparator(min_observations=5)
+        result = await comparator.compare(
+            control=_group_metrics(
+                ABTestGroup.CONTROL,
+                quality=0.0,
+                success=0.0,
+                observations=20,
+            ),
+            treatment=_group_metrics(
+                ABTestGroup.TREATMENT,
+                quality=0.0,
+                success=0.0,
+                observations=20,
+            ),
+            thresholds=_thresholds(),
+        )
+        # Zero variance in both arms -> Welch unavailable -> inconclusive.
+        assert result.verdict == ABTestVerdict.INCONCLUSIVE
+
+    async def test_near_zero_baseline_small_treatment_difference(self) -> None:
+        comparator = ABTestComparator(
+            min_observations=5,
+            improvement_threshold=0.15,
+        )
+        result = await comparator.compare(
+            control=_group_metrics(
+                ABTestGroup.CONTROL,
+                quality=0.5,
+                success=0.5,
+                observations=20,
+            ),
+            treatment=_group_metrics(
+                ABTestGroup.TREATMENT,
+                quality=0.52,
+                success=0.51,
+                observations=20,
+            ),
+            thresholds=_thresholds(),
+        )
+        # 0.02/0.5 = 4% improvement, below 15% threshold -> inconclusive.
+        assert result.verdict == ABTestVerdict.INCONCLUSIVE
+
     async def test_no_significant_difference(self) -> None:
         comparator = ABTestComparator(min_observations=5)
         result = await comparator.compare(
@@ -619,10 +740,7 @@ class TestABTestRollout:
             ABTestRollout(min_agents_per_group=0)
 
     async def test_successful_execute(self) -> None:
-        rollout = ABTestRollout(
-            control_fraction=0.5,
-            min_agents_per_group=1,
-        )
+        rollout = _ab_rollout()
         result = await rollout.execute(
             proposal=_proposal(),
             applier=_StubApplier(),
@@ -634,10 +752,7 @@ class TestABTestRollout:
         )
 
     async def test_failed_apply(self) -> None:
-        rollout = ABTestRollout(
-            control_fraction=0.5,
-            min_agents_per_group=1,
-        )
+        rollout = _ab_rollout()
         result = await rollout.execute(
             proposal=_proposal(),
             applier=_FailApplier(),
@@ -646,10 +761,7 @@ class TestABTestRollout:
         assert result.outcome == RolloutOutcome.FAILED
 
     async def test_too_few_agents_inconclusive(self) -> None:
-        rollout = ABTestRollout(
-            control_fraction=0.5,
-            min_agents_per_group=100,
-        )
+        rollout = _ab_rollout(min_agents_per_group=100)
         result = await rollout.execute(
             proposal=_proposal(),
             applier=_StubApplier(),
