@@ -57,3 +57,11 @@ vulnerabilities:
       TLS/DTLS and our application does not use AES-CFB128. No patched
       Wolfi package available yet. EPSS < 0.1%.
       Risk accepted: attack vector is unreachable in our images.
+
+  # NOTE: Earlier revisions of this PR waived several Go stdlib CVEs
+  # carried by the Atlas CLI binary. That workaround is no longer
+  # needed: docker/backend/Dockerfile now downloads the
+  # atlas-community-linux-*-latest CDN artifact (pinned by per-arch
+  # SHA256), which Atlas rebuilds whenever the Go toolchain ships
+  # stdlib security patches. The currently-pinned rebuild uses
+  # Go 1.25.9 which has all known stdlib CVEs backported.

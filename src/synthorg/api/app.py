@@ -14,7 +14,8 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path, PurePath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
+from urllib.parse import unquote, urlparse
 
 from litestar import Controller, Litestar, Request, Router
 from litestar.config.compression import CompressionConfig
@@ -28,6 +29,7 @@ from litestar.middleware.rate_limit import (
 )
 from litestar.openapi import OpenAPIConfig
 from litestar.openapi.plugins import ScalarRenderPlugin
+from pydantic import SecretStr
 
 from synthorg import __version__
 from synthorg.api.approval_store import ApprovalStore
@@ -115,7 +117,12 @@ from synthorg.observability.events.setup import (
 from synthorg.persistence.artifact_storage import (
     ArtifactStorageBackend,  # noqa: TC001
 )
-from synthorg.persistence.config import PersistenceConfig, SQLiteConfig
+from synthorg.persistence.config import (
+    PersistenceConfig,
+    PostgresConfig,
+    PostgresSslMode,
+    SQLiteConfig,
+)
 from synthorg.persistence.factory import create_backend
 from synthorg.persistence.filesystem_artifact_storage import (
     FileSystemArtifactStorage,
@@ -200,6 +207,117 @@ def _make_expire_callback(
             )
 
     return _on_expire
+
+
+def _postgres_config_from_url(db_url: str) -> PostgresConfig:
+    """Build a PostgresConfig from a libpq-style URL.
+
+    Accepts the canonical form the CLI compose template emits:
+    ``postgresql://user:password@host:5432/dbname``. Userinfo,
+    hostname, port, and path are URL-decoded so credentials with
+    reserved characters survive the round-trip. The parser is strict
+    about presence of the user, password, host, and database fields
+    -- ambiguous URLs are rejected up front so the auto-wire path
+    fails fast rather than producing a half-configured backend that
+    explodes later under load.
+
+    The default ``ssl_mode`` from PostgresConfig (``"require"``)
+    rejects plaintext connections; for local Docker compose where the
+    backend talks to Postgres over an internal network without TLS,
+    callers can override via ``SYNTHORG_POSTGRES_SSL_MODE`` env var.
+    """
+    parsed = urlparse(db_url)
+    # Source-level logging for each validation branch so operators
+    # debugging startup see the specific reason a DSN was rejected
+    # even if the caller's catch block truncates the stack trace.
+    # The caller also logs via logger.exception(...) on raise, but
+    # that only captures the final ValueError message.
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        msg = (
+            f"SYNTHORG_DATABASE_URL scheme {parsed.scheme!r} is not "
+            f"supported; expected 'postgresql://...'"
+        )
+        logger.warning(API_APP_STARTUP, error=msg, reason="invalid_scheme")
+        raise ValueError(msg)
+    if not parsed.hostname:
+        msg = "SYNTHORG_DATABASE_URL is missing a host component"
+        logger.warning(API_APP_STARTUP, error=msg, reason="missing_host")
+        raise ValueError(msg)
+    if not parsed.username or not parsed.password:
+        msg = (
+            "SYNTHORG_DATABASE_URL must include a username and password "
+            "(postgresql://user:pass@host:port/db)"
+        )
+        logger.warning(API_APP_STARTUP, error=msg, reason="missing_credentials")
+        raise ValueError(msg)
+    database = parsed.path.lstrip("/")
+    if not database:
+        msg = (
+            "SYNTHORG_DATABASE_URL must include a database name in the "
+            "path (postgresql://user:pass@host:port/db)"
+        )
+        logger.warning(API_APP_STARTUP, error=msg, reason="missing_database")
+        raise ValueError(msg)
+
+    ssl_override = (os.environ.get("SYNTHORG_POSTGRES_SSL_MODE") or "").strip()
+    ssl_kwargs: dict[str, Any] = {}
+    if ssl_override:
+        # Validate up front rather than letting Pydantic raise a less
+        # actionable error during PostgresConfig construction. Derive
+        # the allow-list from PostgresSslMode itself so adding or
+        # removing a mode in persistence/config.py automatically keeps
+        # this check in sync (no duplicate literal sets to drift).
+        valid_modes = set(get_args(PostgresSslMode))
+        if ssl_override not in valid_modes:
+            msg = (
+                f"SYNTHORG_POSTGRES_SSL_MODE={ssl_override!r} is invalid; "
+                f"must be one of: {sorted(valid_modes)}"
+            )
+            logger.warning(API_APP_STARTUP, error=msg, reason="invalid_ssl_mode")
+            raise ValueError(msg)
+        ssl_kwargs["ssl_mode"] = ssl_override
+
+    return PostgresConfig(
+        host=unquote(parsed.hostname),
+        port=parsed.port or 5432,
+        database=unquote(database),
+        username=unquote(parsed.username),
+        password=SecretStr(unquote(parsed.password)),
+        **ssl_kwargs,
+    )
+
+
+def _resolve_artifact_dir_env() -> str:
+    """Resolve the postgres-mode artifact directory from the environment.
+
+    Reads ``SYNTHORG_ARTIFACT_DIR`` and falls back to ``/data`` (the
+    compose template's mount point) when the variable is unset or
+    consists only of whitespace. Rejects relative or traversal paths
+    at the env boundary so artifacts cannot end up in the process
+    working directory or outside the mounted volume.
+
+    Returns:
+        The absolute directory string to hand to
+        :class:`FileSystemArtifactStorage`.
+
+    Raises:
+        ValueError: If the env var is set to a non-absolute path. A
+            previous implementation used ``os.environ.get(...) or
+            "/data"`` which treated whitespace as truthy and
+            collapsed to ``Path("")``; this helper strips first and
+            then validates.
+    """
+    artifact_dir_str = os.environ.get("SYNTHORG_ARTIFACT_DIR", "").strip()
+    if not artifact_dir_str:
+        return "/data"
+    if not Path(artifact_dir_str).is_absolute():
+        msg = (
+            f"SYNTHORG_ARTIFACT_DIR={artifact_dir_str!r} must be an absolute "
+            f"path to avoid writing artifacts to the process working directory"
+        )
+        logger.warning(API_APP_STARTUP, error=msg, reason="non_absolute_artifact_dir")
+        raise ValueError(msg)
+    return artifact_dir_str
 
 
 def _make_meeting_publisher(
@@ -1139,17 +1257,62 @@ def create_app(  # noqa: C901, PLR0912, PLR0913, PLR0915
         Path(resolved_config_path_str) if resolved_config_path_str else None
     )
 
-    # Auto-wire persistence from SYNTHORG_DB_PATH env var (set by CLI
-    # compose template).  The startup lifecycle handles connect() +
-    # migrate() + auth service creation.
+    # Read persistence env vars unconditionally so downstream code
+    # (e.g. the secret-backend gate below) can still observe which
+    # environment choice won, even when ``persistence`` was injected
+    # by the caller rather than auto-wired here.
+    db_url = (os.environ.get("SYNTHORG_DATABASE_URL") or "").strip()
+    db_path = (os.environ.get("SYNTHORG_DB_PATH") or "").strip()
+
+    # Auto-wire persistence from CLI-provided env vars. The CLI compose
+    # template sets ONE of these per init choice:
+    #   * SYNTHORG_DATABASE_URL=postgresql://user:pass@host:port/db   (postgres)
+    #   * SYNTHORG_DB_PATH=/data/synthorg.db                          (sqlite)
+    # Postgres takes precedence so a half-converted state (both env
+    # vars present) does not silently fall back to SQLite. The startup
+    # lifecycle handles connect() + migrate() + auth service creation.
     if persistence is None:
-        db_path = (os.environ.get("SYNTHORG_DB_PATH") or "").strip()
-        if db_path:
+        if db_url:
+            try:
+                pg_config = _postgres_config_from_url(db_url)
+                persistence = create_backend(
+                    PersistenceConfig(backend="postgres", postgres=pg_config),
+                )
+            except MemoryError, RecursionError:
+                raise
+            except Exception:
+                logger.exception(
+                    API_APP_STARTUP,
+                    error="Postgres persistence creation failed",
+                )
+                raise
+            logger.info(
+                API_APP_STARTUP,
+                note="Auto-wired Postgres persistence from SYNTHORG_DATABASE_URL",
+                host=pg_config.host,
+                database=pg_config.database,
+            )
+            # Postgres has no on-disk artifact directory tied to the DB
+            # path, so default artifact storage to /data (the standard
+            # data volume in the CLI compose template) when not set.
+            if artifact_storage is None:
+                artifact_dir_str = _resolve_artifact_dir_env()
+                artifact_storage = FileSystemArtifactStorage(
+                    data_dir=Path(artifact_dir_str),
+                )
+                logger.info(
+                    API_APP_STARTUP,
+                    note="Auto-wired filesystem artifact storage (postgres mode)",
+                    data_dir=artifact_dir_str,
+                )
+        elif db_path:
             resolved_db_path = Path(db_path)
             try:
                 persistence = create_backend(
                     PersistenceConfig(sqlite=SQLiteConfig(path=db_path)),
                 )
+            except MemoryError, RecursionError:
+                raise
             except Exception:
                 logger.exception(
                     API_APP_STARTUP,
@@ -1338,9 +1501,20 @@ def create_app(  # noqa: C901, PLR0912, PLR0913, PLR0915
             #      picked up when ``create_app()`` was handed an
             #      already-built ``SQLitePersistenceBackend``.
             #   3. ``SYNTHORG_DB_PATH`` env var as a last resort.
+            #
+            # When the main persistence was auto-wired from Postgres
+            # (``SYNTHORG_DATABASE_URL`` won the if/elif above), do NOT
+            # fall through to SYNTHORG_DB_PATH: that would silently
+            # route secrets into a stale orphan SQLite file even
+            # though the rest of the app talks to Postgres. In that
+            # dual-env case secret_db_path is left None and operators
+            # must configure a non-encrypted_sqlite secret backend.
             secret_db_path: str | None
+            postgres_mode = bool(db_url)
             if resolved_db_path is not None:
                 secret_db_path = str(resolved_db_path)
+            elif postgres_mode:
+                secret_db_path = None
             else:
                 secret_db_path = None
                 injected_cfg = getattr(persistence, "_config", None)

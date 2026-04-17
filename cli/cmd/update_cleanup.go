@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -14,6 +15,11 @@ import (
 	"github.com/Aureliolo/synthorg/cli/internal/ui"
 	"github.com/spf13/cobra"
 )
+
+// errImageNotLocal signals that a service image is not present in the local
+// Docker daemon. This is expected during an upgrade whose previous version
+// was never fully pulled, and should not surface as a user-visible error.
+var errImageNotLocal = errors.New("image not present locally")
 
 // oldImage holds display info, Docker ID, and raw size for a non-current
 // SynthOrg image.
@@ -41,6 +47,11 @@ func autoCleanupOldImages(cmd *cobra.Command, info docker.Info, state config.Sta
 	// Build the keep set: current IDs (just pulled) + previous IDs.
 	currentIDs, err := collectCurrentImageIDs(ctx, info, state)
 	if err != nil {
+		if errors.Is(err, errImageNotLocal) {
+			// Current-version images not yet on disk means there is
+			// nothing to protect during cleanup; just skip silently.
+			return
+		}
 		_, _ = fmt.Fprintf(errOut, "Warning: could not determine current image IDs, skipping auto-cleanup: %v\n", err)
 		return
 	}
@@ -134,6 +145,13 @@ func hintOldImages(cmd *cobra.Command, info docker.Info, state config.State) {
 func findOldImages(ctx context.Context, errOut io.Writer, info docker.Info, state config.State) ([]oldImage, error) {
 	currentIDs, err := collectCurrentImageIDs(ctx, info, state)
 	if err != nil {
+		if errors.Is(err, errImageNotLocal) {
+			// Nothing to compare against; surface the benign
+			// "image not pulled yet" state as an empty result
+			// rather than forwarding a sentinel error. Callers
+			// then do not need to special-case this shape.
+			return nil, nil
+		}
 		_, _ = fmt.Fprintf(errOut, "Note: could not determine current image IDs, skipping cleanup: %v\n", err)
 		return nil, err
 	}
@@ -214,7 +232,7 @@ func buildImageDisplay(repo, tag, digest, size, id string) string {
 // means the caller has malformed state/env -- treat it as a custom
 // deployment (no pins) rather than crashing auto-cleanup outright.
 func collectCurrentImageIDs(ctx context.Context, info docker.Info, state config.State) (map[string]bool, error) {
-	services := images.ServiceNames(state.Sandbox)
+	services := images.ServiceNames(state.Sandbox, state.FineTuning)
 
 	var verifiedDigests map[string]string
 	if tun, err := config.ResolveTunables(state); err == nil && !tun.CustomRegistry {
@@ -222,6 +240,7 @@ func collectCurrentImageIDs(ctx context.Context, info docker.Info, state config.
 	}
 
 	currentIDs := make(map[string]bool, len(services))
+	missing := 0
 	for _, svc := range services {
 		ref := images.RefForService(svc, state.ImageTag, verifiedDigests)
 		id, err := images.InspectID(ctx, info.DockerPath, ref)
@@ -229,8 +248,14 @@ func collectCurrentImageIDs(ctx context.Context, info docker.Info, state config.
 			return nil, fmt.Errorf("resolving image ID for %s: %w", svc, err)
 		}
 		if id == "" {
-			// Image not pulled yet (InspectID returns "" on "No such
-			// image"). Nothing to clean up -- skip silently.
+			// InspectID returns ("", nil) when the image is not pulled
+			// yet. Record it as missing but keep collecting IDs for
+			// the other services: captureImageIDsForCleanup needs the
+			// partial snapshot so present-service rollback images stay
+			// protected, while findOldImages / autoCleanupOldImages
+			// bail on ANY miss (they cannot safely distinguish "old"
+			// from "current-but-not-yet-pulled" without the full set).
+			missing++
 			continue
 		}
 		// Store both the full ID (sha256:...) and the short 12-char ID.
@@ -241,6 +266,14 @@ func collectCurrentImageIDs(ctx context.Context, info docker.Info, state config.
 		if len(short) >= 12 {
 			currentIDs[short[:12]] = true
 		}
+	}
+	if missing > 0 {
+		// Surface the sentinel so findOldImages / autoCleanupOldImages
+		// bail instead of mistakenly classifying not-yet-pulled services
+		// as deletable, but return the partial map too so callers like
+		// captureImageIDsForCleanup can still protect the services that
+		// ARE present on disk.
+		return currentIDs, fmt.Errorf("%d service image(s) not pulled locally: %w", missing, errImageNotLocal)
 	}
 	return currentIDs, nil
 }

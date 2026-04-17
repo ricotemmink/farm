@@ -452,3 +452,6 @@ func mustAbs(t *testing.T, p string) string {
 	}
 	return abs
 }
+
+// Note: nats.conf / compose atomicity tests now live in
+// cli/internal/compose/writer_test.go alongside the exported helpers.

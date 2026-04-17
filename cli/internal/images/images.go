@@ -20,13 +20,27 @@ func RepoPrefix() string {
 	return verify.RegistryHost + "/" + verify.ImageRepoPrefix
 }
 
-// ServiceNames returns the canonical SynthOrg service names.
-// The sandbox service is included only when sandbox is true.
-func ServiceNames(sandbox bool) []string {
+// ServiceNames returns the canonical SynthOrg service names that the
+// current install actually pulls, given its feature flags:
+//
+//   - backend and web are always included.
+//   - sandbox and sidecar are included when sandbox is true (sidecar runs
+//     alongside sandbox and is pulled by the same code path).
+//   - fine-tune is included when fineTuning is true.
+//
+// Callers that need the "has this install pulled image X?" answer MUST
+// use this single source of truth: the health check, auto-cleanup keep-set,
+// and diagnostics all depend on it, and omissions here cause the cleanup
+// path to treat freshly-pulled images as garbage.
+func ServiceNames(sandbox, fineTuning bool) []string {
+	names := []string{"backend", "web"}
 	if sandbox {
-		return []string{"backend", "web", "sandbox"}
+		names = append(names, "sandbox", "sidecar")
 	}
-	return []string{"backend", "web"}
+	if fineTuning {
+		names = append(names, "fine-tune")
+	}
+	return names
 }
 
 // RefForService returns the Docker image reference for a SynthOrg service.
@@ -109,7 +123,7 @@ func parseImageList(raw string) []LocalImage {
 func InspectID(ctx context.Context, dockerPath, ref string) (string, error) {
 	out, err := docker.RunCmd(ctx, dockerPath, "image", "inspect", ref, "--format", "{{.ID}}")
 	if err != nil {
-		if isImageNotFoundErr(err) {
+		if IsImageNotFoundErr(err) {
 			return "", nil
 		}
 		return "", err
@@ -117,10 +131,10 @@ func InspectID(ctx context.Context, dockerPath, ref string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// isImageNotFoundErr reports whether err is docker's "No such image"
+// IsImageNotFoundErr reports whether err is docker's "No such image"
 // response. Matched via the stderr string because docker CLI does not
 // surface a structured error code for this case.
-func isImageNotFoundErr(err error) bool {
+func IsImageNotFoundErr(err error) bool {
 	if err == nil {
 		return false
 	}

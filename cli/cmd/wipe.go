@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -22,6 +23,21 @@ import (
 	"github.com/Aureliolo/synthorg/cli/internal/ui"
 	"github.com/spf13/cobra"
 )
+
+// normalizePathForCompare returns a canonical form of p suitable for
+// filepath.Rel comparison. On Windows the filesystem is case-insensitive
+// by default, so two paths differing only in drive-letter case
+// (C:\Users vs c:\users) can make filepath.Rel emit a `..` prefix that
+// wrongly reports an in-tree binary as out-of-tree. Lowercasing both
+// sides before the compare fixes that without changing semantics on
+// case-sensitive Unix filesystems (where this helper is a no-op).
+func normalizePathForCompare(p string) string {
+	p = filepath.Clean(p)
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(p)
+	}
+	return p
+}
 
 // errWipeCancelled is a sentinel error used to signal that the user cancelled
 // the wipe operation. Callers convert this to a clean (nil) exit.
@@ -189,9 +205,23 @@ func (wc *wipeContext) confirmAndWipe() error {
 		return fmt.Errorf("refusing to remove suspicious path: %s", wc.safeDir)
 	}
 	sp2 := wc.out.StartSpinner("Removing data directory...")
-	if err := os.RemoveAll(wc.safeDir); err != nil {
-		sp2.Warn(fmt.Sprintf("Could not remove data directory: %v", err))
+	rmErr := removeDataDirExceptSelf(wc.safeDir)
+	if rmErr != nil {
+		// A partial wipe is not success. Surface the error so the
+		// CLI exits with a non-zero status (exit code 1 per
+		// cli/CLAUDE.md's Exit Codes table) and the user sees a
+		// loud failure instead of "Wipe complete" printed over a
+		// half-cleaned data dir.
+		sp2.Warn(fmt.Sprintf("Could not remove data directory: %v", rmErr))
 		wc.errOut.HintError(fmt.Sprintf("Manually delete %s to complete the wipe.", wc.safeDir))
+		return fmt.Errorf("removing data directory: %w", rmErr)
+	}
+	if selfPathInside(wc.safeDir) {
+		// Expected on Windows when the running CLI lives inside the
+		// data dir -- wipe is supposed to leave config and state gone,
+		// not nuke the tool the user just invoked.
+		sp2.Success("Data directory cleared (CLI binary kept in place)")
+		wc.out.HintNextStep("Run 'synthorg uninstall' to remove the binary too.")
 	} else {
 		sp2.Success("Data directory removed")
 	}
@@ -201,6 +231,95 @@ func (wc *wipeContext) confirmAndWipe() error {
 	wc.out.HintNextStep("Run 'synthorg init' to set up again.")
 
 	return nil
+}
+
+// selfPathInside reports whether the running CLI binary lives under
+// dataDir. Used after wipe to decide between "everything gone" and
+// "everything except the binary" success messages. Resolves symlinks
+// (macOS /var -> /private/var) and case-folds paths on Windows so the
+// comparison is stable on both platforms.
+func selfPathInside(dataDir string) bool {
+	selfPath, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	if resolved, rErr := filepath.EvalSymlinks(selfPath); rErr == nil {
+		selfPath = resolved
+	}
+	dataDirClean := filepath.Clean(dataDir)
+	if resolved, rErr := filepath.EvalSymlinks(dataDirClean); rErr == nil {
+		dataDirClean = resolved
+	}
+	rel, relErr := filepath.Rel(normalizePathForCompare(dataDirClean), normalizePathForCompare(selfPath))
+	if relErr != nil {
+		return false
+	}
+	return !strings.HasPrefix(rel, "..")
+}
+
+// removeDataDirExceptSelf removes everything inside dataDir except for
+// the currently-running CLI binary if it lives under dataDir. Windows
+// holds an open handle on the running .exe so a flat
+// `os.RemoveAll(dataDir)` fails on the first encounter with the locked
+// file, leaving the rest of the directory half-cleaned. Reusing the
+// same skip-self primitive that uninstall already uses keeps the two
+// destructive flows consistent and lets the unlocked entries actually
+// go away.
+//
+// On Unix the OS allows deleting an open binary, so this code path
+// produces the same observable outcome as a plain RemoveAll while
+// keeping a single, platform-agnostic implementation.
+func removeDataDirExceptSelf(dataDir string) error {
+	selfPath, err := os.Executable()
+	if err != nil {
+		return os.RemoveAll(filepath.Clean(dataDir))
+	}
+	return removeDataDirExceptBinary(dataDir, selfPath)
+}
+
+// removeDataDirExceptBinary is the testable core of
+// removeDataDirExceptSelf: given the path to the binary-to-preserve,
+// wipe everything under dataDir except that binary (and its ancestor
+// dirs). Split out so tests can exercise the inside-data-dir branch
+// without needing to forge os.Executable's return value.
+func removeDataDirExceptBinary(dataDir, selfPath string) error {
+	// Separate two concerns:
+	//  - The PATH WE DELETE is the original dataDir (the user-approved
+	//    wipe target; confirmAndWipe has already validated it).
+	//  - The PATH WE COMPARE WITH (to decide whether selfPath lives
+	//    inside the tree) is the symlink-resolved form, since macOS's
+	//    /var -> /private/var and similar shims would otherwise flip
+	//    the comparison. On Windows the filesystem is case-insensitive
+	//    by default so C:\Users vs c:\users would trip filepath.Rel
+	//    into emitting a stray `..`; normalizePathForCompare lowercases
+	//    on Windows only.
+	//
+	// If we instead resolved dataDir in place and then deleted the
+	// resolved path, a symlinked data dir could silently redirect the
+	// wipe to an unintended target -- confirmAndWipe only validated
+	// the pre-resolution form.
+	dataDirClean := filepath.Clean(dataDir)
+	dataDirForCompare := dataDirClean
+	if resolved, rErr := filepath.EvalSymlinks(dataDirClean); rErr == nil {
+		dataDirForCompare = resolved
+	}
+
+	if resolved, rErr := filepath.EvalSymlinks(selfPath); rErr == nil {
+		selfPath = resolved
+	}
+	selfPath = filepath.Clean(selfPath)
+
+	if rel, relErr := filepath.Rel(normalizePathForCompare(dataDirForCompare), normalizePathForCompare(selfPath)); relErr != nil || strings.HasPrefix(rel, "..") {
+		// Binary lives outside dataDir; safe to nuke the whole tree
+		// (at the user-approved path, not the resolved path).
+		return os.RemoveAll(dataDirClean)
+	}
+
+	// Binary is inside dataDir: clear everything else, leave the
+	// binary (and its ancestor dirs) in place. Walk from the
+	// resolved form so removeAllExcept can correctly skip the
+	// selfPath ancestors regardless of symlink shims on either side.
+	return removeAllExcept(dataDirForCompare, selfPath)
 }
 
 // runForm configures a huh form with the wipe context's I/O streams and runs it.

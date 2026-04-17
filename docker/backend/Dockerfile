@@ -31,13 +31,19 @@ WORKDIR /app
 
 COPY --chown=65532:65532 pyproject.toml uv.lock ./
 USER build
+# Install the `postgres` and `distributed` extras unconditionally: both
+# are runtime-selectable via `synthorg init --persistence-backend` and
+# `--bus-backend`, so the image must carry psycopg and nats-py whether
+# or not the user has chosen them yet. `fine-tune` lives in the
+# dedicated synthorg-fine-tune image (5GB pytorch); `telemetry` stays
+# opt-in to avoid pulling logfire on default installs.
 RUN --mount=type=cache,target=/home/build/.cache/uv,uid=65532,gid=65532 \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --frozen --no-dev --no-install-project --extra postgres --extra distributed
 
 RUN touch README.md
 COPY --chown=65532:65532 src/ src/
 RUN --mount=type=cache,target=/home/build/.cache/uv,uid=65532,gid=65532 \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev --extra postgres --extra distributed
 
 RUN find /app/src -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
@@ -57,6 +63,61 @@ RUN rm -f /app/.venv/bin/python \
 USER root
 RUN mkdir -p /data/logs /data/memory && chown -R 65532:65532 /data
 USER build
+
+# ---------------------------------------------------------------------------
+# Atlas CLI: required by the Postgres backend's migrate() path. We
+# download the static binary directly from Atlas's release CDN.
+#
+# URL tag choice:
+#   Atlas publishes numbered tags (-v1.2.0) and a moving rebuild tag
+#   (-latest). The community CDN only rebuilds `-latest` when upstream
+#   ships Go stdlib security patches -- numbered tags stay frozen at
+#   the Go version available on release day, including known-vulnerable
+#   stdlib (e.g. v1.2.0 is built with Go 1.25.0, which carries several
+#   HIGH/CRITICAL CVEs in crypto/tls and crypto/x509).
+#
+#   We therefore pin the URL to `-latest` but lock the per-arch SHA256
+#   so builds are reproducible. Current rebuild: 2026-04-16, Atlas 1.2.0
+#   + Go 1.25.9 (patched). Refresh both ATLAS_SHA256_* values with
+#   `curl -sL <url> | sha256sum` whenever the upstream CDN publishes a
+#   new rebuild; renovate's customManager on ariga/atlas GitHub
+#   releases raises a reminder PR when upstream tags a new numbered
+#   version (at which point we reassess whether to switch back to a
+#   numbered URL once Atlas ships v1.3+).
+# ---------------------------------------------------------------------------
+FROM curlimages/curl:8.19.0@sha256:9a6f6a17667960e077f1b153009aaf18ac99a622221084e1938a45a06fff057a AS atlas
+
+# renovate: datasource=github-releases depName=ariga/atlas
+ARG ATLAS_VERSION=v1.2.0
+ARG ATLAS_SHA256_AMD64=585830f49a84d7a30c49caa8e8145fd4fb07cc16952dce915f72d7e93f1ed9bc
+ARG ATLAS_SHA256_ARM64=b1c50f55ae10054286ce4c20238c68168434f3275b5d2051841a926cf7fdd62a
+ARG TARGETARCH
+
+SHELL ["/bin/ash", "-o", "pipefail", "-c"]
+
+# curlimages/curl runs as the non-root curl_user by default. Write the
+# binary into the user's home (HOME=/home/curl_user) so we stay on the
+# default USER and keep hadolint (DL3002: last USER must not be root)
+# happy without adding a ignore directive -- the binary is moved to
+# /usr/local/bin via COPY --from=atlas in the runtime stage below.
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+        amd64) ATLAS_SHA256="${ATLAS_SHA256_AMD64}" ;; \
+        arm64) ATLAS_SHA256="${ATLAS_SHA256_ARM64}" ;; \
+        *) echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 3 \
+        "https://release.ariga.io/atlas/atlas-community-linux-${TARGETARCH:-amd64}-latest" \
+        -o /home/curl_user/atlas; \
+    echo "${ATLAS_SHA256}  /home/curl_user/atlas" | sha256sum -c -; \
+    chmod +x /home/curl_user/atlas; \
+    # Alpine ldd on a static binary prints "Not a valid dynamic program"
+    # (or similar) and exits non-zero. Treat an exit-zero ldd that lists
+    # interpreter/libc deps as the failure case.
+    if ldd /home/curl_user/atlas 2>/dev/null | grep -Eq 'ld-linux|libc\.so|=> /'; then \
+        echo "ERROR: /atlas is dynamically linked; incompatible with the distroless runtime." >&2; \
+        exit 1; \
+    fi
 
 # ---------------------------------------------------------------------------
 # Stage 2 -- Runtime (apko-composed Wolfi base: no shell, no package manager)
@@ -80,6 +141,12 @@ COPY --chown=65532:65532 pyproject.toml uv.lock /app/
 # initialises fresh volumes with uid/gid 65532 instead of root.
 # COPY from builder stage because the distroless runtime has no shell.
 COPY --from=builder --chown=65532:65532 /data /data
+
+# Atlas CLI for postgres migration apply on startup. The binary is
+# self-contained; copying it into /usr/local/bin places it on the
+# default PATH without needing a shell or package manager in the
+# distroless runtime.
+COPY --from=atlas /home/curl_user/atlas /usr/local/bin/atlas
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

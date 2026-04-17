@@ -734,9 +734,8 @@ func writeInitFiles(state config.State) (string, error) {
 		return "", fmt.Errorf("generating compose file: %w", err)
 	}
 
-	composePath := filepath.Join(safeDir, "compose.yml")
-	if err := os.WriteFile(composePath, composeYAML, 0o600); err != nil {
-		return "", fmt.Errorf("writing compose file: %w", err)
+	if err := compose.WriteComposeAndNATS("compose.yml", composeYAML, state.BusBackend, safeDir); err != nil {
+		return "", fmt.Errorf("writing compose files: %w", err)
 	}
 
 	if err := config.Save(state); err != nil {

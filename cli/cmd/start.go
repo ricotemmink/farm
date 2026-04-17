@@ -255,14 +255,15 @@ func startDetached(ctx context.Context, info docker.Info, safeDir string, state 
 // pullAllImages pulls all enabled images in a single unified LiveBox:
 // compose services (backend, web, postgres, nats) plus standalone images
 // (sandbox, sidecar, fine-tune) depending on configuration. Only enabled
-// services are pulled. State is reloaded from disk after verification to
-// pick up pinned digests.
+// services are pulled.
+//
+// Callers MUST pass a state whose ImageTag and VerifiedDigests reflect the
+// images to be pulled. During an update, disk config still holds the old
+// tag/digests until after the pull completes; reloading here would cause
+// standalone image pulls to use stale refs while compose-driven pulls use
+// the new refs written into compose.yml, leaving the install inconsistent.
 func pullAllImages(ctx context.Context, info docker.Info, safeDir string, state config.State, out *ui.UI) (config.State, error) {
-	// Reload state to pick up verified digests from the verify step.
-	refreshed, err := config.Load(GetGlobalOpts(ctx).DataDir)
-	if err != nil {
-		refreshed = state // fall back to pre-verify state
-	}
+	refreshed := state
 
 	// Build the full list of images to pull.
 	type pullItem struct {
@@ -287,12 +288,13 @@ func pullAllImages(ctx context.Context, info docker.Info, safeDir string, state 
 			ref:  verify.FormatImageRef("sidecar", refreshed.ImageTag, refreshed.VerifiedDigests["sidecar"]),
 		})
 	}
+	fineTuneIdx := -1
 	if refreshed.FineTuning {
+		fineTuneIdx = len(items)
 		items = append(items, pullItem{
 			name: "fine-tune",
 			ref:  verify.FormatImageRef("fine-tune", refreshed.ImageTag, refreshed.VerifiedDigests["fine-tune"]),
 		})
-		out.Warn("Fine-tune image is large (~5 GB) -- first pull may take a few minutes")
 	}
 
 	// Show all pulls in one LiveBox.
@@ -304,19 +306,26 @@ func pullAllImages(ctx context.Context, info docker.Info, safeDir string, state 
 	defer lb.Finish()
 
 	var (
-		mu      sync.Mutex
-		pullErr error
+		mu           sync.Mutex
+		pullErr      error
+		fineTuneSlow bool
 	)
 	var wg sync.WaitGroup
 	for i, item := range items {
 		wg.Add(1)
 		go func(idx int, it pullItem) {
 			defer wg.Done()
+			start := time.Now()
 			var err error
 			if it.compose {
 				err = composeRunQuiet(ctx, info, safeDir, "pull", it.name)
 			} else {
 				err = dockerPullWithRetry(ctx, info, it.ref, sandboxPullAttempts)
+			}
+			if idx == fineTuneIdx && time.Since(start) >= fineTuneSlowThreshold {
+				mu.Lock()
+				fineTuneSlow = true
+				mu.Unlock()
 			}
 			if err != nil {
 				lb.UpdateLine(idx, ui.IconError)
@@ -330,8 +339,20 @@ func pullAllImages(ctx context.Context, info docker.Info, safeDir string, state 
 	}
 	wg.Wait()
 
+	// Emit the fine-tune size hint below the box only when the pull actually
+	// took a while. Short pulls (cached layers, fast links) skip the warning.
+	if fineTuneSlow && pullErr == nil {
+		lb.Finish()
+		out.HintTip("Fine-tune image is ~9 GB -- first pull takes a few minutes on typical connections.")
+	}
+
 	return refreshed, pullErr
 }
+
+// fineTuneSlowThreshold is the minimum fine-tune pull duration before the
+// CLI emits a "large image, takes a while" hint below the pull box. Short
+// pulls (cached layers, fast links, resumed pulls) skip the hint entirely.
+const fineTuneSlowThreshold = 30 * time.Second
 
 // dockerPullWithRetry pulls an image with retries for transient failures.
 func dockerPullWithRetry(ctx context.Context, info docker.Info, imageRef string, attempts int) error {
@@ -612,54 +633,7 @@ func writeDigestPinnedCompose(state config.State, digestPins map[string]string, 
 		return fmt.Errorf("generating compose file: %w", err)
 	}
 
-	return atomicWriteFile(filepath.Join(safeDir, "compose.yml"), composeYAML, safeDir)
-}
-
-// atomicWriteFile writes data to targetPath via a temp file + rename to prevent
-// partial writes on crash. tmpDir must be on the same filesystem as targetPath.
-func atomicWriteFile(targetPath string, data []byte, tmpDir string) error {
-	tmp, err := os.CreateTemp(tmpDir, ".compose-*.yml.tmp")
-	if err != nil {
-		return fmt.Errorf("creating temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-
-	// Clean up temp file on any error path.
-	defer func() {
-		if tmpPath != "" {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("writing compose file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("syncing compose file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("closing compose file: %w", err)
-	}
-
-	// Set permissions before rename so the target is never world-readable.
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		return fmt.Errorf("setting compose file permissions: %w", err)
-	}
-
-	if err := os.Rename(tmpPath, targetPath); err != nil {
-		return fmt.Errorf("replacing compose file: %w", err)
-	}
-	tmpPath = "" // prevent deferred removal of the now-renamed file
-
-	// Best-effort directory fsync to ensure the rename is persisted.
-	// Ignored on platforms that don't support Sync on directories (Windows).
-	if dir, err := os.Open(filepath.Dir(targetPath)); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
-	return nil
+	return compose.WriteComposeAndNATS("compose.yml", composeYAML, state.BusBackend, safeDir)
 }
 
 // digestPinMap converts verification results to a map of image name -> digest
