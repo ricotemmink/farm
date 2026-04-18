@@ -10,6 +10,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from synthorg.budget.currency import DEFAULT_CURRENCY, CurrencyCode
 from synthorg.budget.risk_config import RiskBudgetConfig
 from synthorg.core.types import NotBlankStr  # noqa: TC001
 
@@ -201,12 +202,18 @@ class BudgetConfig(BaseModel):
             "Day of month when budget resets (1-28, avoids month-length issues)"
         ),
     )
-    currency: str = Field(
-        default="EUR",
-        min_length=3,
-        max_length=3,
-        pattern=r"^[A-Z]{3}$",
-        description="ISO 4217 currency code for display formatting",
+    currency: CurrencyCode = Field(
+        default=DEFAULT_CURRENCY,
+        description=(
+            "ISO 4217 currency code stamped onto every new cost record "
+            "and used for display formatting. SynthOrg does not convert "
+            "provider costs -- provider token prices are reported in the "
+            "provider-native currency (see ``DEFAULT_CURRENCY``) and "
+            "changing this setting relabels the code stamped onto "
+            "subsequent records without translating any numeric values. "
+            "Historical rows retain the code that was active when they "
+            "were written."
+        ),
     )
     risk_budget: RiskBudgetConfig = Field(
         default_factory=RiskBudgetConfig,

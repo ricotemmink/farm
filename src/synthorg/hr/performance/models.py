@@ -17,9 +17,14 @@ from pydantic import (
     model_validator,
 )
 
+from synthorg.budget.currency import CurrencyCode  # noqa: TC001
 from synthorg.core.enums import Complexity, TaskType  # noqa: TC001
 from synthorg.core.types import NotBlankStr
 from synthorg.hr.enums import TrendDirection  # noqa: TC001
+from synthorg.observability import get_logger
+from synthorg.observability.events.hr import HR_PERFORMANCE_CURRENCY_INVARIANT_VIOLATED
+
+logger = get_logger(__name__)
 
 
 class TaskMetricRecord(BaseModel):
@@ -34,7 +39,8 @@ class TaskMetricRecord(BaseModel):
         completed_at: When the task was completed.
         is_success: Whether the task completed successfully.
         duration_seconds: Wall-clock execution time.
-        cost: Cost of the task in the configured currency.
+        cost: Numeric cost of the task, denominated in ``currency``.
+        currency: ISO 4217 currency code for ``cost``.
         turns_used: Number of LLM turns used.
         tokens_used: Total tokens consumed.
         quality_score: Quality score (0.0-10.0), None if not scored.
@@ -62,7 +68,10 @@ class TaskMetricRecord(BaseModel):
     )
     cost: float = Field(
         ge=0.0,
-        description="Cost of the task in the configured currency",
+        description="Numeric cost of the task, denominated in ``currency``",
+    )
+    currency: CurrencyCode = Field(
+        description="ISO 4217 currency code for ``cost``",
     )
     turns_used: int = Field(ge=0, description="Number of LLM turns used")
     tokens_used: int = Field(ge=0, description="Total tokens consumed")
@@ -218,7 +227,8 @@ class LlmCalibrationRecord(BaseModel):
         drift: Absolute difference between LLM and behavioral scores (computed).
         rationale: LLM's explanation for the score.
         model_used: Which LLM model was used for evaluation.
-        cost: Cost of the LLM call in the configured currency.
+        cost: Numeric cost of the LLM call, denominated in ``currency``.
+        currency: ISO 4217 currency code for ``cost``.
     """
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
@@ -260,7 +270,10 @@ class LlmCalibrationRecord(BaseModel):
     )
     cost: float = Field(
         ge=0.0,
-        description="Cost of the LLM call in the configured currency",
+        description="Numeric cost of the LLM call, denominated in ``currency``",
+    )
+    currency: CurrencyCode = Field(
+        description="ISO 4217 currency code for ``cost``",
     )
 
 
@@ -356,6 +369,12 @@ class WindowMetrics(BaseModel):
         tasks_failed: Number of failed tasks.
         avg_quality_score: Average quality score, None if insufficient data.
         avg_cost_per_task: Average cost per task, None if insufficient data.
+        currency: ISO 4217 currency code for ``avg_cost_per_task``.
+            Required whenever ``avg_cost_per_task`` is set; the reverse
+            is not enforced -- a snapshot may carry a configured currency
+            ahead of any cost signal (e.g. a freshly provisioned agent
+            whose window has produced tasks but no LLM spend).  See
+            ``_validate_currency_presence`` for the validator contract.
         avg_completion_time_seconds: Average time, None if insufficient data.
         avg_tokens_per_task: Average tokens, None if insufficient data.
         success_rate: Task success rate (0.0-1.0), None if no tasks.
@@ -377,7 +396,14 @@ class WindowMetrics(BaseModel):
     avg_cost_per_task: float | None = Field(
         default=None,
         ge=0.0,
-        description="Average cost per task in the configured currency",
+        description="Average cost per task, denominated in ``currency``",
+    )
+    currency: CurrencyCode | None = Field(
+        default=None,
+        description=(
+            "ISO 4217 currency code for ``avg_cost_per_task``; ``None`` "
+            "when ``avg_cost_per_task`` is ``None``"
+        ),
     )
     avg_completion_time_seconds: float | None = Field(
         default=None,
@@ -410,6 +436,35 @@ class WindowMetrics(BaseModel):
                 f"tasks_completed ({self.tasks_completed}) + tasks_failed "
                 f"({self.tasks_failed}) must equal data_point_count "
                 f"({self.data_point_count})"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_currency_presence(self) -> Self:
+        """Require ``currency`` whenever ``avg_cost_per_task`` is set.
+
+        The reverse direction is intentionally **not** enforced: a
+        ``WindowMetrics`` snapshot may legitimately carry a configured
+        currency tag ahead of any cost signal (for example, a freshly
+        provisioned agent whose window has produced tasks but no LLM
+        spend).  Forcing ``currency`` to ``None`` in that case would
+        destroy the aggregation-time context downstream consumers rely
+        on.  The load-bearing invariant is "cost implies currency"; the
+        opposite is a type assertion that existing callers do not
+        honour and whose stricter form would cascade through dozens of
+        test factories for no observable robustness gain.
+        """
+        if self.avg_cost_per_task is not None and self.currency is None:
+            msg = (
+                "currency is required when avg_cost_per_task is set "
+                f"(avg_cost_per_task={self.avg_cost_per_task})"
+            )
+            logger.warning(
+                HR_PERFORMANCE_CURRENCY_INVARIANT_VIOLATED,
+                avg_cost_per_task=self.avg_cost_per_task,
+                currency=self.currency,
+                window_size=self.window_size,
             )
             raise ValueError(msg)
         return self

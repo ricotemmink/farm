@@ -31,6 +31,7 @@ def _make_state(  # noqa: PLR0913
     status: ExecutionStatus = ExecutionStatus.EXECUTING,
     turn_count: int = 3,
     accumulated_cost: float = 0.05,
+    currency: str = "USD",
     last_activity_at: datetime = _T0,
     started_at: datetime | None = _T0,
 ) -> AgentRuntimeState:
@@ -38,6 +39,7 @@ def _make_state(  # noqa: PLR0913
         return AgentRuntimeState(
             agent_id=agent_id,
             status=ExecutionStatus.IDLE,
+            currency=currency,
             last_activity_at=last_activity_at,
         )
     return AgentRuntimeState(
@@ -47,6 +49,7 @@ def _make_state(  # noqa: PLR0913
         status=status,
         turn_count=turn_count,
         accumulated_cost=accumulated_cost,
+        currency=currency,
         last_activity_at=last_activity_at,
         started_at=started_at,
     )
@@ -74,6 +77,7 @@ class TestSQLiteAgentStateRepository:
         assert result.status == state.status
         assert result.turn_count == state.turn_count
         assert result.accumulated_cost == state.accumulated_cost
+        assert result.currency == state.currency
         assert result.last_activity_at == state.last_activity_at
         assert result.started_at == state.started_at
 
@@ -93,6 +97,7 @@ class TestSQLiteAgentStateRepository:
         assert result.started_at is None
         assert result.turn_count == 0
         assert result.accumulated_cost == 0.0
+        assert result.currency == "USD"
 
     async def test_upsert_overwrites(self, migrated_db: aiosqlite.Connection) -> None:
         repo = SQLiteAgentStateRepository(migrated_db)

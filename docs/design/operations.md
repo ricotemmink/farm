@@ -210,8 +210,13 @@ graph TD
 !!! abstract "Note"
 
     Percentages are illustrative defaults. All allocations are configurable per company.
-    Dollar signs in the diagram are illustrative -- the actual currency is determined by
-    the `budget.currency` setting (ISO 4217 code, defaults to EUR).
+    Dollar signs in the diagram match the default: `budget.currency` is an ISO 4217 code
+    that defaults to `USD` (the provider-native token-pricing unit for major LLM
+    providers SynthOrg integrates with). SynthOrg stamps `budget.currency` onto every
+    row at record-creation time; historical rows retain the code that was active when
+    they were written, so changing the setting only affects newly created rows.
+    Numeric cost values are never converted -- updating the setting relabels the display
+    symbol for future records, not the existing ones.
 
 ### Cost Tracking
 
@@ -225,15 +230,41 @@ Every API call is tracked with full context:
   "model": "example-medium-001",
   "input_tokens": 4500,
   "output_tokens": 1200,
-  "cost": 0.0315,  // value in the operator's configured currency (see budget.currency)
+  "cost": 0.0315,
+  "currency": "USD",
   "timestamp": "2026-02-27T10:30:00Z"
 }
 ```
 
+Every `CostRecord`, `TaskMetricRecord`, `LlmCalibrationRecord`, and `AgentRuntimeState` carries its own `currency`
+(ISO 4217 code validated against the allowlist in `synthorg.budget.currency`). The
+`budget.currency` setting determines the currency stamped on new rows; historical rows
+retain the code that was active when they were created, so changing `budget.currency`
+is safe and does not invalidate history.
+
+Every aggregation site -- `CostTracker`, `ReportGenerator`, `CostOptimizer`,
+per-agent / per-department / per-project rollups, and the HR `WindowMetrics` multi-window
+strategy -- enforces a same-currency invariant. Mixing currencies raises
+`MixedCurrencyAggregationError` (HTTP 409, `MIXED_CURRENCY_AGGREGATION` error code) at the
+aggregator rather than silently producing a meaningless total. `CostTracker.record()`
+additionally rejects at the ingestion boundary when the incoming record's currency differs
+from the currently-configured `budget.currency`, so new writes cannot introduce drift
+against the live setting. Historical rows written before a `budget.currency` change still
+carry their original code, so a rollup that spans the change window will legitimately see
+mixed currencies -- the aggregator raises rather than silently combining them. Operators
+who change `budget.currency` should either scope reports to a single currency window or
+run a proper migration that converts both the numeric amount and the currency code
+together under a documented FX policy; a raw
+`UPDATE cost_records SET currency = '<new-code>'` is a **re-label, not a conversion**,
+and must only be used when the operator knows the existing numeric values are already
+denominated in the target code (for example, correcting an initial mis-configuration
+before any production data accumulated). SynthOrg does not ship an FX engine; callers are
+responsible for the conversion policy when they need one.
+
 `CostRecord` stores `input_tokens` and `output_tokens`; `total_tokens` is a `@computed_field`
 property on `TokenUsage` (the model embedded in `CompletionResponse`). Spending aggregation
 models (`AgentSpending`, `DepartmentSpending`, `PeriodSpending`) extend a shared
-`_SpendingTotals` base class.
+`_SpendingTotals` base class that also carries the per-aggregation currency.
 
 The `GET /budget/records` endpoint returns paginated cost records alongside two server-computed
 summaries (aggregated from **all** matching records, not just the current page):
@@ -270,7 +301,7 @@ task-boundary auto-downgrade.
 ```yaml
 budget:
   total_monthly: 100.00
-  currency: "EUR"  # ISO 4217 currency code for display
+  currency: "USD"  # ISO 4217 currency code for display (no FX conversion)
   reset_day: 1
   alerts:
     warn_at: 75               # percent

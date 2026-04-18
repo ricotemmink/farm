@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from synthorg.budget.call_category import LLMCallCategory
 from synthorg.budget.cost_record import CostRecord
+from synthorg.budget.currency import DEFAULT_CURRENCY
 from synthorg.core.enums import MemoryCategory
 from synthorg.core.types import NotBlankStr
 from synthorg.memory.backends.mem0.config import (
@@ -174,6 +175,12 @@ class Mem0MemoryBackend:
                 model=model,
             )
         cost = input_tokens * cost_per_1k / 1000.0
+        # ``_cost_tracker`` is guaranteed non-``None`` here -- the early
+        # return at the top of the function exits when it is.  Only the
+        # budget-config attribute can still be ``None`` when the tracker
+        # was built without a config.
+        budget_cfg = self._cost_tracker.budget_config
+        currency = budget_cfg.currency if budget_cfg is not None else DEFAULT_CURRENCY
         record = CostRecord(
             agent_id=agent_id,
             task_id=task_id,
@@ -182,6 +189,7 @@ class Mem0MemoryBackend:
             input_tokens=input_tokens,
             output_tokens=0,
             cost=round(cost, 8),
+            currency=currency,
             timestamp=datetime.now(UTC),
             call_category=LLMCallCategory.EMBEDDING,
         )

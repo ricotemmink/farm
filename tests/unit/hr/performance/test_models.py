@@ -127,6 +127,7 @@ class TestTaskMetricRecord:
             is_success=True,
             duration_seconds=60.0,
             cost=0.5,
+            currency="EUR",
             turns_used=5,
             tokens_used=1000,
             complexity=Complexity.MEDIUM,
@@ -152,6 +153,7 @@ class TestTaskMetricRecord:
                 is_success=True,
                 duration_seconds=60.0,
                 cost=0.5,
+                currency="EUR",
                 turns_used=5,
                 tokens_used=1000,
                 complexity=Complexity.MEDIUM,
@@ -445,6 +447,7 @@ class TestWindowMetrics:
             avg_tokens_per_task=2000.0,
             success_rate=0.8,
             collaboration_score=6.0,
+            currency="EUR",
         )
         assert wm.window_size == "7d"
         assert wm.data_point_count == 10

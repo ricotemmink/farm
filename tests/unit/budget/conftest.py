@@ -13,6 +13,7 @@ from synthorg.budget.config import (
 )
 from synthorg.budget.cost_record import CostRecord
 from synthorg.budget.cost_tiers import CostTierDefinition, CostTiersConfig
+from synthorg.budget.currency import DEFAULT_CURRENCY, CurrencyCode
 from synthorg.budget.enums import BudgetAlertLevel
 from synthorg.budget.hierarchy import (
     BudgetHierarchy,
@@ -80,6 +81,10 @@ class BudgetConfigFactory(ModelFactory[BudgetConfig]):
     total_monthly = 100.0
     per_task_limit = 5.0
     per_agent_daily_limit = 10.0
+    # Pin a known-valid ISO 4217 code; polyfactory's random-string
+    # generator would otherwise emit codes outside the formatter
+    # allowlist (e.g. "JLF") and fail ``CurrencyCode`` validation.
+    currency = DEFAULT_CURRENCY
     alerts = BudgetAlertConfigFactory
     auto_downgrade = AutoDowngradeConfigFactory
     risk_budget = RiskBudgetConfigFactory
@@ -106,6 +111,7 @@ class CostRecordFactory(ModelFactory[CostRecord]):
     input_tokens = 1000
     output_tokens = 500
     cost = 0.05
+    currency = DEFAULT_CURRENCY
     # Ensure retry fields are consistent: no reason without a retry count.
     retry_reason = None
 
@@ -114,14 +120,17 @@ class PeriodSpendingFactory(ModelFactory[PeriodSpending]):
     __model__ = PeriodSpending
     start = datetime(2026, 2, 1, tzinfo=UTC)
     end = datetime(2026, 3, 1, tzinfo=UTC)
+    currency = DEFAULT_CURRENCY
 
 
 class AgentSpendingFactory(ModelFactory[AgentSpending]):
     __model__ = AgentSpending
+    currency = DEFAULT_CURRENCY
 
 
 class DepartmentSpendingFactory(ModelFactory[DepartmentSpending]):
     __model__ = DepartmentSpending
+    currency = DEFAULT_CURRENCY
 
 
 class SpendingSummaryFactory(ModelFactory[SpendingSummary]):
@@ -223,6 +232,7 @@ def sample_cost_record() -> CostRecord:
         input_tokens=4500,
         output_tokens=1200,
         cost=0.0315,
+        currency=DEFAULT_CURRENCY,
         timestamp=datetime(2026, 2, 27, 10, 30, 0, tzinfo=UTC),
     )
 
@@ -259,6 +269,7 @@ def sample_spending_summary() -> SpendingSummary:
             start=datetime(2026, 2, 1, tzinfo=UTC),
             end=datetime(2026, 3, 1, tzinfo=UTC),
             total_cost=75.50,
+            currency=DEFAULT_CURRENCY,
             total_input_tokens=500000,
             total_output_tokens=120000,
             record_count=150,
@@ -267,6 +278,7 @@ def sample_spending_summary() -> SpendingSummary:
             AgentSpending(
                 agent_id="sarah_chen",
                 total_cost=40.0,
+                currency=DEFAULT_CURRENCY,
                 total_input_tokens=300000,
                 total_output_tokens=80000,
                 record_count=80,
@@ -274,6 +286,7 @@ def sample_spending_summary() -> SpendingSummary:
             AgentSpending(
                 agent_id="alex_dev",
                 total_cost=35.50,
+                currency=DEFAULT_CURRENCY,
                 total_input_tokens=200000,
                 total_output_tokens=40000,
                 record_count=70,
@@ -283,6 +296,7 @@ def sample_spending_summary() -> SpendingSummary:
             DepartmentSpending(
                 department_name="Engineering",
                 total_cost=75.50,
+                currency=DEFAULT_CURRENCY,
                 total_input_tokens=500000,
                 total_output_tokens=120000,
                 record_count=150,
@@ -354,6 +368,7 @@ def make_cost_record(  # noqa: PLR0913
     input_tokens: int = 1000,
     output_tokens: int = 500,
     cost: float = 0.05,
+    currency: CurrencyCode = DEFAULT_CURRENCY,
     timestamp: datetime | None = None,
 ) -> CostRecord:
     """Build a CostRecord with sensible defaults."""
@@ -366,6 +381,7 @@ def make_cost_record(  # noqa: PLR0913
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost=cost,
+        currency=currency,
         timestamp=timestamp or datetime(2026, 2, 15, 12, 0, 0, tzinfo=UTC),
     )
 

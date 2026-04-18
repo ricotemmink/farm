@@ -1,5 +1,6 @@
 """Budget namespace setting definitions."""
 
+from synthorg.budget.currency import DEFAULT_CURRENCY
 from synthorg.settings.enums import SettingLevel, SettingNamespace, SettingType
 from synthorg.settings.models import SettingDefinition
 from synthorg.settings.registry import get_registry
@@ -138,9 +139,16 @@ _r.register(
         namespace=SettingNamespace.BUDGET,
         key="currency",
         type=SettingType.STRING,
-        default="EUR",
+        default=DEFAULT_CURRENCY,
         description=(
-            "ISO 4217 currency code for display formatting (e.g. USD, EUR, GBP)"
+            "ISO 4217 currency code stamped onto every new cost record "
+            "and used for display formatting. SynthOrg does not convert "
+            "LLM provider costs, so changing this value after data has "
+            "accumulated produces mixed-currency history: existing rows "
+            "retain their original stamp while subsequent rows carry the "
+            "new code. Aggregators across the change window raise "
+            "``MixedCurrencyAggregationError`` rather than silently "
+            "combining them."
         ),
         group="Display",
         validator_pattern=r"^[A-Z]{3}$",

@@ -15,6 +15,12 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, NamedTuple
 
+from synthorg.budget._tracker_helpers import (
+    _aggregate,
+    _build_agent_spendings,
+    _filter_records,
+    _validate_time_range,
+)
 from synthorg.budget.call_category import OrchestrationAlertLevel
 from synthorg.budget.category_analytics import (
     CategoryBreakdown,
@@ -23,6 +29,7 @@ from synthorg.budget.category_analytics import (
     compute_orchestration_ratio,
 )
 from synthorg.budget.enums import BudgetAlertLevel
+from synthorg.budget.errors import MixedCurrencyAggregationError
 from synthorg.budget.spending_summary import (
     AgentSpending,
     DepartmentSpending,
@@ -48,14 +55,13 @@ from synthorg.observability.events.budget import (
     BUDGET_RECORDS_PRUNED,
     BUDGET_RECORDS_QUERIED,
     BUDGET_SUMMARY_BUILT,
-    BUDGET_TIME_RANGE_INVALID,
     BUDGET_TOTAL_COST_QUERIED,
     BUDGET_TRACKER_CLEARED,
     BUDGET_TRACKER_CREATED,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
 
     from synthorg.budget.config import BudgetConfig
     from synthorg.budget.coordination_config import (
@@ -66,7 +72,7 @@ if TYPE_CHECKING:
         ProjectCostAggregateRepository,
     )
 
-from synthorg.core.types import NotBlankStr  # noqa: TC001
+from synthorg.core.types import NotBlankStr  # noqa: TC001 -- runtime use
 
 logger = get_logger(__name__)
 
@@ -79,15 +85,6 @@ class ProviderUsageSummary(NamedTuple):
 
     total_tokens: int
     total_cost: float
-
-
-class _AggregateResult(NamedTuple):
-    """Aggregated cost and token totals."""
-
-    cost: float
-    input_tokens: int
-    output_tokens: int
-    record_count: int
 
 
 class CostTracker:
@@ -130,6 +127,13 @@ class CostTracker:
         self._department_resolver = department_resolver
         self._auto_prune_threshold = auto_prune_threshold
         self._project_cost_repo = project_cost_repo
+        # When no budget_config is attached, a project-scoped aggregate is
+        # still durable via ``project_cost_repo``.  We remember the first
+        # currency seen per project_id so a subsequent record in a
+        # different currency cannot silently collapse into the same total.
+        # This is process-local state (rebuilt on restart) but matches the
+        # lifetime of the aggregate repo reference the caller holds.
+        self._project_currencies: dict[str, str] = {}
         logger.debug(
             BUDGET_TRACKER_CREATED,
             has_budget_config=budget_config is not None,
@@ -156,9 +160,66 @@ class CostTracker:
         Aggregate updates are best-effort: failures are logged at
         WARNING but do not affect the in-memory recording.
 
+        When a ``BudgetConfig`` is attached, the incoming record's
+        ``currency`` must match ``budget_config.currency``; mismatches
+        raise :class:`MixedCurrencyAggregationError` at the ingestion
+        boundary so downstream aggregators never see mixed-currency
+        data in the first place.
+
         Args:
             cost_record: Immutable cost record to store.
+
+        Raises:
+            MixedCurrencyAggregationError: If the record's currency
+                does not match the configured ``budget.currency``.
         """
+        if (
+            self._budget_config is not None
+            and cost_record.currency != self._budget_config.currency
+        ):
+            msg = (
+                f"Record currency {cost_record.currency!r} does not match "
+                f"configured budget currency "
+                f"{self._budget_config.currency!r}"
+            )
+            raise MixedCurrencyAggregationError(
+                msg,
+                currencies=frozenset(
+                    {
+                        cost_record.currency,
+                        self._budget_config.currency,
+                    }
+                ),
+                agent_id=cost_record.agent_id,
+                task_id=cost_record.task_id,
+                project_id=cost_record.project_id,
+            )
+        # Per-project guard: without a budget_config we cannot compare
+        # against a single configured currency, but we still must not let
+        # the durable project aggregate collapse mixed-currency rows into
+        # a single running total.  The first record for a project defines
+        # the currency; subsequent records in a different currency raise.
+        if (
+            self._budget_config is None
+            and self._project_cost_repo is not None
+            and cost_record.project_id is not None
+        ):
+            pinned = self._project_currencies.get(cost_record.project_id)
+            if pinned is None:
+                self._project_currencies[cost_record.project_id] = cost_record.currency
+            elif pinned != cost_record.currency:
+                msg = (
+                    f"Record currency {cost_record.currency!r} does not match "
+                    f"project {cost_record.project_id!r} aggregate currency "
+                    f"{pinned!r}"
+                )
+                raise MixedCurrencyAggregationError(
+                    msg,
+                    currencies=frozenset({cost_record.currency, pinned}),
+                    agent_id=cost_record.agent_id,
+                    task_id=cost_record.task_id,
+                    project_id=cost_record.project_id,
+                )
         # Lock protects in-memory list only.  DB aggregate update is
         # best-effort and runs outside the lock to avoid blocking other
         # callers on I/O.
@@ -474,6 +535,7 @@ class CostTracker:
                 start=start,
                 end=end,
                 total_cost=totals.cost,
+                currency=totals.currency,
                 total_input_tokens=totals.input_tokens,
                 total_output_tokens=totals.output_tokens,
                 record_count=totals.record_count,
@@ -679,26 +741,46 @@ class CostTracker:
         self,
         agent_spendings: list[AgentSpending],
     ) -> list[DepartmentSpending]:
-        """Aggregate per-department spending from agent spendings."""
+        """Aggregate per-department spending from agent spendings.
+
+        Raises:
+            MixedCurrencyAggregationError: If two agents assigned to
+                the same department have different currencies on their
+                ``AgentSpending`` rollups.
+        """
         dept_map: dict[str, list[AgentSpending]] = defaultdict(list)
         for agent_spend in agent_spendings:
             dept = self._resolve_department(agent_spend.agent_id)
             if dept is not None:
                 dept_map[dept].append(agent_spend)
 
-        return [
-            DepartmentSpending(
-                department_name=dname,
-                total_cost=round(
-                    math.fsum(s.total_cost for s in spends),
-                    BUDGET_ROUNDING_PRECISION,
-                ),
-                total_input_tokens=sum(s.total_input_tokens for s in spends),
-                total_output_tokens=sum(s.total_output_tokens for s in spends),
-                record_count=sum(s.record_count for s in spends),
+        results: list[DepartmentSpending] = []
+        for dname, spends in sorted(dept_map.items()):
+            currencies = {s.currency for s in spends if s.currency is not None}
+            if len(currencies) > 1:
+                msg = (
+                    f"Department {dname!r} has agent spendings in "
+                    f"different currencies: {sorted(currencies)}"
+                )
+                raise MixedCurrencyAggregationError(
+                    msg,
+                    currencies=frozenset(currencies),
+                )
+            dept_currency = next(iter(currencies)) if currencies else None
+            results.append(
+                DepartmentSpending(
+                    department_name=dname,
+                    total_cost=round(
+                        math.fsum(s.total_cost for s in spends),
+                        BUDGET_ROUNDING_PRECISION,
+                    ),
+                    currency=dept_currency,
+                    total_input_tokens=sum(s.total_input_tokens for s in spends),
+                    total_output_tokens=sum(s.total_output_tokens for s in spends),
+                    record_count=sum(s.record_count for s in spends),
+                )
             )
-            for dname, spends in sorted(dept_map.items())
-        ]
+        return results
 
     def _build_budget_context(
         self,
@@ -750,85 +832,3 @@ class CostTracker:
                 error_type=type(exc).__qualname__,
             )
             return None
-
-
-# ── Module-level pure helpers ────────────────────────────────────
-
-
-def _validate_time_range(
-    start: datetime | None,
-    end: datetime | None,
-) -> None:
-    """Raise ``ValueError`` if *start* >= *end* when both are given."""
-    if start is not None and end is not None and start >= end:
-        logger.warning(
-            BUDGET_TIME_RANGE_INVALID,
-            start=start.isoformat(),
-            end=end.isoformat(),
-        )
-        msg = f"start ({start.isoformat()}) must be before end ({end.isoformat()})"
-        raise ValueError(msg)
-
-
-def _filter_records(  # noqa: PLR0913
-    records: Sequence[CostRecord],
-    *,
-    agent_id: str | None = None,
-    task_id: str | None = None,
-    project_id: str | None = None,
-    provider: NotBlankStr | None = None,
-    start: datetime | None = None,
-    end: datetime | None = None,
-) -> tuple[CostRecord, ...]:
-    """Filter records by agent, task, project, provider, and/or time range.
-
-    Time semantics: ``start <= timestamp < end``.
-    """
-    return tuple(
-        r
-        for r in records
-        if (agent_id is None or r.agent_id == agent_id)
-        and (task_id is None or r.task_id == task_id)
-        and (project_id is None or r.project_id == project_id)
-        and (provider is None or r.provider == provider)
-        and (start is None or r.timestamp >= start)
-        and (end is None or r.timestamp < end)
-    )
-
-
-def _build_agent_spendings(
-    filtered: Sequence[CostRecord],
-) -> list[AgentSpending]:
-    """Group filtered records by agent and aggregate each group."""
-    by_agent: dict[str, list[CostRecord]] = defaultdict(list)
-    for rec in filtered:
-        by_agent[rec.agent_id].append(rec)
-
-    result: list[AgentSpending] = []
-    for aid in sorted(by_agent):
-        agg = _aggregate(by_agent[aid])
-        result.append(
-            AgentSpending(
-                agent_id=aid,
-                total_cost=agg.cost,
-                total_input_tokens=agg.input_tokens,
-                total_output_tokens=agg.output_tokens,
-                record_count=agg.record_count,
-            )
-        )
-    return result
-
-
-def _aggregate(
-    records: Sequence[CostRecord],
-) -> _AggregateResult:
-    """Aggregate records into cost, token totals, and count."""
-    costs: list[float] = []
-    input_tokens = 0
-    output_tokens = 0
-    for r in records:
-        costs.append(r.cost)
-        input_tokens += r.input_tokens
-        output_tokens += r.output_tokens
-    cost = round(math.fsum(costs), BUDGET_ROUNDING_PRECISION)
-    return _AggregateResult(cost, input_tokens, output_tokens, len(costs))

@@ -62,6 +62,7 @@ def _make_task_metric(  # noqa: PLR0913
         is_success=is_success,
         duration_seconds=duration_seconds,
         cost=cost,
+        currency="USD",
         turns_used=5,
         tokens_used=1000,
         complexity=Complexity.MEDIUM,
@@ -87,6 +88,7 @@ def _make_cost_record(  # noqa: PLR0913
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cost=cost,
+        currency="USD",
         timestamp=timestamp,
     )
 
@@ -213,7 +215,7 @@ class TestMergeActivityTimeline:
         assert "failed" in timeline[0].description
         assert timeline[1].related_ids["task_id"] == "task-a"
         assert "succeeded" in timeline[1].description
-        assert "\u20ac" in timeline[1].description
+        assert "$" in timeline[1].description
 
     def test_currency_passed_to_task_metric_descriptions(self) -> None:
         task = _make_task_metric(task_id="task-usd", cost=1.5)
@@ -373,7 +375,7 @@ class TestCostIncurredEvents:
         assert evt.timestamp == _NOW
         assert "test-medium-001" in evt.description
         assert "500+100 tokens" in evt.description
-        assert "\u20ac0.0025" in evt.description
+        assert "$0.0025" in evt.description
         assert evt.related_ids["agent_id"] == "agent-001"
         assert evt.related_ids["task_id"] == "task-001"
 
@@ -786,6 +788,7 @@ class TestRedactCostEvents:
             input_tokens=500,
             output_tokens=100,
             cost=0.005,
+            currency="USD",
             timestamp=_NOW,
         )
         event = _cost_record_to_activity(record, currency="EUR")

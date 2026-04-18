@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from synthorg.budget.cost_record import CostRecord
+from synthorg.budget.errors import MixedCurrencyAggregationError
 from synthorg.communication.message import Message
 from synthorg.core.enums import TaskStatus  # noqa: TC001
 from synthorg.core.task import Task
@@ -282,11 +283,12 @@ class PostgresCostRecordRepository:
                     """
                     INSERT INTO cost_records (
                         agent_id, task_id, provider, model, input_tokens,
-                        output_tokens, cost, timestamp, call_category
+                        output_tokens, cost, currency, timestamp,
+                        call_category
                     ) VALUES (
                         %(agent_id)s, %(task_id)s, %(provider)s, %(model)s,
                         %(input_tokens)s, %(output_tokens)s, %(cost)s,
-                        %(timestamp)s, %(call_category)s
+                        %(currency)s, %(timestamp)s, %(call_category)s
                     )
                     """,
                     {
@@ -297,6 +299,7 @@ class PostgresCostRecordRepository:
                         "input_tokens": record.input_tokens,
                         "output_tokens": record.output_tokens,
                         "cost": record.cost,
+                        "currency": record.currency,
                         "timestamp": record.timestamp,
                         "call_category": record.call_category,
                     },
@@ -335,7 +338,7 @@ class PostgresCostRecordRepository:
 
         sql = (
             "SELECT agent_id, task_id, provider, model, input_tokens, "
-            "output_tokens, cost, timestamp, call_category "
+            "output_tokens, cost, currency, timestamp, call_category "
             "FROM cost_records"
         )
         if clauses:
@@ -379,8 +382,15 @@ class PostgresCostRecordRepository:
         agent_id: str | None = None,
         task_id: str | None = None,
     ) -> float:
-        """Sum total cost, optionally filtered by agent and/or task."""
-        sql = "SELECT COALESCE(SUM(cost), 0.0) FROM cost_records"
+        """Sum total cost, optionally filtered by agent and/or task.
+
+        Raises :class:`MixedCurrencyAggregationError` when the matched rows
+        span multiple currencies.  The distinct-currency probe and the
+        ``SUM`` run in a **single** aggregating query
+        (``COUNT(DISTINCT)`` + ``STRING_AGG(DISTINCT)`` + ``SUM``) so the
+        two observations share one snapshot and a concurrent commit
+        cannot change the result between them.
+        """
         conditions: list[str] = []
         params: list[str] = []
         if agent_id is not None:
@@ -389,12 +399,21 @@ class PostgresCostRecordRepository:
         if task_id is not None:
             conditions.append("task_id = %s")
             params.append(task_id)
-        if conditions:
-            sql += " WHERE " + " AND ".join(conditions)
+        where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        # where_clause is built from fixed column names only; user values
+        # go through bound %s parameters.
+        agg_select = (
+            "SELECT "
+            "COUNT(DISTINCT currency) AS distinct_count, "
+            "STRING_AGG(DISTINCT currency, ',') AS currencies, "
+            "COALESCE(SUM(cost), 0.0) AS total_cost "
+            "FROM cost_records"
+        )
+        agg_sql = f"{agg_select}{where_clause}"
 
         try:
             async with self._pool.connection() as conn, conn.cursor() as cur:
-                await cur.execute(sql, params)
+                await cur.execute(agg_sql, params)
                 row = await cur.fetchone()
         except psycopg.Error as exc:
             msg = "Failed to aggregate cost records"
@@ -412,7 +431,25 @@ class PostgresCostRecordRepository:
                 error=msg,
             )
             raise QueryError(msg)
-        total = float(row[0])
+        distinct_count = int(row[0] or 0)
+        currencies_csv = row[1]
+        total = float(row[2])
+        if distinct_count > 1:
+            distinct = frozenset(c for c in (currencies_csv or "").split(",") if c)
+            logger.error(
+                PERSISTENCE_COST_RECORD_AGGREGATE_FAILED,
+                agent_id=agent_id,
+                task_id=task_id,
+                currencies=sorted(distinct),
+                error="mixed-currency aggregation rejected",
+            )
+            mixed_msg = "Cannot aggregate costs across mixed currencies"
+            raise MixedCurrencyAggregationError(
+                mixed_msg,
+                currencies=distinct,
+                agent_id=agent_id,
+                task_id=task_id,
+            )
         logger.debug(
             PERSISTENCE_COST_RECORD_AGGREGATED,
             agent_id=agent_id,

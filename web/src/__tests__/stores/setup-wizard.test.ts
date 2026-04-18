@@ -1,5 +1,20 @@
 import { useSetupWizardStore } from '@/stores/setup-wizard'
 import type { SeniorityLevel } from '@/api/types'
+import { CURRENCY_OPTIONS, DEFAULT_CURRENCY } from '@/utils/currencies'
+
+/** Any currency that is not the project default -- used by tests that need to
+ *  prove a non-default value is reset back to {@link DEFAULT_CURRENCY}. Picked
+ *  from the canonical list rather than hardcoded, so the test fails loudly if
+ *  the currency list ever shrinks to a single entry instead of silently
+ *  masking that precondition. */
+const _NON_DEFAULT = CURRENCY_OPTIONS.find((c) => c.value !== DEFAULT_CURRENCY)
+if (!_NON_DEFAULT) {
+  throw new Error(
+    'CURRENCY_OPTIONS must contain at least one non-default currency ' +
+      'for this test; update @/utils/currencies.',
+  )
+}
+const NON_DEFAULT_CURRENCY = _NON_DEFAULT.value
 
 vi.mock('@/api/endpoints/setup', () => ({
   getSetupStatus: vi.fn(),
@@ -53,8 +68,8 @@ describe('setup wizard store', () => {
       }
     })
 
-    it('has EUR as default currency', () => {
-      expect(useSetupWizardStore.getState().currency).toBe('EUR')
+    it('has DEFAULT_CURRENCY as default', () => {
+      expect(useSetupWizardStore.getState().currency).toBe(DEFAULT_CURRENCY)
     })
 
     it('has no template selected', () => {
@@ -339,14 +354,14 @@ describe('setup wizard store', () => {
       useSetupWizardStore.setState({
         selectedTemplate: 'startup',
         companyName: 'Acme',
-        currency: 'USD',
+        currency: NON_DEFAULT_CURRENCY,
       })
       useSetupWizardStore.getState().reset()
 
       const state = useSetupWizardStore.getState()
       expect(state.selectedTemplate).toBeNull()
       expect(state.companyName).toBe('')
-      expect(state.currency).toBe('EUR')
+      expect(state.currency).toBe(DEFAULT_CURRENCY)
     })
   })
 

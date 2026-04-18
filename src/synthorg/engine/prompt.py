@@ -25,7 +25,12 @@ from jinja2 import TemplateSyntaxError
 from jinja2.sandbox import SandboxedEnvironment
 from pydantic import BaseModel, ConfigDict, Field
 
-from synthorg.budget.currency import DEFAULT_CURRENCY, format_cost, get_currency_symbol
+from synthorg.budget.currency import (
+    DEFAULT_CURRENCY,
+    CurrencyCode,
+    format_cost,
+    get_currency_symbol,
+)
 from synthorg.communication.async_tasks.models import (  # noqa: TC001
     AsyncTaskStateChannel,
 )
@@ -140,7 +145,7 @@ def build_system_prompt(  # noqa: PLR0913, C901, PLR0912
     token_estimator: PromptTokenEstimator | None = None,
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget_indicator: str | None = None,
-    currency: str = DEFAULT_CURRENCY,
+    currency: CurrencyCode = DEFAULT_CURRENCY,
     model_tier: ModelTier | None = None,
     personality_trimming_enabled: bool = True,
     max_personality_tokens_override: int | None = None,
@@ -172,8 +177,8 @@ def build_system_prompt(  # noqa: PLR0913, C901, PLR0912
         effective_autonomy: Resolved autonomy for the current run.
         context_budget_indicator: Formatted context budget indicator
             string to inject into the prompt.
-        currency: ISO 4217 currency code for budget displays
-            (e.g. ``"USD"``, ``"EUR"``).
+        currency: ISO 4217 currency code for budget displays.  Validated
+            against the allowlist in ``synthorg.budget.currency``.
         model_tier: Model capability tier for prompt profile selection.
             ``None`` defaults to the full (large) profile.
         personality_trimming_enabled: When ``True`` (default), the
@@ -460,7 +465,7 @@ def _build_template_context(  # noqa: PLR0913
     org_policies: tuple[str, ...] = (),
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget: str | None = None,
-    currency: str = DEFAULT_CURRENCY,
+    currency: CurrencyCode = DEFAULT_CURRENCY,
     profile: PromptProfile | None = None,
     trimming_enabled: bool = True,
     estimator: PromptTokenEstimator | None = None,
@@ -593,7 +598,7 @@ def _trim_sections(  # noqa: PLR0913
     estimator: PromptTokenEstimator,
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget: str | None = None,
-    currency: str = DEFAULT_CURRENCY,
+    currency: CurrencyCode = DEFAULT_CURRENCY,
     profile: PromptProfile | None = None,
     trimming_enabled: bool = True,
     strategy_config: StrategyConfig | None = None,
@@ -716,7 +721,7 @@ def _render_with_trimming(  # noqa: PLR0913
     estimator: PromptTokenEstimator,
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget_indicator: str | None = None,
-    currency: str = DEFAULT_CURRENCY,
+    currency: CurrencyCode = DEFAULT_CURRENCY,
     profile: PromptProfile | None = None,
     trimming_enabled: bool = True,
     strategy_config: StrategyConfig | None = None,
@@ -834,7 +839,7 @@ def _render_and_estimate(  # noqa: PLR0913
     *,
     effective_autonomy: EffectiveAutonomy | None = None,
     context_budget: str | None = None,
-    currency: str = DEFAULT_CURRENCY,
+    currency: CurrencyCode = DEFAULT_CURRENCY,
     profile: PromptProfile | None = None,
     trimming_enabled: bool = True,
     strategy_config: StrategyConfig | None = None,
@@ -915,7 +920,7 @@ def build_error_prompt(
 def format_task_instruction(
     task: Task,
     *,
-    currency: str = DEFAULT_CURRENCY,
+    currency: CurrencyCode = DEFAULT_CURRENCY,
 ) -> str:
     """Format a task into a user message for the initial conversation.
 
