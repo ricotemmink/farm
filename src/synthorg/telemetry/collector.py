@@ -7,7 +7,7 @@ import platform
 import sys
 import tempfile
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +17,7 @@ from synthorg.observability import get_logger
 from synthorg.observability.events.telemetry import (
     TELEMETRY_DISABLED,
     TELEMETRY_ENABLED,
+    TELEMETRY_ENVIRONMENT_RESOLVED,
     TELEMETRY_EVENT_DEPLOYMENT_HEARTBEAT,
     TELEMETRY_EVENT_DEPLOYMENT_SESSION_SUMMARY,
     TELEMETRY_EVENT_DEPLOYMENT_SHUTDOWN,
@@ -25,10 +26,112 @@ from synthorg.observability.events.telemetry import (
     TELEMETRY_REPORT_FAILED,
     TELEMETRY_SESSION_SUMMARY_SENT,
 )
+from synthorg.telemetry.config import DEFAULT_ENVIRONMENT, MAX_STRING_LENGTH
+from synthorg.telemetry.host_info import DockerHostInfo, fetch_docker_info
 from synthorg.telemetry.privacy import PrivacyScrubber, PrivacyViolationError
 from synthorg.telemetry.protocol import TelemetryEvent, TelemetryReporter
 from synthorg.telemetry.reporters import create_reporter
 from synthorg.telemetry.reporters.noop import NoopReporter
+
+_ENV_OVERRIDE_VAR = "SYNTHORG_TELEMETRY_ENV"
+"""Runtime override for :attr:`TelemetryConfig.environment`.
+
+A non-empty value in this variable beats everything else so
+operators can retag any deployment without rewriting config
+files or rebuilding the image.
+"""
+
+_ENV_BAKED_VAR = "SYNTHORG_TELEMETRY_ENV_BAKED"
+"""Image-baked fallback for :attr:`TelemetryConfig.environment`.
+
+Set by ``docker/backend/Dockerfile``'s ``DEPLOYMENT_ENV`` build-arg.
+Release-tag CI builds bake ``prod``; ``-dev.N`` pre-release tag
+builds bake ``pre-release``; everything else (main pushes, PR
+builds, local ``docker build``) bakes the Dockerfile default
+``dev``. Operators that want to override per-deployment use
+:data:`_ENV_OVERRIDE_VAR` -- the baked value is only a default.
+"""
+
+_CI_ENV_MARKERS: tuple[str, ...] = (
+    "CI",
+    "GITLAB_CI",
+    "BUILDKITE",
+    "JENKINS_URL",
+)
+"""Well-known CI markers consulted when no operator override is set.
+
+Each entry is one that runners set automatically without operator
+action. GitHub Actions sets ``CI=true`` (covered by the first
+entry). RunPod's ``RUNPOD_*`` family is handled separately via
+:data:`_CI_ENV_PREFIXES`.
+"""
+
+_CI_ENV_PREFIXES: tuple[str, ...] = ("RUNPOD_",)
+"""Env var prefixes that indicate a CI / ephemeral runner context.
+
+Stored as a tuple because :meth:`str.startswith` accepts a tuple of
+candidate prefixes natively; any future prefix (e.g. ``MODAL_``,
+``REPLIT_``) goes here without touching :func:`_looks_like_ci`.
+"""
+
+
+def _looks_like_ci(environ: Mapping[str, str] | None = None) -> bool:
+    """Return ``True`` when the process runs under a known CI runner.
+
+    A non-empty value in any :data:`_CI_ENV_MARKERS` or the presence
+    of any env var whose name starts with an entry in
+    :data:`_CI_ENV_PREFIXES` is enough. Accepts an optional mapping
+    so tests can exercise the decision without mutating
+    :data:`os.environ`.
+    """
+    env = environ if environ is not None else os.environ
+    for marker in _CI_ENV_MARKERS:
+        if env.get(marker, "").strip():
+            return True
+    return any(name.startswith(_CI_ENV_PREFIXES) for name in env)
+
+
+def _resolve_environment(
+    config_environment: str,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Pick the effective deployment environment tag.
+
+    Priority order (first match wins):
+
+    1. :data:`_ENV_OVERRIDE_VAR` -- explicit operator override.
+    2. CI auto-detection via :func:`_looks_like_ci` -> ``"ci"``.
+    3. :data:`_ENV_BAKED_VAR` -- Dockerfile-baked default for this
+       image (``prod`` / ``pre-release`` / ``dev``).
+    4. The parsed :attr:`TelemetryConfig.environment` -- which
+       itself falls back to :data:`DEFAULT_ENVIRONMENT` when not
+       set.
+
+    Strings are trimmed and truncated at
+    :data:`MAX_STRING_LENGTH` chars to match the
+    :class:`PrivacyScrubber` cap; whitespace-only values at any
+    level are ignored so they cannot mask a lower-priority signal.
+    Falls back to :data:`DEFAULT_ENVIRONMENT` when the parsed
+    config value is blank after stripping.
+    """
+    env = environ if environ is not None else os.environ
+
+    override = env.get(_ENV_OVERRIDE_VAR, "").strip()
+    if override:
+        return override[:MAX_STRING_LENGTH]
+
+    if _looks_like_ci(env):
+        return "ci"
+
+    baked = env.get(_ENV_BAKED_VAR, "").strip()
+    if baked:
+        return baked[:MAX_STRING_LENGTH]
+
+    stripped_config = config_environment.strip()
+    if stripped_config:
+        return stripped_config[:MAX_STRING_LENGTH]
+    return DEFAULT_ENVIRONMENT
+
 
 if TYPE_CHECKING:
     from synthorg.telemetry.config import TelemetryConfig
@@ -105,6 +208,29 @@ class TelemetryCollector:
         heartbeat_snapshot_provider: HeartbeatSnapshotProvider | None = None,
         session_summary_snapshot_provider: SessionSummarySnapshotProvider | None = None,
     ) -> None:
+        """Wire the collector to its reporter and resolve runtime env.
+
+        Applies the ``SYNTHORG_TELEMETRY`` opt-in override first, then
+        runs the parsed ``config.environment`` through the four-level
+        resolution chain in :func:`_resolve_environment`. Only after
+        consent is established does the constructor load or create the
+        anonymous ``deployment_id`` on disk -- a disabled collector
+        leaves no on-disk trace.
+
+        Args:
+            config: Parsed telemetry configuration from
+                :class:`TelemetryConfig`.
+            data_dir: Directory used to persist the deployment ID
+                when telemetry is enabled.
+            heartbeat_snapshot_provider: Optional callable returning
+                the current :class:`_HeartbeatParams` snapshot; used
+                by the heartbeat loop to attach fresh aggregate
+                metrics to each heartbeat event.
+            session_summary_snapshot_provider: Optional callable
+                returning the current :class:`_SessionSummaryParams`
+                snapshot; used by :meth:`shutdown` to emit the final
+                session summary.
+        """
         # Env var overrides config file (documented priority).
         env_val = os.environ.get("SYNTHORG_TELEMETRY", "").strip().lower()
         if env_val in ("true", "1", "yes"):
@@ -117,6 +243,19 @@ class TelemetryCollector:
                 detail="invalid_env_value",
                 error_code="SYNTHORG_TELEMETRY_INVALID",
             )
+
+        # Resolve the effective deployment-environment tag through
+        # the four-level chain (operator override -> CI detection ->
+        # Dockerfile-baked default -> parsed config). See
+        # :func:`_resolve_environment` for the full priority contract.
+        resolved_env = _resolve_environment(config.environment)
+        if resolved_env != config.environment:
+            logger.info(
+                TELEMETRY_ENVIRONMENT_RESOLVED,
+                configured_environment=config.environment,
+                resolved_environment=resolved_env,
+            )
+            config = config.model_copy(update={"environment": resolved_env})
 
         self._config = config
         self._data_dir = data_dir
@@ -321,6 +460,7 @@ class TelemetryCollector:
             synthorg_version=_get_version(),
             python_version=f"{vi.major}.{vi.minor}.{vi.micro}",
             os_platform=platform.system(),
+            environment=self._config.environment,
             timestamp=datetime.now(UTC),
             properties=properties,
         )
@@ -361,7 +501,44 @@ class TelemetryCollector:
         return True
 
     async def _send_startup_event(self) -> None:
-        """Send an initial deployment.startup event."""
+        """Send an initial ``deployment.startup`` event.
+
+        Also fetches the telemetry-safe Docker daemon ``/info``
+        snapshot so dashboards can split deployments by host OS /
+        kernel / Docker version / storage driver / NVIDIA-runtime
+        availability without joining on a separate system.
+
+        Short-circuits when :attr:`is_functional` is ``False`` --
+        the reporter is a :class:`NoopReporter`, so emitting the
+        event would be discarded anyway, and the Docker socket
+        probe (which crosses the ``asyncio.to_thread`` boundary
+        and potentially reaches for ``/var/run/docker.sock``) is
+        wasted work.
+
+        :func:`fetch_docker_info` is designed to never raise (every
+        failure collapses to a ``docker_info_available=False``
+        marker). The outer ``try`` below is a belt-and-suspenders
+        guard: a regression in the helper or an unexpected
+        exception type must not abort the startup event, since the
+        startup event is the primary deployment-identification
+        signal in Logfire and we'd rather ship it without docker
+        info than not ship it at all.
+        """
+        if not self.is_functional:
+            return
+
+        try:
+            docker_info: DockerHostInfo = await fetch_docker_info()
+        except Exception as exc:
+            logger.warning(
+                TELEMETRY_REPORT_FAILED,
+                detail="docker_info_fetch_unexpected_exception",
+                error_type=type(exc).__name__,
+            )
+            docker_info = {
+                "docker_info_available": False,
+                "docker_info_unavailable_reason": "daemon_unreachable",
+            }
         event = self._build_event(
             TELEMETRY_EVENT_DEPLOYMENT_STARTUP,
             agent_count=0,
@@ -369,6 +546,7 @@ class TelemetryCollector:
             template_name="",
             persistence_backend="sqlite",
             memory_backend="mem0",
+            **docker_info,
         )
         await self._send(event)
 

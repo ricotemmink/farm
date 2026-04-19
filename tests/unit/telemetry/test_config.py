@@ -3,7 +3,11 @@
 import pytest
 from pydantic import ValidationError
 
-from synthorg.telemetry.config import TelemetryBackend, TelemetryConfig
+from synthorg.telemetry.config import (
+    MAX_STRING_LENGTH,
+    TelemetryBackend,
+    TelemetryConfig,
+)
 
 
 @pytest.mark.unit
@@ -15,6 +19,7 @@ class TestTelemetryConfig:
         assert config.enabled is False
         assert config.backend == TelemetryBackend.LOGFIRE
         assert config.heartbeat_interval_hours == 6.0
+        assert config.environment == "dev"
 
     def test_enabled(self) -> None:
         config = TelemetryConfig(enabled=True)
@@ -44,6 +49,21 @@ class TestTelemetryConfig:
     def test_rejects_excessive_heartbeat(self) -> None:
         with pytest.raises(ValueError, match="less than or equal"):
             TelemetryConfig(heartbeat_interval_hours=200.0)
+
+    @pytest.mark.parametrize("tag", ["dev", "pre-release", "prod", "ci", "staging"])
+    def test_environment_accepts_common_tags(self, tag: str) -> None:
+        config = TelemetryConfig(environment=tag)
+        assert config.environment == tag
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    def test_environment_rejects_blank(self, blank: str) -> None:
+        with pytest.raises(ValidationError):
+            TelemetryConfig(environment=blank)
+
+    def test_environment_rejects_over_cap(self) -> None:
+        """Reject values longer than :data:`MAX_STRING_LENGTH`."""
+        with pytest.raises(ValidationError):
+            TelemetryConfig(environment="x" * (MAX_STRING_LENGTH + 1))
 
 
 @pytest.mark.unit

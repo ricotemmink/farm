@@ -18,13 +18,14 @@ from synthorg.observability.events.telemetry import (
     TELEMETRY_EVENT_DEPLOYMENT_STARTUP,
     TELEMETRY_PRIVACY_VIOLATION,
 )
+from synthorg.telemetry.config import MAX_STRING_LENGTH
 
 if TYPE_CHECKING:
     from synthorg.telemetry.protocol import TelemetryEvent
 
 logger = get_logger(__name__)
 
-_MAX_STRING_VALUE_LENGTH = 64
+_MAX_STRING_VALUE_LENGTH = MAX_STRING_LENGTH
 """Cap string property values to prevent content leaking as 'names'."""
 
 _FORBIDDEN_KEY_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -92,6 +93,22 @@ _ALLOWED_PROPERTIES: MappingProxyType[str, frozenset[str]] = MappingProxyType(
                 "template_name",
                 "persistence_backend",
                 "memory_backend",
+                # Docker daemon /info enrichment. Kept in sync with
+                # synthorg.telemetry.host_info._extract().
+                "docker_info_available",
+                "docker_info_unavailable_reason",
+                "docker_server_version",
+                "docker_operating_system",
+                "docker_os_type",
+                "docker_os_version",
+                "docker_architecture",
+                "docker_kernel_version",
+                "docker_storage_driver",
+                "docker_default_runtime",
+                "docker_isolation",
+                "docker_ncpu",
+                "docker_mem_total",
+                "docker_gpu_runtime_nvidia_available",
             }
         ),
         TELEMETRY_EVENT_DEPLOYMENT_SHUTDOWN: frozenset(

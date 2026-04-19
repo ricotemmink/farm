@@ -4,6 +4,7 @@ import math
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import ValidationError
 
 from synthorg.telemetry.protocol import TelemetryEvent, TelemetryReporter
 from synthorg.telemetry.reporters.noop import NoopReporter
@@ -81,6 +82,43 @@ class TestTelemetryEvent:
                 properties={"bad": math.inf},
             )
 
+    def test_environment_defaults_to_dev(self) -> None:
+        event = TelemetryEvent(
+            event_type="deployment.heartbeat",
+            deployment_id="abc-123",
+            synthorg_version="0.6.4",
+            python_version="3.14.0",
+            os_platform="Linux",
+            timestamp=datetime.now(UTC),
+        )
+        assert event.environment == "dev"
+
+    def test_environment_accepts_explicit_value(self) -> None:
+        event = TelemetryEvent(
+            event_type="deployment.heartbeat",
+            deployment_id="abc-123",
+            synthorg_version="0.6.4",
+            python_version="3.14.0",
+            os_platform="Linux",
+            environment="prod",
+            timestamp=datetime.now(UTC),
+        )
+        assert event.environment == "prod"
+
+    @pytest.mark.parametrize("environment", ["", "   ", "\t"])
+    def test_environment_rejects_blank(self, environment: str) -> None:
+        """``NotBlankStr`` rejects empty and whitespace-only values."""
+        with pytest.raises(ValidationError):
+            TelemetryEvent(
+                event_type="deployment.heartbeat",
+                deployment_id="abc-123",
+                synthorg_version="0.6.4",
+                python_version="3.14.0",
+                os_platform="Linux",
+                environment=environment,
+                timestamp=datetime.now(UTC),
+            )
+
 
 @pytest.mark.unit
 class TestTelemetryReporterProtocol:
@@ -89,7 +127,6 @@ class TestTelemetryReporterProtocol:
     def test_noop_is_reporter(self) -> None:
         assert isinstance(NoopReporter(), TelemetryReporter)
 
-    @pytest.mark.asyncio
     async def test_noop_report_is_silent(self) -> None:
         reporter = NoopReporter()
         event = TelemetryEvent(

@@ -119,6 +119,7 @@ jobs:
       contents: read
     outputs:
       app_version: ${{ steps.version.outputs.app_version }}
+      deployment_env: ${{ steps.deployment-env.outputs.deployment_env }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -140,6 +141,37 @@ jobs:
           ")
           echo "app_version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "App version: ${VERSION}"
+
+      # Resolve the deployment environment baked into backend images
+      # built by this run. Ties into the existing version-label logic:
+      # final release tags (e.g. v0.7.0) -> "prod"; every other tagged
+      # pre-release form (-dev.N, -rc.N, -alpha.N, -beta.N) -> "pre-release";
+      # everything else (main pushes, PR builds, workflow_dispatch manual
+      # runs, and any local `docker build` without --build-arg) -> "dev".
+      # The backend Dockerfile reads this as a build-arg and bakes it
+      # into SYNTHORG_TELEMETRY_ENV_BAKED, which
+      # synthorg.telemetry.collector._resolve_environment picks up as
+      # the fallback tag when no operator override or CI auto-detection
+      # applies.
+      - name: Resolve baked deployment environment
+        id: deployment-env
+        env:
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            case "${GITHUB_REF}" in
+              *-dev.*|*-rc.*|*-alpha.*|*-beta.*)
+                ENV_TAG="pre-release"
+                ;;
+              *)
+                ENV_TAG="prod"
+                ;;
+            esac
+          else
+            ENV_TAG="dev"
+          fi
+          echo "deployment_env=${ENV_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Deployment env (baked into backend image): ${ENV_TAG}"
 
   # =========================================================================
   # Compose file validation -- catches syntax errors early
@@ -375,7 +407,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             BASE_IMAGE=${{ needs.build-backend-base.outputs.digest != '' && format('ghcr.io/aureliolo/synthorg-backend-base@{0}', needs.build-backend-base.outputs.digest) || format('ghcr.io/aureliolo/synthorg-backend-base:{0}', needs.build-backend-base.outputs.tag) }}
-            LOGFIRE_PROJECT_TOKEN=${{ secrets.LOGFIRE_PROJECT_TOKEN }}
+            DEPLOYMENT_ENV=${{ needs.version.outputs.deployment_env }}
           cache-from: ${{ github.event_name != 'pull_request' && 'type=gha' || '' }}
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
           platforms: linux/amd64
@@ -449,7 +481,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             BASE_IMAGE=${{ needs.build-backend-base.outputs.digest != '' && format('ghcr.io/aureliolo/synthorg-backend-base@{0}', needs.build-backend-base.outputs.digest) || format('ghcr.io/aureliolo/synthorg-backend-base:{0}', needs.build-backend-base.outputs.tag) }}
-            LOGFIRE_PROJECT_TOKEN=${{ secrets.LOGFIRE_PROJECT_TOKEN }}
+            DEPLOYMENT_ENV=${{ needs.version.outputs.deployment_env }}
           cache-from: type=gha
           platforms: linux/amd64,linux/arm64
           sbom: true
