@@ -6,7 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useWorkflowEditorStore } from '@/stores/workflow-editor'
 import { useState } from 'react'
 import { formatRelativeTime } from '@/utils/format'
-import type { WorkflowDefinitionVersionSummary } from '@/api/types'
+import type { WorkflowDefinitionVersionSummary } from '@/api/types/workflows'
 
 export interface VersionCardProps {
   v: WorkflowDefinitionVersionSummary
@@ -45,6 +45,7 @@ export function VersionCard({ v, currentVersion, saving, onCompare, onRestore }:
           onClick={() => onCompare(v)}
           disabled={isCurrent}
           title="Compare with current"
+          aria-label={`Compare version ${v.version} with current`}
         >
           <GitCompare className="size-3.5" />
           <span className="ml-1">Compare</span>
@@ -55,6 +56,7 @@ export function VersionCard({ v, currentVersion, saving, onCompare, onRestore }:
           onClick={() => onRestore(v.version)}
           disabled={isCurrent || saving}
           title="Restore this version"
+          aria-label={`Restore version ${v.version}`}
         >
           <RotateCcw className="size-3.5" />
           <span className="ml-1">Restore</span>
