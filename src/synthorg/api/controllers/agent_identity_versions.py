@@ -8,14 +8,18 @@ from litestar.datastructures import State  # noqa: TC002
 from litestar.params import Parameter
 
 from synthorg.api.controllers._workflow_helpers import get_auth_user_id
+from synthorg.api.cursor import decode_cursor
 from synthorg.api.dto import (
     ApiResponse,
     PaginatedResponse,
-    PaginationMeta,
     RollbackAgentIdentityRequest,
 )
 from synthorg.api.guards import require_read_access, require_write_access
-from synthorg.api.pagination import PaginationLimit, PaginationOffset  # noqa: TC001
+from synthorg.api.pagination import (
+    CursorLimit,
+    CursorParam,
+    encode_repo_seek_meta,
+)
 from synthorg.api.path_params import PathId  # noqa: TC001
 from synthorg.core.agent import AgentIdentity
 from synthorg.engine.identity.diff import AgentIdentityDiff, compute_diff
@@ -104,10 +108,12 @@ class AgentIdentityVersionController(Controller):
         self,
         state: State,
         agent_id: PathId,
-        offset: PaginationOffset = 0,
-        limit: PaginationLimit = 20,
+        cursor: CursorParam = None,
+        limit: CursorLimit = 20,
     ) -> Response[PaginatedResponse[SnapshotT]]:
         """List version history for an agent identity."""
+        secret = state.app_state.cursor_secret
+        offset = 0 if cursor is None else decode_cursor(cursor, secret=secret)
         version_repo = state.app_state.persistence.identity_versions
         versions, total = await asyncio.gather(
             version_repo.list_versions(agent_id, limit=limit, offset=offset),
@@ -136,7 +142,24 @@ class AgentIdentityVersionController(Controller):
         # paginating by ``pagination.total`` don't see a count that
         # disagrees with the returned ``data`` slice.
         safe_total = max(total - dropped, len(safe_versions))
-        meta = PaginationMeta(total=safe_total, offset=offset, limit=limit)
+        # ``has_more`` must compare against the *repo* total, not
+        # ``safe_total``: when this page drops any forged rows, a
+        # ``safe_total``-gated check would flip ``has_more`` to
+        # False early and strand the client before reaching later
+        # legitimate rows.  ``display_total`` still reports the
+        # filtered count to the client so ``pagination.total`` stays
+        # consistent with the returned ``data`` slice.  The cursor
+        # advances by ``len(versions)`` (consumed repo rows) so a
+        # page where the filter drops rows does not replay them on
+        # the next request.
+        meta = encode_repo_seek_meta(
+            offset=offset,
+            page_len=len(versions),
+            total=total,
+            display_total=safe_total,
+            limit=limit,
+            secret=secret,
+        )
         return Response(
             content=PaginatedResponse[SnapshotT](
                 data=safe_versions,

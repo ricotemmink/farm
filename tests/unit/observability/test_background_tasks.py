@@ -1,13 +1,19 @@
 """Unit tests for BackgroundTaskRegistry."""
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from typing import Any
 
 import pytest
+import structlog.testing
 
-from synthorg.observability.background_tasks import BackgroundTaskRegistry
+from synthorg.observability import get_logger
+from synthorg.observability.background_tasks import (
+    BackgroundTaskRegistry,
+    log_task_exceptions,
+)
 from synthorg.observability.events.async_task import (
     BACKGROUND_TASKS_DRAIN_TIMEOUT,
 )
@@ -181,3 +187,102 @@ async def test_no_task_exception_warning_on_failed_task(
         "Task exception was never retrieved" in (r.getMessage() or "")
         for r in caplog.records
     )
+
+
+class TestLogTaskExceptions:
+    """``log_task_exceptions`` factory: callback for long-lived tasks."""
+
+    async def test_logs_uncancelled_exception(self) -> None:
+        logger = get_logger("test.log_task_exceptions")
+        with structlog.testing.capture_logs() as events:
+            task = asyncio.create_task(_raiser(ValueError("broken")))
+            task.add_done_callback(
+                log_task_exceptions(logger, "test.event", subsystem="loop"),
+            )
+            with contextlib.suppress(ValueError):
+                await task
+            await asyncio.sleep(0)
+        matched = [e for e in events if e.get("event") == "test.event"]
+        assert matched
+        assert matched[0]["log_level"] == "warning"
+        assert matched[0].get("subsystem") == "loop"
+        assert matched[0].get("error_type") == "ValueError"
+
+    async def test_ignores_cancelled_task(self) -> None:
+        logger = get_logger("test.log_task_exceptions")
+        started = asyncio.Event()
+
+        async def _runner() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        with structlog.testing.capture_logs() as events:
+            task = asyncio.create_task(_runner())
+            task.add_done_callback(log_task_exceptions(logger, "test.event"))
+            await started.wait()
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)
+        assert not any(e.get("event") == "test.event" for e in events)
+
+    async def test_success_logs_nothing(self) -> None:
+        logger = get_logger("test.log_task_exceptions")
+        with structlog.testing.capture_logs() as events:
+            task = asyncio.create_task(_noop())
+            task.add_done_callback(log_task_exceptions(logger, "test.event"))
+            await task
+            await asyncio.sleep(0)
+        assert not any(e.get("event") == "test.event" for e in events)
+
+    @pytest.mark.parametrize(
+        ("exc_factory", "expected_level", "expected_error_type"),
+        [
+            (lambda: ValueError("bad"), "warning", "ValueError"),
+            (lambda: RuntimeError("boom"), "warning", "RuntimeError"),
+            (lambda: MemoryError("oom"), "critical", "MemoryError"),
+            (lambda: RecursionError("deep"), "critical", "RecursionError"),
+        ],
+    )
+    async def test_severity_to_log_level_mapping(
+        self,
+        exc_factory: Callable[[], BaseException],
+        expected_level: str,
+        expected_error_type: str,
+    ) -> None:
+        """Exception class controls the emitted log level.
+
+        Resource-exhaustion errors (``MemoryError``/``RecursionError``)
+        escalate to CRITICAL + the event-loop exception handler; every
+        other uncancelled exception logs at WARNING.  The contract is
+        load-bearing for monitoring alerts, so pin it per-level.
+        """
+        logger = get_logger("test.log_task_exceptions")
+        exc = exc_factory()
+        with structlog.testing.capture_logs() as events:
+            task = asyncio.create_task(_raiser(exc))
+            task.add_done_callback(log_task_exceptions(logger, "test.event"))
+            with contextlib.suppress(type(exc)):
+                await task
+            await asyncio.sleep(0)
+        matched = [e for e in events if e.get("event") == "test.event"]
+        assert matched, f"expected a log for {expected_error_type}"
+        assert matched[0]["log_level"] == expected_level
+        assert matched[0].get("error_type") == expected_error_type
+
+    async def test_context_frozen_after_registration(self) -> None:
+        """Mutating ``context`` after registering the callback is a no-op."""
+        logger = get_logger("test.log_task_exceptions")
+        context: dict[str, Any] = {"channel": "alpha"}
+        with structlog.testing.capture_logs() as events:
+            task = asyncio.create_task(_raiser(ValueError("x")))
+            task.add_done_callback(
+                log_task_exceptions(logger, "test.event", **context),
+            )
+            context["channel"] = "mutated-after"
+            with contextlib.suppress(ValueError):
+                await task
+            await asyncio.sleep(0)
+        matched = [e for e in events if e.get("event") == "test.event"]
+        assert matched
+        assert matched[0].get("channel") == "alpha"  # not "mutated-after"

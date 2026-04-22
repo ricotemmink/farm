@@ -5,11 +5,13 @@ Holds typed references to core services, injected into
 ``request.app.state``.
 """
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from synthorg.api.auth.presence import UserPresence
 from synthorg.api.auth.service import AuthService  # noqa: TC001
 from synthorg.api.auth.ticket_store import WsTicketStore
+from synthorg.api.cursor import CursorSecret  # noqa: TC001
 from synthorg.api.errors import ServiceUnavailableError
 from synthorg.api.rate_limits.config import PerOpRateLimitConfig  # noqa: TC001
 from synthorg.api.rate_limits.inflight_config import (
@@ -150,6 +152,7 @@ class AppState(AppStateServicesMixin):
         "_coordination_metrics_store",
         "_coordinator",
         "_cost_tracker",
+        "_cursor_secret",
         "_delegation_record_store",
         "_distributed_task_queue",
         "_drift_detection_service",
@@ -188,6 +191,7 @@ class AppState(AppStateServicesMixin):
         "_scaling_service",
         "_session_store",
         "_settings_service",
+        "_shutdown_requested",
         "_task_engine",
         "_telemetry_collector",
         "_ticket_store",
@@ -309,6 +313,22 @@ class AppState(AppStateServicesMixin):
         self._bridge_config_applied: bool = False
         self._provider_management: ProviderManagementService | None = None
         self._org_mutation_service: OrgMutationService | None = None
+        # Shutdown flag observable by long-lived subsystems.
+        # ``install_shutdown_handlers`` sets it when SIGTERM/SIGINT
+        # arrive so reconcile loops can exit early instead of waiting
+        # for lifespan cancellation.  Constructed eagerly so that two
+        # concurrent first-reads (e.g. handler + reconcile task) cannot
+        # each allocate their own ``Event`` and leave one observer
+        # stranded on a stale reference.  Constructing an
+        # ``asyncio.Event`` outside a running loop is safe -- it only
+        # acquires a loop reference on ``.wait()`` / ``.set()``.
+        self._shutdown_requested: asyncio.Event = asyncio.Event()
+        # Opaque pagination cursor HMAC secret.  Set by ``create_app`` from
+        # ``api.pagination.cursor_secret`` (settings) or
+        # ``SYNTHORG_PAGINATION_CURSOR_SECRET`` (env); falls back to an
+        # ephemeral per-process key with a WARNING log so tokens become
+        # invalid across restarts in deployments that never configured one.
+        self._cursor_secret: CursorSecret | None = None
         # Per-operation rate-limit + concurrency configs live on
         # AppState so the settings subscriber can hot-swap them when
         # operators edit ``api.per_op_rate_limit_*`` or
@@ -405,6 +425,30 @@ class AppState(AppStateServicesMixin):
     def persistence(self) -> PersistenceBackend:
         """Return persistence backend or raise 503."""
         return self._require_service(self._persistence, "persistence")  # type: ignore[no-any-return]
+
+    @property
+    def shutdown_requested(self) -> asyncio.Event:
+        """Return the shutdown ``asyncio.Event``.
+
+        SIGTERM/SIGINT handlers set the event; long-lived subsystems
+        ``await`` or poll it to exit early.  Constructed eagerly in
+        ``__init__`` so every reader sees the same instance.
+        """
+        return self._shutdown_requested
+
+    @property
+    def cursor_secret(self) -> CursorSecret:
+        """Return the opaque-pagination cursor HMAC secret.
+
+        Wired once by ``create_app`` from configuration; never ``None``
+        after startup.  Tests that bypass ``create_app`` must call
+        :meth:`set_cursor_secret` explicitly.
+        """
+        return self._require_service(self._cursor_secret, "cursor_secret")
+
+    def set_cursor_secret(self, secret: CursorSecret) -> None:
+        """Attach the opaque-pagination cursor HMAC secret (once-only)."""
+        self._set_once("_cursor_secret", secret, "cursor_secret")
 
     @property
     def has_prometheus_collector(self) -> bool:

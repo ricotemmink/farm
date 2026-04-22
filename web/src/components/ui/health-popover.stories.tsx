@@ -34,7 +34,7 @@ export const AllSystemsOk: Story = {
   parameters: {
     msw: {
       handlers: [
-        http.get('/api/v1/health', () =>
+        http.get('/api/v1/readyz', () =>
           HttpResponse.json(successFor<typeof getHealth>(BASE_PAYLOAD)),
         ),
       ],
@@ -49,11 +49,11 @@ export const Degraded: Story = {
   parameters: {
     msw: {
       handlers: [
-        http.get('/api/v1/health', () =>
+        http.get('/api/v1/readyz', () =>
           HttpResponse.json(
             successFor<typeof getHealth>({
               ...BASE_PAYLOAD,
-              status: 'degraded',
+              status: 'unavailable',
               message_bus: false,
             }),
           ),
@@ -70,11 +70,11 @@ export const Down: Story = {
   parameters: {
     msw: {
       handlers: [
-        http.get('/api/v1/health', () =>
+        http.get('/api/v1/readyz', () =>
           HttpResponse.json(
             successFor<typeof getHealth>({
               ...BASE_PAYLOAD,
-              status: 'down',
+              status: 'unavailable',
               persistence: false,
               message_bus: false,
             }),
@@ -92,7 +92,7 @@ export const LoadError: Story = {
   parameters: {
     msw: {
       handlers: [
-        http.get('/api/v1/health', () =>
+        http.get('/api/v1/readyz', () =>
           HttpResponse.json({ error: 'temporary unavailability' }, { status: 503 }),
         ),
       ],
@@ -107,7 +107,7 @@ export const Loading: Story = {
   parameters: {
     msw: {
       handlers: [
-        http.get('/api/v1/health', async () => {
+        http.get('/api/v1/readyz', async () => {
           await new Promise((resolve) => { setTimeout(resolve, 10_000) })
           return HttpResponse.json(successFor<typeof getHealth>(BASE_PAYLOAD))
         }),

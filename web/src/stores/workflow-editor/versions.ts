@@ -16,6 +16,7 @@ export const createVersionsSlice: SliceCreator<VersionsSlice> = (set, get) => ({
   versions: [],
   versionsLoading: false,
   versionsHasMore: false,
+  versionsNextCursor: null,
   diffResult: null,
   diffLoading: false,
   _versionsRequestId: 0,
@@ -33,7 +34,15 @@ export const createVersionsSlice: SliceCreator<VersionsSlice> = (set, get) => ({
     const defn = get().definition
     if (!defn) return
     const reqId = get()._versionsRequestId + 1
-    set({ versionsLoading: true, _versionsRequestId: reqId })
+    // Clear stale cursor state so ``loadMoreVersions`` cannot resume
+    // from a cursor issued for a previous workflow definition if this
+    // fresh load fails or the user switches workflows mid-flight.
+    set({
+      versionsLoading: true,
+      _versionsRequestId: reqId,
+      versionsHasMore: false,
+      versionsNextCursor: null,
+    })
     try {
       const limit = 50
       const result = await listWorkflowVersions(defn.id, { limit })
@@ -41,29 +50,43 @@ export const createVersionsSlice: SliceCreator<VersionsSlice> = (set, get) => ({
       set({
         versions: result.data,
         versionsLoading: false,
-        versionsHasMore: result.data.length >= limit,
+        versionsHasMore: result.hasMore,
+        versionsNextCursor: result.nextCursor,
       })
     } catch (err) {
       if (get()._versionsRequestId !== reqId) return
       log.warn('Failed to load versions', sanitizeForLog(err))
-      set({ versionsLoading: false, error: getErrorMessage(err) })
+      set({
+        versionsLoading: false,
+        versionsHasMore: false,
+        versionsNextCursor: null,
+        error: getErrorMessage(err),
+      })
     }
   },
 
   loadMoreVersions: async () => {
-    const { definition: defn, versionsLoading, versionsHasMore } = get()
-    if (!defn || versionsLoading || !versionsHasMore) return
+    const {
+      definition: defn,
+      versionsLoading,
+      versionsHasMore,
+      versionsNextCursor,
+    } = get()
+    if (!defn || versionsLoading || !versionsHasMore || !versionsNextCursor) return
     const reqId = get()._versionsRequestId + 1
-    const offset = get().versions.length
     set({ versionsLoading: true, _versionsRequestId: reqId })
     try {
       const limit = 50
-      const result = await listWorkflowVersions(defn.id, { limit, offset })
+      const result = await listWorkflowVersions(defn.id, {
+        limit,
+        cursor: versionsNextCursor,
+      })
       if (get()._versionsRequestId !== reqId) return
       set((prev) => ({
         versions: [...prev.versions, ...result.data],
         versionsLoading: false,
-        versionsHasMore: result.data.length >= limit,
+        versionsHasMore: result.hasMore,
+        versionsNextCursor: result.nextCursor,
       }))
     } catch (err) {
       if (get()._versionsRequestId !== reqId) return

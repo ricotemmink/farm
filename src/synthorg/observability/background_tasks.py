@@ -126,7 +126,14 @@ class BackgroundTaskRegistry:
                     exc_info=(type(exc), exc, exc.__traceback__),
                     **context,
                 )
-                loop = asyncio.get_running_loop()
+                # Done-callbacks usually run while the loop is alive, but
+                # a registry shared across lifespan boundaries may fire a
+                # last callback after the loop has closed. A missing loop
+                # must not mask the fatal log we just emitted.
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    return
                 loop.call_exception_handler(
                     {
                         "message": "fatal exception in tracked background task",
@@ -189,3 +196,81 @@ class BackgroundTaskRegistry:
     def active_count(self) -> int:
         """Return the number of tasks still pending."""
         return len(self._tasks)
+
+
+def log_task_exceptions(
+    logger_: Any,
+    event: str,
+    **context: Any,
+) -> Callable[[asyncio.Task[Any]], None]:
+    """Build an :meth:`asyncio.Task.add_done_callback`-compatible callback.
+
+    This is a plain factory -- it returns a single callback and does
+    no task tracking.  Unlike :class:`BackgroundTaskRegistry` (which
+    owns a set of fire-and-forget tasks and drains them on shutdown),
+    this helper is for callers who manage the task's lifecycle
+    themselves and only need exception-to-log routing.  Typical
+    targets are long-lived *named* tasks whose lifecycle matches the
+    owning subsystem (task-engine processing loop, bus-bridge poll
+    loop, meeting scheduler tick), but the callback is safe for any
+    :class:`asyncio.Task`.  The returned callback:
+
+    * Ignores ``CancelledError`` (normal shutdown).
+    * Escalates ``MemoryError``/``RecursionError`` to CRITICAL + the
+      event-loop exception handler (re-raising from a done-callback
+      would be swallowed by asyncio).
+    * Logs everything else at WARNING with ``exc_info`` + the task's
+      name so operators can identify which long-lived worker died.
+
+    Args:
+        logger_: Structlog logger for the owning subsystem.
+        event: Event constant to log under (e.g.
+            ``TASK_ENGINE_LOOP_DIED``).  Caller-owned so per-subsystem
+            taxonomy stays consistent with existing sinks.
+        **context: Structured kwargs merged into the failure log
+            (e.g. ``channel=...`` for bus bridge channels).
+
+    Returns:
+        Callable usable as ``task.add_done_callback(...)``.
+    """
+    frozen_context = MappingProxyType(copy.deepcopy(context))
+
+    def _on_done(task: asyncio.Task[Any]) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        if isinstance(exc, MemoryError | RecursionError):
+            logger_.critical(
+                event,
+                task_name=task.get_name(),
+                error_type=type(exc).__name__,
+                exc_info=(type(exc), exc, exc.__traceback__),
+                **frozen_context,
+            )
+            # A done-callback can fire after the owning loop has
+            # closed (e.g. the task was cancelled during shutdown but
+            # its callback queued post-loop-stop). Missing the
+            # handler registration must not mask the fatal log above.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            loop.call_exception_handler(
+                {
+                    "message": "fatal exception in long-lived background task",
+                    "exception": exc,
+                    "task": task,
+                }
+            )
+            return
+        logger_.warning(
+            event,
+            task_name=task.get_name(),
+            error_type=type(exc).__name__,
+            exc_info=(type(exc), exc, exc.__traceback__),
+            **frozen_context,
+        )
+
+    return _on_done

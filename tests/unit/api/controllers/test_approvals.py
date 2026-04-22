@@ -122,16 +122,49 @@ class TestListApprovals:
     ) -> None:
         for i in range(5):
             await _seed_item(approval_store, approval_id=f"a{i}")
-        resp = test_client.get(
+        # Walk first page to obtain a cursor, then fetch the next.
+        resp1 = test_client.get(
             _BASE,
-            params={"offset": 2, "limit": 2},
+            params={"limit": 2},
             headers=_READ_HEADERS,
         )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert len(body["data"]) == 2
-        assert body["pagination"]["total"] == 5
-        assert body["pagination"]["offset"] == 2
+        assert resp1.status_code == 200
+        body1 = resp1.json()
+        assert len(body1["data"]) == 2
+        assert body1["pagination"]["has_more"] is True
+        cursor = body1["pagination"]["next_cursor"]
+        assert cursor is not None
+
+        resp2 = test_client.get(
+            _BASE,
+            params={"limit": 2, "cursor": cursor},
+            headers=_READ_HEADERS,
+        )
+        assert resp2.status_code == 200
+        body2 = resp2.json()
+        assert len(body2["data"]) == 2
+        assert body2["pagination"]["total"] == 5
+        assert body2["pagination"]["offset"] == 2
+        assert body2["pagination"]["has_more"] is True
+        cursor2 = body2["pagination"]["next_cursor"]
+        assert cursor2 is not None
+
+        # Walk to the terminal page (5 items at limit=2 -> page 3 is
+        # the last page with 1 item).  ``next_cursor`` and
+        # ``has_more`` must clear together per the
+        # ``_validate_cursor_consistency`` model validator on
+        # ``PaginationMeta``.
+        resp3 = test_client.get(
+            _BASE,
+            params={"limit": 2, "cursor": cursor2},
+            headers=_READ_HEADERS,
+        )
+        assert resp3.status_code == 200
+        body3 = resp3.json()
+        assert len(body3["data"]) == 1
+        assert body3["pagination"]["offset"] == 4
+        assert body3["pagination"]["has_more"] is False
+        assert body3["pagination"]["next_cursor"] is None
 
     def test_list_blocks_no_role(self, test_client: TestClient[Any]) -> None:
         resp = test_client.get(_BASE, headers={"Authorization": "Bearer invalid-token"})

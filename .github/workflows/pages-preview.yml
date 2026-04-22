@@ -139,9 +139,38 @@ jobs:
         # TODO: Restore --strict once zensical supports it
         # https://github.com/zensical/backlog/issues/72
         # SYNTHORG_VERSION intentionally omitted -- previews show "dev" banner
+        #
+        # Retry up to 3 times with a 15-second backoff.  The D2 plugin
+        # and zensical both occasionally race a transient GitHub raw
+        # content fetch (D2 icons) or a pypi index lookup on first
+        # build; the retry keeps PR previews from going red on
+        # network blips. Any deterministic failure still fails after
+        # the third attempt, preserving the signal.
         env:
           PYTHONPATH: .
-        run: uv run zensical build
+        run: |
+          set -euo pipefail
+          max_attempts=3
+          for attempt in $(seq 1 "$max_attempts"); do
+            if uv run zensical build; then
+              exit 0
+            fi
+            # Only log the retry + scrub state + sleep when another
+            # attempt will actually follow; on the final iteration the
+            # loop falls through to the error line below so the job
+            # does not waste time on cleanup it cannot use.
+            if [ "$attempt" -lt "$max_attempts" ]; then
+              echo "::warning::zensical build failed (attempt ${attempt}/${max_attempts}); retrying after 15s"
+              # Scrub partial build state so the retry does not inherit a
+              # half-written ``_site/`` or a stale D2 icon cache -- a
+              # genuinely deterministic failure would otherwise be masked
+              # by the first attempt's successful intermediate files.
+              rm -rf _site .d2-cache
+              sleep 15
+            fi
+          done
+          echo "::error::zensical build failed after ${max_attempts} attempts"
+          exit 1
 
       - name: Patch sitemap with static OpenAPI artifacts
         run: uv run python scripts/patch_sitemap.py

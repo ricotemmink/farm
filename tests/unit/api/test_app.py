@@ -72,7 +72,7 @@ class TestCreateApp:
         expected: str,
     ) -> None:
         # Use a non-docs endpoint -- /docs paths relax COOP for Scalar UI.
-        response = test_client.get("/api/v1/health")
+        response = test_client.get("/api/v1/healthz")
         assert response.headers.get(header) == expected
 
 
@@ -567,6 +567,41 @@ class TestTryStop:
 
         with pytest.raises(RecursionError):
             await _try_stop(recurse(), "event", "error msg")
+
+    async def test_try_stop_timeout_logs_and_returns_false(self) -> None:
+        """A service that exceeds its per-service budget logs TIMEOUT and
+        swallows the error so sibling services still run."""
+        import asyncio
+
+        import structlog.testing
+
+        from synthorg.api.lifecycle import _try_stop
+
+        async def hang() -> None:
+            # Wait indefinitely so the ``asyncio.wait_for`` deadline
+            # hits; ``asyncio.Event().wait()`` is cancellation-safe and
+            # carries no wall-clock dependency.
+            await asyncio.Event().wait()
+
+        with structlog.testing.capture_logs() as events:
+            result = await _try_stop(
+                hang(),
+                "event",
+                "error msg",
+                timeout=0.05,
+                service="unit-test-service",
+            )
+        assert result is False
+        # The timeout path emits the explicit ``API_APP_SHUTDOWN_TIMEOUT``
+        # event at ERROR with the service name so operators can
+        # distinguish hangs from crashes.
+        matched = [
+            e
+            for e in events
+            if e.get("service") == "unit-test-service" and e.get("log_level") == "error"
+        ]
+        assert matched, f"expected timeout log; got {events}"
+        assert matched[0].get("timeout_seconds") == 0.05
 
 
 @pytest.mark.unit

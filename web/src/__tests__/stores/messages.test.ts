@@ -1,7 +1,7 @@
 import { http, HttpResponse } from 'msw'
 import { useMessagesStore, _resetRequestSeqs } from '@/stores/messages'
 import { makeMessage, makeChannel } from '../helpers/factories'
-import { apiError, apiSuccess, paginatedFor } from '@/mocks/handlers'
+import { apiError, paginatedFor } from '@/mocks/handlers'
 import type { listMessages } from '@/api/endpoints/messages'
 import { server } from '@/test-setup'
 import type { Message } from '@/api/types/messages'
@@ -9,13 +9,51 @@ import type { WsEvent } from '@/api/types/websocket'
 
 function paginated(
   data: Message[],
-  meta: Partial<{ total: number; offset: number; limit: number }> = {},
+  meta: Partial<{
+    total: number | null
+    offset: number
+    limit: number
+    nextCursor: string | null
+    hasMore: boolean
+  }> = {},
 ) {
+  // ``total`` is ``number | null`` under cursor pagination so the
+  // repo-backed ``total === null`` path is exercisable from tests;
+  // ``'total' in meta`` means the caller supplied an explicit value
+  // (possibly ``null``), otherwise fall back to ``data.length``.
+  const total = 'total' in meta ? (meta.total as number | null) : data.length
+  const offset = meta.offset ?? 0
+  const limit = meta.limit ?? 50
+  // If the caller supplied a ``nextCursor`` without a ``hasMore``
+  // (or vice versa), default the missing field to the consistent
+  // counterpart so the helper cannot emit the impossible
+  // ``has_more=true, next_cursor=null`` or ``next_cursor!=null,
+  // has_more=false`` envelopes the backend's ``PaginationMeta``
+  // consistency validator rejects.  The server-side tests would
+  // otherwise pass even if the store silently dropped continuation
+  // state.
+  const nextCursor =
+    meta.nextCursor !== undefined
+      ? meta.nextCursor
+      : meta.hasMore === true
+        ? 'auto-continuation-cursor'
+        : null
+  const hasMore =
+    meta.hasMore !== undefined ? meta.hasMore : nextCursor !== null
   return paginatedFor<typeof listMessages>({
     data,
-    total: meta.total ?? data.length,
-    offset: meta.offset ?? 0,
-    limit: meta.limit ?? 50,
+    total,
+    offset,
+    limit,
+    nextCursor,
+    hasMore,
+    pagination: {
+      total,
+      offset,
+      limit,
+      next_cursor: nextCursor,
+      has_more: hasMore,
+    },
   })
 }
 
@@ -27,6 +65,8 @@ function resetStore() {
     channelsError: null,
     messages: [],
     total: 0,
+    nextCursor: null,
+    hasMore: false,
     loading: false,
     loadingMore: false,
     error: null,
@@ -46,7 +86,19 @@ describe('messagesStore', () => {
       const channels = [makeChannel('#engineering'), makeChannel('#product')]
       server.use(
         http.get('/api/v1/messages/channels', () =>
-          HttpResponse.json(apiSuccess(channels)),
+          HttpResponse.json({
+            data: channels,
+            error: null,
+            error_detail: null,
+            success: true,
+            pagination: {
+              total: channels.length,
+              offset: 0,
+              limit: 50,
+              next_cursor: null,
+              has_more: false,
+            },
+          }),
         ),
       )
 
@@ -144,13 +196,20 @@ describe('messagesStore', () => {
 
   describe('fetchMoreMessages', () => {
     it('appends messages to existing list', async () => {
-      useMessagesStore.setState({ messages: [makeMessage('1')], total: 5 })
+      useMessagesStore.setState({
+        messages: [makeMessage('1')],
+        total: 5,
+        nextCursor: 'cursor-page-2',
+        hasMore: true,
+      })
       server.use(
         http.get('/api/v1/messages', () =>
           HttpResponse.json(
             paginated([makeMessage('2'), makeMessage('3')], {
               total: 5,
               offset: 1,
+              nextCursor: null,
+              hasMore: false,
             }),
           ),
         ),
@@ -181,6 +240,8 @@ describe('messagesStore', () => {
       useMessagesStore.setState({
         messages: [makeMessage('1')],
         total: 5,
+        nextCursor: 'cursor-page-2',
+        hasMore: true,
       })
       server.use(
         http.get('/api/v1/messages', () =>
@@ -198,6 +259,8 @@ describe('messagesStore', () => {
       useMessagesStore.setState({
         messages: [makeMessage('1')],
         total: 5,
+        nextCursor: 'cursor-old-page-2',
+        hasMore: true,
       })
       let release!: () => void
       const gate = new Promise<void>((resolve) => {
@@ -207,8 +270,8 @@ describe('messagesStore', () => {
         http.get('/api/v1/messages', async ({ request }) => {
           const url = new URL(request.url)
           const channel = url.searchParams.get('channel')
-          const offset = url.searchParams.get('offset')
-          if (channel === '#old' && offset) {
+          const cursor = url.searchParams.get('cursor')
+          if (channel === '#old' && cursor) {
             await gate
             return HttpResponse.json(
               paginated([makeMessage('stale')], { total: 5, offset: 1 }),

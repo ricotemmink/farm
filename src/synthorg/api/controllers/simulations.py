@@ -13,7 +13,7 @@ from synthorg.api.channels import CHANNEL_SIMULATIONS, publish_ws_event
 from synthorg.api.dto import ApiResponse, PaginatedResponse
 from synthorg.api.errors import ConflictError, NotFoundError
 from synthorg.api.guards import require_read_access, require_write_access
-from synthorg.api.pagination import PaginationLimit, PaginationOffset, paginate
+from synthorg.api.pagination import CursorLimit, CursorParam, paginate_cursor
 from synthorg.api.rate_limits.guard import per_op_rate_limit
 from synthorg.api.state import AppState  # noqa: TC001
 from synthorg.api.ws_models import WsEventType
@@ -28,6 +28,7 @@ from synthorg.client.runner import SimulationRunner
 from synthorg.client.store import SimulationRecord
 from synthorg.core.types import NotBlankStr  # noqa: TC001
 from synthorg.observability import get_logger
+from synthorg.observability.background_tasks import log_task_exceptions
 from synthorg.observability.events.client import (
     SIMULATION_RUN_CANCELLED,
     SIMULATION_RUN_FAILED,
@@ -185,15 +186,20 @@ class SimulationController(Controller):
     async def list_simulations(
         self,
         state: State,
-        offset: PaginationOffset = 0,
-        limit: PaginationLimit = 50,
+        cursor: CursorParam = None,
+        limit: CursorLimit = 50,
     ) -> PaginatedResponse[SimulationStatusResponse]:
         """List all known simulation runs."""
         app_state: AppState = state.app_state
         sim_state = app_state.client_simulation_state
         records = await sim_state.simulation_store.list_all()
         responses = tuple(_to_response(r) for r in records)
-        page, meta = paginate(responses, offset=offset, limit=limit)
+        page, meta = paginate_cursor(
+            responses,
+            limit=limit,
+            cursor=cursor,
+            secret=state.app_state.cursor_secret,
+        )
         return PaginatedResponse(data=page, pagination=meta)
 
     @get("/{simulation_id:str}")
@@ -289,9 +295,25 @@ class SimulationController(Controller):
             if event is not None:
                 _publish_event(request, event, final)
 
-        task = asyncio.create_task(runner_task())
-        sim_state.background_tasks.add(task)
+        task = asyncio.create_task(
+            runner_task(),
+            name=f"simulation-runner[{record.simulation_id}]",
+        )
+        # Register the exception logger FIRST so a task that finishes
+        # between ``create_task`` and ``background_tasks.add`` still has
+        # its failure surfaced -- asyncio invokes done-callbacks in the
+        # order they were registered.  Adding the task to the set
+        # before attaching the logger would let a fast-completing
+        # failure fire ``discard`` first and silently drop the error.
+        task.add_done_callback(
+            log_task_exceptions(
+                logger,
+                SIMULATION_RUN_FAILED,
+                simulation_id=record.simulation_id,
+            ),
+        )
         task.add_done_callback(sim_state.background_tasks.discard)
+        sim_state.background_tasks.add(task)
         return ApiResponse(data=_to_response(record))
 
     @post("/{simulation_id:str}/cancel", guards=[require_write_access])

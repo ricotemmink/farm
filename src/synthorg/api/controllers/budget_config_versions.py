@@ -7,13 +7,14 @@ from litestar import Controller, Response, get
 from litestar.datastructures import State  # noqa: TC002
 from litestar.params import Parameter
 
-from synthorg.api.dto import (
-    ApiResponse,
-    PaginatedResponse,
-    PaginationMeta,
-)
+from synthorg.api.cursor import decode_cursor
+from synthorg.api.dto import ApiResponse, PaginatedResponse
 from synthorg.api.guards import require_read_access
-from synthorg.api.pagination import PaginationLimit, PaginationOffset  # noqa: TC001
+from synthorg.api.pagination import (
+    CursorLimit,
+    CursorParam,
+    encode_repo_seek_meta,
+)
 from synthorg.budget.config import BudgetConfig
 from synthorg.observability import get_logger
 from synthorg.observability.events.versioning import (
@@ -40,10 +41,12 @@ class BudgetConfigVersionController(Controller):
     async def list_versions(
         self,
         state: State,
-        offset: PaginationOffset = 0,
-        limit: PaginationLimit = 20,
+        cursor: CursorParam = None,
+        limit: CursorLimit = 20,
     ) -> Response[PaginatedResponse[SnapshotT]]:
         """List version history for budget configuration."""
+        secret = state.app_state.cursor_secret
+        offset = 0 if cursor is None else decode_cursor(cursor, secret=secret)
         repo = state.app_state.persistence.budget_config_versions
         versions, total = await asyncio.gather(
             repo.list_versions(_ENTITY_ID, limit=limit, offset=offset),
@@ -55,7 +58,13 @@ class BudgetConfigVersionController(Controller):
             entity_id=_ENTITY_ID,
             count=len(versions),
         )
-        meta = PaginationMeta(total=total, offset=offset, limit=limit)
+        meta = encode_repo_seek_meta(
+            offset=offset,
+            page_len=len(versions),
+            total=total,
+            limit=limit,
+            secret=secret,
+        )
         return Response(
             content=PaginatedResponse[SnapshotT](
                 data=versions,

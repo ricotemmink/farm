@@ -75,7 +75,8 @@ export interface UpdateEntityRequest {
 // ── Endpoints ─────────────────────────────────────────────────
 
 export async function listEntities(params?: {
-  offset?: number
+  /** Opaque pagination cursor from the previous response's `pagination.next_cursor`. */
+  cursor?: string | null
   limit?: number
   tier?: string
 }): Promise<PaginatedResult<EntityResponse>> {
@@ -114,7 +115,7 @@ export async function deleteEntity(name: string): Promise<void> {
 
 export async function listEntityVersions(
   name: string,
-  params?: { offset?: number; limit?: number },
+  params?: { cursor?: string | null; limit?: number },
 ): Promise<PaginatedResult<EntityVersionResponse>> {
   const response = await apiClient.get<PaginatedResponse<EntityVersionResponse>>(
     `/ontology/entities/${encodeURIComponent(name)}/versions`,
@@ -129,7 +130,7 @@ export async function getVersionManifest(): Promise<Record<string, number>> {
 }
 
 export async function listDriftReports(params?: {
-  offset?: number
+  cursor?: string | null
   limit?: number
 }): Promise<PaginatedResult<DriftReportResponse>> {
   const response = await apiClient.get<PaginatedResponse<DriftReportResponse>>('/ontology/drift', {

@@ -3,11 +3,11 @@
 from litestar import Controller, get
 from litestar.datastructures import State  # noqa: TC002
 
-from synthorg.api.dto import ApiResponse, PaginatedResponse
+from synthorg.api.dto import PaginatedResponse
 from synthorg.api.guards import require_read_access
-from synthorg.api.pagination import PaginationLimit, PaginationOffset, paginate
+from synthorg.api.pagination import CursorLimit, CursorParam, paginate_cursor
 from synthorg.api.state import AppState  # noqa: TC001
-from synthorg.communication.channel import Channel  # noqa: TC001
+from synthorg.communication.channel import Channel
 from synthorg.communication.message import Message  # noqa: TC001
 from synthorg.observability import get_logger
 
@@ -26,8 +26,8 @@ class MessageController(Controller):
         self,
         state: State,
         channel: str | None = None,
-        offset: PaginationOffset = 0,
-        limit: PaginationLimit = 50,
+        cursor: CursorParam = None,
+        limit: CursorLimit = 50,
     ) -> PaginatedResponse[Message]:
         """List messages, optionally filtered by channel.
 
@@ -38,7 +38,7 @@ class MessageController(Controller):
         Args:
             state: Application state.
             channel: Filter by channel name.
-            offset: Pagination offset.
+            cursor: Opaque pagination cursor from the previous page.
             limit: Page size.
 
         Returns:
@@ -51,22 +51,37 @@ class MessageController(Controller):
             )
         else:
             messages = ()
-        page, meta = paginate(messages, offset=offset, limit=limit)
+        page, meta = paginate_cursor(
+            messages,
+            limit=limit,
+            cursor=cursor,
+            secret=app_state.cursor_secret,
+        )
         return PaginatedResponse(data=page, pagination=meta)
 
     @get("/channels")
     async def list_channels(
         self,
         state: State,
-    ) -> ApiResponse[tuple[Channel, ...]]:
-        """List available message bus channels.
+        cursor: CursorParam = None,
+        limit: CursorLimit = 50,
+    ) -> PaginatedResponse[Channel]:
+        """List available message bus channels (paginated).
 
         Args:
             state: Application state.
+            cursor: Opaque pagination cursor from the previous page.
+            limit: Page size.
 
         Returns:
-            Channel list envelope.
+            Paginated channel list envelope.
         """
         app_state: AppState = state.app_state
         channels = await app_state.message_bus.list_channels()
-        return ApiResponse(data=channels)
+        page, meta = paginate_cursor(
+            tuple(channels),
+            limit=limit,
+            cursor=cursor,
+            secret=app_state.cursor_secret,
+        )
+        return PaginatedResponse[Channel](data=page, pagination=meta)

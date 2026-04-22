@@ -155,7 +155,7 @@ class TestListVersions:
 
         # First page: limit=2
         resp = test_client.get(
-            f"/api/v1/workflows/{wf_id}/versions?limit=2&offset=0",
+            f"/api/v1/workflows/{wf_id}/versions?limit=2",
             headers=make_auth_headers("ceo"),
         )
         assert resp.status_code == 200
@@ -164,16 +164,31 @@ class TestListVersions:
         assert body["data"][0]["version"] == 3
         assert body["data"][1]["version"] == 2
         assert body["pagination"]["total"] == 3
+        assert body["pagination"]["has_more"] is True
+        next_cursor = body["pagination"]["next_cursor"]
+        assert next_cursor is not None
 
-        # Second page: offset=2
+        # Second page via opaque cursor.  Pass the cursor through
+        # ``params`` rather than interpolating it into the URL so the
+        # test does not couple to cursor-encoding details (e.g. if
+        # future versions use a symbol that needs URL-escaping, the
+        # interpolated form breaks silently while ``params`` hands it
+        # to httpx as an opaque value).
         resp2 = test_client.get(
-            f"/api/v1/workflows/{wf_id}/versions?limit=2&offset=2",
+            f"/api/v1/workflows/{wf_id}/versions",
+            params={"limit": 2, "cursor": next_cursor},
             headers=make_auth_headers("ceo"),
         )
         assert resp2.status_code == 200
         body2 = resp2.json()
         assert len(body2["data"]) == 1
         assert body2["data"][0]["version"] == 1
+        assert body2["pagination"]["has_more"] is False
+        # Terminal page must also clear ``next_cursor`` so clients do
+        # not walk a dangling cursor past the end; the
+        # ``_validate_cursor_consistency`` validator on PaginationMeta
+        # enforces the ``has_more ↔ next_cursor`` pairing.
+        assert body2["pagination"]["next_cursor"] is None
 
 
 # ── GET /workflows/{id}/versions/{version} ────────────────────────
