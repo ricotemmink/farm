@@ -660,8 +660,11 @@ class ConfigResolver:
         ``CoordinationConfig`` is constructed from scratch (not via
         ``model_copy``) because all its fields are registered in the
         settings registry.  The ``default_topology`` setting is
-        resolved separately by the ``TopologyDispatcher`` and is not
-        part of ``CoordinationConfig``.
+        consumed by :class:`MultiAgentCoordinator` via the
+        ``default_topology=config.topology`` kwarg wired in
+        ``engine/coordination/factory.py``; it is not part of
+        ``CoordinationConfig`` because that model is reconstructed
+        per request rather than rebuilt at settings-change time.
 
         Args:
             max_concurrency_per_wave: Request-level override for max

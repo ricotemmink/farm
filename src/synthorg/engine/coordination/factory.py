@@ -220,6 +220,7 @@ def build_coordinator(  # noqa: PLR0913
         ),
         task_engine=task_engine,
         performance_tracker=performance_tracker,
+        default_topology=config.topology,
     )
 
     logger.debug(

@@ -22,7 +22,7 @@ from synthorg.engine.coordination.models import (
 )
 from synthorg.engine.errors import CoordinationPhaseError
 from synthorg.engine.task_engine_models import TransitionTaskMutation
-from synthorg.observability import get_logger
+from synthorg.observability import get_logger, safe_error_description
 from synthorg.observability.events.coordination import (
     COORDINATION_CLEANUP_FAILED,
     COORDINATION_COMPLETED,
@@ -81,6 +81,7 @@ class MultiAgentCoordinator:
     __slots__ = (
         "_coordination_chain",
         "_decomposition_service",
+        "_default_topology",
         "_parallel_executor",
         "_performance_tracker",
         "_routing_service",
@@ -98,6 +99,7 @@ class MultiAgentCoordinator:
         task_engine: TaskEngine | None = None,
         performance_tracker: PerformanceTracker | None = None,
         coordination_chain: CoordinationMiddlewareChain | None = None,
+        default_topology: CoordinationTopology = CoordinationTopology.SAS,
     ) -> None:
         self._decomposition_service = decomposition_service
         self._routing_service = routing_service
@@ -106,6 +108,7 @@ class MultiAgentCoordinator:
         self._task_engine = task_engine
         self._performance_tracker = performance_tracker
         self._coordination_chain = coordination_chain
+        self._default_topology = default_topology
 
     async def coordinate(  # noqa: PLR0912, PLR0915, C901
         self,
@@ -258,10 +261,11 @@ class MultiAgentCoordinator:
         except MemoryError, RecursionError:
             raise
         except Exception as exc:
-            logger.exception(
+            logger.warning(
                 COORDINATION_FAILED,
                 parent_task_id=task.id,
-                error=str(exc),
+                error_type=type(exc).__name__,
+                error=safe_error_description(exc),
             )
             raise
 
@@ -449,7 +453,7 @@ class MultiAgentCoordinator:
                     phase="resolve_topology",
                 )
         else:
-            topology = CoordinationTopology.SAS
+            topology = self._default_topology
 
         # AUTO should have been resolved by TopologySelector; fallback
         if topology == CoordinationTopology.AUTO:

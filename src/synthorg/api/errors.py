@@ -220,6 +220,39 @@ class NotFoundError(ApiError):
         super().__init__(message, status_code=404)
 
 
+def resource_not_found(
+    resource_type: str,
+    identifier: str,
+    *,
+    code: ErrorCode = ErrorCode.RESOURCE_NOT_FOUND,
+) -> NotFoundError:
+    """Build a :class:`NotFoundError` with a structured message + code.
+
+    Callers should prefer the domain-specific ``ErrorCode`` (e.g.
+    ``ErrorCode.TASK_NOT_FOUND``) so API clients can discriminate
+    which resource was missing without parsing the message.  The
+    fallback ``RESOURCE_NOT_FOUND`` covers resources that don't yet
+    have a dedicated code.
+
+    Args:
+        resource_type: Human-readable type (``"task"``, ``"agent"``).
+        identifier: The missing identifier value.
+        code: Specific error code for the resource (defaults to
+            the generic ``RESOURCE_NOT_FOUND``).
+
+    Returns:
+        A ``NotFoundError`` whose message is
+        ``"{resource_type} {identifier!r} not found"`` and whose
+        ``error_code`` is ``code``.
+    """
+    error = NotFoundError(f"{resource_type} {identifier!r} not found")
+    # ``error_code`` is a ClassVar on the base class; the factory
+    # assigns an instance attribute so this particular raise reports
+    # the resource-specific code while reusing the shared class.
+    error.error_code = code  # type: ignore[misc]
+    return error
+
+
 class ApiValidationError(ApiError):
     """Raised when request data fails validation (422)."""
 

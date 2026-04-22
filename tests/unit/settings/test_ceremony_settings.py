@@ -30,7 +30,6 @@ class TestCeremonySettingsRegistered:
             "ceremony_auto_transition",
             "ceremony_transition_threshold",
             "dept_ceremony_policies",
-            "ceremony_policy_overrides",
         ],
     )
     def test_ceremony_setting_exists(
@@ -101,7 +100,11 @@ class TestCeremonySettingsRegistered:
     ) -> None:
         defns = registry.list_namespace("coordination")
         ceremony_defns = [d for d in defns if d.group == "Ceremony Policy"]
-        assert len(ceremony_defns) == 7
+        # HYG-1 dropped the unused ``ceremony_policy_overrides`` setting
+        # (never consumed); the remaining six cover strategy selection,
+        # config JSON, velocity calculator, auto-transition toggles,
+        # threshold, and per-department override map.
+        assert len(ceremony_defns) == 6
 
     def test_ceremony_strategy_default_is_task_driven(
         self, registry: SettingsRegistry
@@ -122,15 +125,6 @@ class TestCeremonySettingsRegistered:
         defn = registry.get("coordination", "ceremony_strategy")
         assert defn is not None
         assert set(defn.enum_values) == {m.value for m in CeremonyStrategyType}
-
-    def test_ceremony_policy_overrides_is_json(
-        self, registry: SettingsRegistry
-    ) -> None:
-        defn = registry.get("coordination", "ceremony_policy_overrides")
-        assert defn is not None
-        assert defn.type == SettingType.JSON
-        assert defn.default == "{}"
-        assert defn.level == SettingLevel.ADVANCED
 
     def test_ceremony_velocity_calculator_enum_values_match_strenum(
         self, registry: SettingsRegistry
