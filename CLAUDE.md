@@ -37,7 +37,7 @@
 
 ```bash
 uv sync                                    # install all deps (dev + test)
-uv sync --group docs                       # install docs toolchain
+uv sync --group docs                       # install docs toolchain (zensical + D2 plugins; required before zensical commands on first clone)
 uv run ruff check src/ tests/              # lint
 uv run ruff check src/ tests/ --fix        # lint + auto-fix
 uv run ruff format src/ tests/             # format

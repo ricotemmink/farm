@@ -75,7 +75,11 @@ class ErrorDetail(BaseModel):
     error_code: ErrorCode
     error_category: ErrorCategory
     retryable: bool = False
-    retry_after: int | None = Field(default=None, ge=0)
+    retry_after: int | None = Field(
+        default=None,
+        ge=0,
+        description="Seconds to wait before retrying (null when not applicable).",
+    )
     instance: NotBlankStr
     title: NotBlankStr
     type: NotBlankStr
@@ -115,7 +119,11 @@ class ProblemDetail(BaseModel):
     error_code: ErrorCode
     error_category: ErrorCategory
     retryable: bool = False
-    retry_after: int | None = Field(default=None, ge=0)
+    retry_after: int | None = Field(
+        default=None,
+        ge=0,
+        description="Seconds to wait before retrying (null when not applicable).",
+    )
 
     @model_validator(mode="after")
     def _validate_retry_after_consistency(self) -> Self:
@@ -234,13 +242,35 @@ class CreateArtifactRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
-    type: ArtifactType
-    path: NotBlankStr = Field(max_length=1024)
-    task_id: NotBlankStr
-    created_by: NotBlankStr
-    description: str = Field(default="", max_length=4096)
-    content_type: str = Field(default="", max_length=256)
-    project_id: NotBlankStr | None = None
+    type: ArtifactType = Field(
+        description="Artifact category (code, tests, documentation).",
+    )
+    path: NotBlankStr = Field(
+        max_length=1024,
+        description="File path or artifact identifier within the workspace.",
+    )
+    task_id: NotBlankStr = Field(
+        description="Originating task identifier.",
+    )
+    created_by: NotBlankStr = Field(
+        description="Agent identifier of the artifact creator.",
+    )
+    description: str = Field(
+        default="",
+        max_length=4096,
+        description="Human-readable artifact description.",
+    )
+    content_type: str = Field(
+        default="",
+        max_length=256,
+        description=(
+            "MIME type of the artifact content (empty when no content is stored)."
+        ),
+    )
+    project_id: NotBlankStr | None = Field(
+        default=None,
+        description="Optional project identifier to link the artifact to.",
+    )
 
 
 # ── Project request DTOs ──────────────────────────────────────
@@ -403,13 +433,44 @@ class CreateApprovalRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
-    action_type: NotBlankStr = Field(max_length=128)
-    title: NotBlankStr = Field(max_length=256)
-    description: NotBlankStr = Field(max_length=4096)
-    risk_level: ApprovalRiskLevel
-    ttl_seconds: int | None = Field(default=None, ge=60, le=604800)
-    task_id: NotBlankStr | None = Field(default=None, max_length=128)
-    metadata: dict[str, str] = Field(default_factory=dict)
+    action_type: NotBlankStr = Field(
+        max_length=128,
+        description="Kind of action requiring approval in `category:action` format.",
+    )
+    title: NotBlankStr = Field(
+        max_length=256,
+        description="Short human-readable summary of the approval.",
+    )
+    description: NotBlankStr = Field(
+        max_length=4096,
+        description="Detailed explanation of the action and why it requires approval.",
+    )
+    risk_level: ApprovalRiskLevel = Field(
+        description="Assessed risk level for the action.",
+    )
+    ttl_seconds: int | None = Field(
+        default=None,
+        ge=60,
+        le=604800,
+        description=(
+            "Optional time-to-live in seconds before the approval auto-expires "
+            "(minimum 60, maximum 604800 = 7 days)."
+        ),
+    )
+    task_id: NotBlankStr | None = Field(
+        default=None,
+        max_length=128,
+        description="Optional associated task identifier.",
+    )
+    metadata: dict[str, str] = Field(
+        default_factory=dict,
+        max_length=_MAX_METADATA_KEYS,
+        description=(
+            "Optional key-value metadata for the approval "
+            f"(max {_MAX_METADATA_KEYS} keys, "
+            f"{_MAX_METADATA_STR_LEN}-char keys and values)."
+        ),
+    )
 
     @field_validator("action_type")
     @classmethod
@@ -421,10 +482,7 @@ class CreateApprovalRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_metadata_bounds(self) -> Self:
-        """Limit metadata size to prevent memory abuse."""
-        if len(self.metadata) > _MAX_METADATA_KEYS:
-            msg = f"metadata must have at most {_MAX_METADATA_KEYS} keys"
-            raise ValueError(msg)
+        """Enforce per-entry size limits; key-count via Field(max_length=...)."""
         for k, v in self.metadata.items():
             if len(k) > _MAX_METADATA_STR_LEN:
                 msg = f"metadata key must be at most {_MAX_METADATA_STR_LEN} characters"

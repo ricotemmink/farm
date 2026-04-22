@@ -315,6 +315,65 @@ org_memory:
 
 ---
 
+## Memory Admin API
+
+Operators with the `CEO` or `SYSTEM` role can manage embedding fine-tuning at runtime through the `/admin/memory/fine-tune*` endpoints (controller: `src/synthorg/api/controllers/memory.py`, guarded by `require_roles(HumanRole.CEO, HumanRole.SYSTEM)`).
+
+### Start a fine-tune run
+
+```bash
+curl -X POST http://localhost:3001/api/v1/admin/memory/fine-tune \
+  -H "Content-Type: application/json" \
+  -H "Cookie: ${SESSION}" \
+  -d '{"agent_id": "sarah_chen"}' | jq
+```
+
+### Resume, cancel, or check status
+
+```bash
+# Resume a paused run
+curl -X POST http://localhost:3001/api/v1/admin/memory/fine-tune/resume/${RUN_ID} \
+  -H "Cookie: ${SESSION}"
+
+# Read current status
+curl http://localhost:3001/api/v1/admin/memory/fine-tune/status \
+  -H "Cookie: ${SESSION}" | jq
+
+# Cancel the active run
+curl -X POST http://localhost:3001/api/v1/admin/memory/fine-tune/cancel \
+  -H "Cookie: ${SESSION}"
+```
+
+### Preflight check, checkpoints, deploy / rollback
+
+```bash
+# Validate configuration before running
+curl -X POST http://localhost:3001/api/v1/admin/memory/fine-tune/preflight \
+  -H "Content-Type: application/json" \
+  -H "Cookie: ${SESSION}" \
+  -d '{"agent_id": "sarah_chen"}' | jq
+
+# List available checkpoints
+curl http://localhost:3001/api/v1/admin/memory/fine-tune/checkpoints \
+  -H "Cookie: ${SESSION}" | jq
+
+# Deploy or roll back a specific checkpoint
+curl -X POST http://localhost:3001/api/v1/admin/memory/fine-tune/checkpoints/${CHECKPOINT_ID}/deploy \
+  -H "Cookie: ${SESSION}"
+curl -X POST http://localhost:3001/api/v1/admin/memory/fine-tune/checkpoints/${CHECKPOINT_ID}/rollback \
+  -H "Cookie: ${SESSION}"
+
+# Delete a checkpoint
+curl -X DELETE http://localhost:3001/api/v1/admin/memory/fine-tune/checkpoints/${CHECKPOINT_ID} \
+  -H "Cookie: ${SESSION}"
+```
+
+### Planned admin endpoints
+
+Consolidation, reindex, procedural-skill management, and organization-memory promotion are described in the [Memory design page](../design/memory.md#consolidation) but are not yet exposed as REST endpoints. Track progress against the Memory roadmap; in the meantime these operations happen on agent-lifecycle boundaries (consolidation cycles, startup reindex, procedural-memory auto-generation).
+
+---
+
 ## See Also
 
 - [Company Configuration](company-config.md) -- full configuration reference

@@ -49,7 +49,9 @@ describe('ErrorBoundary', () => {
       </ErrorBoundary>,
     )
     expect(screen.queryByText('Normal content')).not.toBeInTheDocument()
-    expect(screen.getByText('Something went wrong')).toBeInTheDocument()
+    expect(
+      screen.getByText('Unable to load this section. Try refreshing the page.'),
+    ).toBeInTheDocument()
     expect(screen.getByText('Test error message')).toBeInTheDocument()
   })
 
@@ -62,7 +64,9 @@ describe('ErrorBoundary', () => {
       </ErrorBoundary>,
     )
 
-    expect(screen.getByText('Something went wrong')).toBeInTheDocument()
+    expect(
+      screen.getByText('Unable to load this section. Try refreshing the page.'),
+    ).toBeInTheDocument()
 
     // Fix the issue before retrying
     throwFlag.current = false

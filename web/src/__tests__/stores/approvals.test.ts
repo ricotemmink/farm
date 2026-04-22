@@ -189,7 +189,7 @@ describe('approveOne', () => {
     const toasts = useToastStore.getState().toasts
     expect(toasts).toHaveLength(1)
     expect(toasts[0]!.variant).toBe('error')
-    expect(toasts[0]!.title).toBe('Failed to approve')
+    expect(toasts[0]!.title).toBe('Could not approve')
     expect(toasts[0]!.description).toBe('Server error')
   })
 })
@@ -232,7 +232,7 @@ describe('rejectOne', () => {
     const toasts = useToastStore.getState().toasts
     expect(toasts).toHaveLength(1)
     expect(toasts[0]!.variant).toBe('error')
-    expect(toasts[0]!.title).toBe('Failed to reject')
+    expect(toasts[0]!.title).toBe('Could not reject')
     expect(toasts[0]!.description).toBe('Server error')
   })
 })

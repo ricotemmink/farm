@@ -452,7 +452,7 @@ export const useMeetingsStore = create<MeetingsState>()((set, get) => ({
       set({ triggering: false })
       useToastStore.getState().add({
         variant: 'error',
-        title: 'Failed to trigger meeting',
+        title: 'Could not trigger meeting',
         description: getErrorMessage(err),
       })
       return []

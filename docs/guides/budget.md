@@ -174,8 +174,9 @@ Every LLM API call is recorded as a cost record with full context:
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /api/v1/budget/status` | Current budget status (spent, remaining, alerts) |
+| `GET /api/v1/budget/config` | Active `BudgetConfig` (limits, alert thresholds, cascade rules, currency) |
 | `GET /api/v1/budget/records` | Cost records with filtering and aggregation |
+| `GET /api/v1/budget/agents/{agent_id}` | Per-agent cost summary |
 
 ---
 
@@ -243,8 +244,60 @@ budget:
 
 ---
 
+## Budget API
+
+Query spending, stream cost records, and integrate budget alerts into external dashboards.
+
+### Budget configuration
+
+```bash
+curl http://localhost:3001/api/v1/budget/config \
+  -H "Cookie: ${SESSION}" | jq
+```
+
+Returns the active `BudgetConfig` (limits, alert thresholds, cascade rules, currency). Current period spending and alert level are derived from the cost records stream (`/budget/records` summaries) or the WebSocket `budget` channel -- there is no separate `/budget/status` endpoint today.
+
+### List cost records
+
+```bash
+# First page, 100 records (server default is 50 when limit is omitted)
+curl "http://localhost:3001/api/v1/budget/records?limit=100" \
+  -H "Cookie: ${SESSION}" | jq
+
+# Filter by agent
+curl "http://localhost:3001/api/v1/budget/records?agent_id=${AGENT_ID}&limit=50" \
+  -H "Cookie: ${SESSION}" | jq
+
+# Filter by task
+curl "http://localhost:3001/api/v1/budget/records?task_id=${TASK_ID}" \
+  -H "Cookie: ${SESSION}" | jq
+```
+
+The response includes `data` (paginated records), `daily_summary` (per-day totals aggregated across ALL matching records, not just the page), and `period_summary` (overall totals + computed `avg_cost`).
+
+Supported query parameters: `agent_id`, `task_id`, `offset`, `limit`. Additional slicing (by provider, model, tag, project, date range) is done client-side from the paginated response today; a dedicated report-generation endpoint is planned but not yet implemented.
+
+### Budget alert webhook integration
+
+Budget thresholds emit notifications through `NotificationDispatcher`. To route them to a configured sink (see [Notifications & Events](notifications-and-events.md) for the shipped adapter catalog), add the sink to `notifications.sinks` and filter by `event_type` starting with `BUDGET_`.
+
+Alternatively, subscribe to the `budget` WebSocket channel for real-time threshold events:
+
+```javascript
+ws.send(JSON.stringify({ action: 'subscribe', channels: ['budget'] }))
+```
+
+Wire event types (see `WsEventType` in `src/synthorg/api/ws_models.py`): `budget.record_added`, `budget.alert`.
+
+### Risk budget enforcement
+
+Risk enforcement (`risk_budget.enabled: true`) is handled internally by `RiskTracker` and `RiskEnforcer`. It is not exposed through dedicated public API endpoints today; risk events flow through the same `budget.alert` WebSocket event type described above.
+
+---
+
 ## See Also
 
 - [Company Configuration](company-config.md) -- full configuration reference
 - [Agent Roles & Hierarchy](agents.md) -- per-agent model assignment
-- [Design: Operations](../design/operations.md) -- budget architecture in the design spec
+- [Design: Budget & Cost](../design/budget.md) -- budget architecture in the design spec
+- [Notifications & Events](notifications-and-events.md) -- budget alert routing

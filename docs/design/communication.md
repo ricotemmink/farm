@@ -142,7 +142,7 @@ Inbound (external -> internal)
 :   External A2A clients discover SynthOrg agents via Agent Cards, create tasks via
     JSON-RPC, and receive updates via SSE. The gateway translates A2A requests into
     internal MessageBus messages and applies [DelegationGuard](#loop-prevention) +
-    [A2A-specific security checks](operations.md#a2a-security) before admission.
+    [A2A-specific security checks](security.md#a2a-security) before admission.
 
 Outbound (internal -> external)
 :   SynthOrg agents can delegate tasks to external A2A agents. The A2A client discovers
@@ -237,7 +237,7 @@ The dashboard also uses SSE for observability and the HITL interrupt/resume prot
 | External A2A client | SSE | `tasks/sendSubscribe` | Task progress streaming |
 
 The `EventStreamHub` is the single event source for all SSE consumers (hub-driven
-architecture). Both the AG-UI dashboard and the future A2A gateway (#1164) subscribe
+architecture). Both the AG-UI dashboard and the A2A gateway subscribe
 to the hub and apply per-consumer projection layers. The gateway applies an A2A
 projection that filters to task-related events for explicitly subscribed tasks and
 formats payloads per the A2A specification -- no internal channel traffic leaks to
@@ -254,7 +254,7 @@ SynthOrg agents can delegate tasks to external A2A agents through the outbound c
 5. **State mapping**: Map external A2A task states back to internal states (see table above)
 
 The outbound client authenticates using the `a2a.auth.outbound` configuration (see
-[A2A Security](operations.md#a2a-security)). Outbound delegations pass through the
+[A2A Security](security.md#a2a-security)). Outbound delegations pass through the
 [DelegationGuard](#loop-prevention) for loop-prevention checks (ancestry, depth,
 deduplication, rate limiting, circuit breaker) before dispatch.
 
@@ -314,7 +314,7 @@ All metadata fields are nullable except `extra`, which is always present (defaul
     communication:
       default_pattern: "hybrid"
       message_bus:
-        backend: "internal"        # implemented: internal, nats -- planned: redis, rabbitmq, kafka
+        backend: "internal"        # implemented: internal, nats
         channels:
           - "#all-hands"
           - "#engineering"
@@ -343,7 +343,7 @@ All metadata fields are nullable except `extra`, which is always present (defaul
     ```
 
 !!! info "Distributed bus backends"
-    The `backend` field switches between the in-process `internal` default and opt-in distributed backends. NATS JetStream is the first distributed backend; Redis Streams, RabbitMQ, and Kafka are documented alternatives for future implementation. See the [Distributed Runtime design](distributed-runtime.md) for the transport evaluation, stream layout, and migration path.
+    The `backend` field switches between the in-process `internal` default and the opt-in NATS JetStream backend for multi-process / multi-host deployments. See the [Distributed Runtime design](distributed-runtime.md) for the transport evaluation, stream layout, and migration path.
 
 ---
 
@@ -429,7 +429,7 @@ department, or per conflict type.
         prompt injection, and logs all detections for audit. Coordination-level
         analog scans rollup summaries before parent-task updates. See
         [S1 Multi-Agent Architecture Decision §3](../research/s1-multi-agent-decision.md#section-3--risk-mitigation-register-15-emergent-risks-from-paper-1),
-        [Engine Design -- Harness Middleware Layer](engine.md#harness-middleware-layer),
+        [Verification & Quality -- Harness Middleware Layer](verification-quality.md#harness-middleware-layer),
         and [#1260](https://github.com/Aureliolo/synthorg/issues/1260).
 
 === "Strategy 2: Structured Debate + Judge"
@@ -453,7 +453,7 @@ department, or per conflict type.
 
     All genuine conflicts go to the human approval queue with both positions
     summarized. The agent(s) park the conflicting task and work on other tasks
-    while waiting (see [Approval Timeout](operations.md#approval-timeout-policy)).
+    while waiting (see [Approval Timeout](security.md#approval-timeout-policy)).
 
     ```yaml
     conflict_resolution:
@@ -855,7 +855,7 @@ response. Each SSE event has:
 ```
 
 The `EventStreamHub` (`communication/event_stream/stream.py`) is the single
-pub/sub source. Both the AG-UI dashboard and the future A2A gateway consume
+pub/sub source. Both the AG-UI dashboard and the A2A gateway consume
 from this hub, each applying their own projection layer.
 
 ### Interrupt / Resume Protocol
@@ -896,7 +896,7 @@ approval paths can adopt incrementally.
 
 **Quantum-safe signing**: High-risk `EvidencePackage` approvals
 (`risk_level >= HIGH`) use m-of-n threshold signing via the
-[Quantum-Safe Audit Trail](operations.md#quantum-safe-audit-trail).
+[Quantum-Safe Audit Trail](security.md#quantum-safe-audit-trail).
 `EvidencePackageSignature` carries ML-DSA-65 signatures; the
 `is_fully_signed` computed field checks the threshold.
 See `src/synthorg/observability/audit_chain/` for the signing
@@ -914,11 +914,10 @@ a conflict is resolved:
 
 ### A2A Projection Consolidation
 
-The `EventStreamHub` is designed as the single event source for all
-consumers. The existing A2A gateway (design-only, not yet implemented)
-will subscribe to the same hub and apply A2A-specific state mapping
-(see [A2A External Gateway](#a2a-external-gateway) above) as a separate
-projection layer. No second SSE backend is needed.
+The `EventStreamHub` is the single event source for all consumers. The
+A2A gateway subscribes to the same hub and applies A2A-specific state
+mapping (see [A2A External Gateway](#a2a-external-gateway) above) as a
+separate projection layer. No second SSE backend is needed.
 
 ## Async Delegation
 

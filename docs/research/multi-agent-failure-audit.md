@@ -132,13 +132,14 @@ in the conflict positions, `find_position_or_raise()` raises `ConflictStrategyEr
 
 **Initial concern about looping was unfounded.** The debate is single-shot.
 
-**Remaining concern**: If the judge evaluator raises an exception (provider error, timeout),
-the exception propagates through `ConflictResolutionService.resolve()` uncaught. There is
-no automatic fallback to authority on evaluator failure -- the resolution attempt fails
-entirely. Callers should be prepared for this.
+**Exception handling**: If the judge evaluator raises an exception (provider error, timeout),
+the exception is caught and the resolver falls back to `_authority_fallback(conflict)`. If the
+authority fallback itself raises `ConflictHierarchyError` (no common manager across
+departments), that exception is also caught and a final seniority-only fallback is used
+(without hierarchy). A resolution is always produced unless `MemoryError` or `RecursionError`
+occurs.
 
-**Verdict**: Safe (terminates). One exception path: evaluator exceptions propagate without
-fallback.
+**Verdict**: Safe (terminates). On the evaluator-raises path, the multi-level fallback chain (`_authority_fallback` -> seniority-only on `ConflictHierarchyError`) ensures a resolution is always produced. On the no-JudgeEvaluator-configured path, `DebateResolver` calls `_authority_fallback` without a surrounding `try`, so a `ConflictHierarchyError` from AR2 propagates to the caller.
 
 ### HumanEscalationResolver
 
@@ -171,27 +172,34 @@ Single LLM review call. If the winner matches a participant, auto-resolves. On a
 
 ### Complete Fallback Chain
 
-```text
-HybridResolver
-  └─ clear winner found  ─────────────────────────────→ RESOLVED_BY_HYBRID
-  └─ ambiguous + escalate_on_ambiguity=True  ──────────→ ESCALATED_TO_HUMAN (stub)
-  └─ ambiguous + escalate_on_ambiguity=False ──────────→ AuthorityResolver
-       └─ RESOLVED_BY_AUTHORITY
+```mermaid
+flowchart TD
+    HR[HybridResolver]
+    HR -->|clear winner| RH[RESOLVED_BY_HYBRID]
+    HR -->|ambiguous + escalate_on_ambiguity=True| EH1[ESCALATED_TO_HUMAN stub]
+    HR -->|ambiguous + escalate_on_ambiguity=False| AR1[AuthorityResolver]
+    AR1 --> RA1[RESOLVED_BY_AUTHORITY]
 
-DebateResolver
-  └─ judge returns winner  ───────────────────────────→ RESOLVED_BY_DEBATE
-  └─ no JudgeEvaluator configured  ───────────────────→ AuthorityResolver
-  └─ evaluator raises  ───────────────────────────────→ exception propagates (no fallback)
+    DR[DebateResolver]
+    DR -->|judge returns winner| RD[RESOLVED_BY_DEBATE]
+    DR -->|no JudgeEvaluator configured| AR2[AuthorityResolver]
+    DR -->|evaluator raises| AFB[authority fallback]
+    AR2 -->|common manager found| RA2[RESOLVED_BY_AUTHORITY]
+    AR2 -->|no common manager cross-dept| CHE2[ConflictHierarchyError propagates]
+    AFB -->|common manager found| RA4[RESOLVED_BY_AUTHORITY]
+    AFB -->|ConflictHierarchyError| SF[seniority-only fallback]
+    SF --> RA5[RESOLVED_BY_AUTHORITY no hierarchy]
 
-HumanEscalationResolver ─────────────────────────────→ ESCALATED_TO_HUMAN (stub, immediate)
+    HE[HumanEscalationResolver] --> EH2[ESCALATED_TO_HUMAN stub - immediate]
 
-AuthorityResolver
-  └─ common manager found  ───────────────────────────→ RESOLVED_BY_AUTHORITY
-  └─ no common manager (cross-dept)  ─────────────────→ ConflictHierarchyError
+    AR[AuthorityResolver]
+    AR -->|common manager found| RA3[RESOLVED_BY_AUTHORITY]
+    AR -->|no common manager cross-dept| CHE[ConflictHierarchyError]
 ```
 
-All paths terminate. No infinite loops. The weakest path is the `DebateResolver` evaluator
-exception (no fallback) and the `HumanEscalationResolver` stub (no actual resolution).
+All paths terminate. No infinite loops. `DebateResolver` catches evaluator exceptions and
+cascades through authority and seniority fallbacks; the weakest remaining path is the
+`HumanEscalationResolver` stub (no actual resolution).
 
 ---
 
@@ -227,8 +235,8 @@ coupling point for agent execution. The `CoordinationService` can operate indepe
 any specific agent being present.
 
 **Verdict**: Not a current concern. The async pull model and single-writer actor design
-actively prevent synchronous coupling. Future risk if Redis/Kafka backends introduce
-ordering dependencies across agent groups.
+actively prevent synchronous coupling. Future risk if a transport with ordering guarantees
+is introduced across agent groups.
 
 ### Ownership Ambiguity Pattern
 
@@ -370,7 +378,7 @@ topology deterministically; agents cannot change it.
 | R2 | Circuit breaker bounce count reset | Medium | Low | Dedup (60s) + rate limit | Exponential backoff reset; global per-pair counter |
 | R3 | No coordination overhead cap | Medium | Low | Budget hard stop | Wire `orchestration_ratio` metric to configurable human-review threshold |
 | R4 | Human escalation for conflict is a stub | Medium | High (pending #37) | None | Complete #37 (approval queue integration) |
-| R5 | DebateResolver evaluator exception has no fallback | Low | Low | Exception propagates | Add try/except with AuthorityResolver fallback in DebateResolver |
+| R5 | DebateResolver evaluator exception fallback | Low | Low | Multi-level fallback: evaluator exception -> `_authority_fallback()` -> seniority-only on `ConflictHierarchyError` | Mitigated (implemented in `DebateResolver.resolve` and `DebateResolver._authority_fallback` in `debate_strategy.py`) |
 | R6 | Chatty interface detection without enforcement | Low | Low | Observational metric | Wire `MessageOverhead.is_quadratic` to coordination throttle |
 | R7 | In-memory guardrail state lost on restart | Low | Medium | None | Persist circuit breaker + dedup state to SQLite |
 | R8 | Budget hard stop has no operator override | Low | Low | None | Add emergency budget override endpoint with CEO+BOARD approval |

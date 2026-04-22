@@ -117,16 +117,41 @@ nav:
       - Deployment (Docker): guides/deployment.md
       - Centralized Logging: guides/centralized-logging.md
       - Memory Configuration: guides/memory.md
+      - Settings Reference: guides/settings-reference.md
+      - Notifications & Events: guides/notifications-and-events.md
+      - Workflow API Tutorial: guides/workflow-api.md
+      - Agent Management: guides/agent-management.md
+      - Human Interaction & API: guides/human-interaction.md
+      - Persistence Migrations: guides/persistence-migrations.md
       - Contributing: guides/contributing.md
   - Design:
       - design/index.md
       - Agents: design/agents.md
+      - HR & Agent Lifecycle: design/hr-lifecycle.md
       - Organization: design/organization.md
       - Communication: design/communication.md
       - Engine: design/engine.md
+      - Agent Execution: design/agent-execution.md
+      - Coordination & Resilience: design/coordination.md
+      - Verification & Quality: design/verification-quality.md
       - Distributed Runtime: design/distributed-runtime.md
       - Memory: design/memory.md
-      - Operations: design/operations.md
+      - Providers: design/providers.md
+      - Budget & Cost: design/budget.md
+      - Tools & Capabilities: design/tools.md
+      - Security & Approval: design/security.md
+      - Observability: design/observability.md
+      - Notifications: design/notifications.md
+      - Backup & Restore: design/backup.md
+      - Deployment: design/deployment.md
+      - Persistence: design/persistence.md
+      - A2A Protocol: design/a2a-protocol.md
+      - Integrations: design/integrations.md
+      - Memory Consistency: design/memory-consistency.md
+      - Ontology: design/ontology.md
+      - Client Simulation: design/client-simulation.md
+      - Strategy & Trendslop Mitigation: design/strategy.md
+      - Self-Improvement: design/self-improvement.md
       - Brand Identity & UX: design/brand-and-ux.md
       - Page Structure & IA: design/page-structure.md
       - UX Guidelines: design/ux-guidelines.md
@@ -161,7 +186,7 @@ nav:
       - Budget: api/budget.md
       - HR: api/hr.md
       - Tools: api/tools.md
-      - API Layer: api/api.md
+      - API Layer: api/layer.md
       - Config: api/config.md
       - Templates: api/templates.md
       - Persistence: api/persistence.md

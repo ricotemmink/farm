@@ -12,6 +12,7 @@ from synthorg.communication.config import (
     MeetingsConfig,
     MeetingTypeConfig,
     MessageBusConfig,
+    NatsConfig,
     RateLimitConfig,
 )
 from synthorg.communication.enums import (
@@ -19,6 +20,8 @@ from synthorg.communication.enums import (
     MessageBusBackend,
 )
 from synthorg.communication.meeting.frequency import MeetingFrequency
+
+_TEST_NATS_URL = "nats://localhost:4222"
 
 # ── MessageBusConfig ────────────────────────────────────────────
 
@@ -32,10 +35,11 @@ class TestMessageBusConfigDefaults:
 
     def test_custom_values(self) -> None:
         cfg = MessageBusConfig(
-            backend=MessageBusBackend.REDIS,
+            backend=MessageBusBackend.NATS,
             channels=("#ops", "#alerts"),
+            nats=NatsConfig(url=_TEST_NATS_URL),
         )
-        assert cfg.backend is MessageBusBackend.REDIS
+        assert cfg.backend is MessageBusBackend.NATS
         assert cfg.channels == ("#ops", "#alerts")
 
 
@@ -57,27 +61,42 @@ class TestMessageBusConfigValidation:
         cfg = MessageBusConfig(channels=())
         assert cfg.channels == ()
 
+    def test_nats_backend_without_config_rejected(self) -> None:
+        with pytest.raises(
+            ValidationError,
+            match="nats must be provided",
+        ):
+            MessageBusConfig(backend=MessageBusBackend.NATS)
+
 
 @pytest.mark.unit
 class TestMessageBusConfigImmutability:
     def test_frozen(self) -> None:
         cfg = MessageBusConfig()
         with pytest.raises(ValidationError):
-            cfg.backend = MessageBusBackend.KAFKA  # type: ignore[misc]
+            cfg.backend = MessageBusBackend.NATS  # type: ignore[misc]
 
     def test_model_copy(self) -> None:
         original = MessageBusConfig()
-        updated = original.model_copy(update={"backend": MessageBusBackend.RABBITMQ})
-        assert updated.backend is MessageBusBackend.RABBITMQ
+        updated = original.model_copy(
+            update={
+                "backend": MessageBusBackend.NATS,
+                "nats": NatsConfig(url=_TEST_NATS_URL),
+            },
+        )
+        assert updated.backend is MessageBusBackend.NATS
+        assert updated.nats == NatsConfig(url=_TEST_NATS_URL)
         assert original.backend is MessageBusBackend.INTERNAL
+        assert original.nats is None
 
 
 @pytest.mark.unit
 class TestMessageBusConfigSerialization:
     def test_json_roundtrip(self) -> None:
         cfg = MessageBusConfig(
-            backend=MessageBusBackend.KAFKA,
+            backend=MessageBusBackend.NATS,
             channels=("#a", "#b"),
+            nats=NatsConfig(url=_TEST_NATS_URL),
         )
         restored = MessageBusConfig.model_validate_json(cfg.model_dump_json())
         assert restored == cfg
@@ -497,11 +516,14 @@ class TestCommunicationConfigDefaults:
     def test_custom_values(self) -> None:
         cfg = CommunicationConfig(
             default_pattern=CommunicationPattern.EVENT_DRIVEN,
-            message_bus=MessageBusConfig(backend=MessageBusBackend.REDIS),
+            message_bus=MessageBusConfig(
+                backend=MessageBusBackend.NATS,
+                nats=NatsConfig(url=_TEST_NATS_URL),
+            ),
             hierarchy=HierarchyConfig(allow_skip_level=True),
         )
         assert cfg.default_pattern is CommunicationPattern.EVENT_DRIVEN
-        assert cfg.message_bus.backend is MessageBusBackend.REDIS
+        assert cfg.message_bus.backend is MessageBusBackend.NATS
         assert cfg.hierarchy.allow_skip_level is True
 
 
@@ -526,7 +548,10 @@ class TestCommunicationConfigSerialization:
     def test_json_roundtrip(self) -> None:
         cfg = CommunicationConfig(
             default_pattern=CommunicationPattern.MEETING_BASED,
-            message_bus=MessageBusConfig(backend=MessageBusBackend.KAFKA),
+            message_bus=MessageBusConfig(
+                backend=MessageBusBackend.NATS,
+                nats=NatsConfig(url=_TEST_NATS_URL),
+            ),
         )
         restored = CommunicationConfig.model_validate_json(cfg.model_dump_json())
         assert restored == cfg
