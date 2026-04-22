@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.7.2](https://github.com/Aureliolo/synthorg/compare/v0.7.1...v0.7.2) (2026-04-22)
+
+
+### Features
+
+* **api:** apply per_op_rate_limit to mutation endpoints + inflight concurrency (SEC-2) ([#1511](https://github.com/Aureliolo/synthorg/issues/1511)) ([f983a0f](https://github.com/Aureliolo/synthorg/commit/f983a0f1bbafceb76e8798c94692feb4d0468edf))
+* **settings:** CFG-1 settings bridge + kill switches + retention + default config ([#1512](https://github.com/Aureliolo/synthorg/issues/1512)) ([44289ee](https://github.com/Aureliolo/synthorg/commit/44289ee6defe81d1e8ed815e030a22e5ba7a0e35))
+* **web:** dashboard UX polish — foundation primitives + consistency + responsive + a11y + onboarding (WEB-2) ([#1506](https://github.com/Aureliolo/synthorg/issues/1506)) ([9c7c176](https://github.com/Aureliolo/synthorg/commit/9c7c176a051ee95627f513156ac265a317093902))
+* **web:** WS/SSE resilience + store error contract + TS strictness (WEB-1) ([#1500](https://github.com/Aureliolo/synthorg/issues/1500)) ([8dad275](https://github.com/Aureliolo/synthorg/commit/8dad275b7804eaee36ed62505ab204fe3e15449f))
+
+
+### Bug Fixes
+
+* **ci:** pin wrangler commit metadata for PR previews ([#1513](https://github.com/Aureliolo/synthorg/issues/1513)) ([ed903b4](https://github.com/Aureliolo/synthorg/commit/ed903b451c96feefb73f2e93cb5d018823f8449d))
+* close concurrency races and N+1 batch queries (COR-1) ([#1503](https://github.com/Aureliolo/synthorg/issues/1503)) ([ae7ed55](https://github.com/Aureliolo/synthorg/commit/ae7ed55065ec5dc0d43ec9c5f9e0358655dbcd4a))
+
+
+### Refactoring
+
+* decouple engine/tools/approval + abstraction-swap readiness (ARC-1) ([#1510](https://github.com/Aureliolo/synthorg/issues/1510)) ([f2d6286](https://github.com/Aureliolo/synthorg/commit/f2d6286745badbcc86e5918c7e89a9f3bd56e18d))
+* pagination cursors + async lifecycle + health split + CI (OPS-1) ([#1514](https://github.com/Aureliolo/synthorg/issues/1514)) ([198e27d](https://github.com/Aureliolo/synthorg/commit/198e27d97eb5d5f57b2febadeebad29ff1636353))
+* **persistence:** Postgres/SQLite parity — schema, indices, conformance, boundary (PST-1) ([#1505](https://github.com/Aureliolo/synthorg/issues/1505)) ([bb3adf0](https://github.com/Aureliolo/synthorg/commit/bb3adf0c11707dd81b76e038cd8efe952b453b8c))
+
+
+### Documentation
+
+* public docs refresh + OpenAPI regen + scope creep cleanup (DOC-1) ([#1504](https://github.com/Aureliolo/synthorg/issues/1504)) ([a58e48a](https://github.com/Aureliolo/synthorg/commit/a58e48a6f10dcfca9be22da63be9cfcde3b5fdd4))
+
+
+### CI/CD
+
+* Pin dependencies ([#1507](https://github.com/Aureliolo/synthorg/issues/1507)) ([e18a23f](https://github.com/Aureliolo/synthorg/commit/e18a23f44f9043fbe7463c2b8176dfd2c8822011))
+
+
+### Maintenance
+
+* **docker:** source Atlas CLI from arigaio/atlas distroless image (fixes main Docker build) ([#1502](https://github.com/Aureliolo/synthorg/issues/1502)) ([b122563](https://github.com/Aureliolo/synthorg/commit/b122563ed6a8359443852357a1d889803958a647))
+* retire codebase-audit agent 98 (tests-without-assertions) ([#1485](https://github.com/Aureliolo/synthorg/issues/1485)) ([d8b1b60](https://github.com/Aureliolo/synthorg/commit/d8b1b60904d403afc52713decd2401ef44121f80))
+* supply chain hardening — remove GPL from cli/go.mod + least-privilege Actions (SUP-1) ([#1499](https://github.com/Aureliolo/synthorg/issues/1499)) ([1040d05](https://github.com/Aureliolo/synthorg/commit/1040d051ed7c119081329de56dda233477ae353c))
+* Update arigaio/atlas:latest-community-distroless Docker digest to a154831 ([#1508](https://github.com/Aureliolo/synthorg/issues/1508)) ([9e493c9](https://github.com/Aureliolo/synthorg/commit/9e493c97eeac1bf14e30f65b29dd99fab77e17f5))
+* Update dependency goreleaser/goreleaser to v2.15.4 ([#1509](https://github.com/Aureliolo/synthorg/issues/1509)) ([9cbeaf7](https://github.com/Aureliolo/synthorg/commit/9cbeaf792e5e5766041c996b61efa2f50bd927af))
+* Update Python dependencies ([#1483](https://github.com/Aureliolo/synthorg/issues/1483)) ([2833956](https://github.com/Aureliolo/synthorg/commit/2833956520251e37629249ccb1f20520a40863c4))
+
 ## [0.7.1](https://github.com/Aureliolo/synthorg/compare/v0.7.0...v0.7.1) (2026-04-20)
 
 
