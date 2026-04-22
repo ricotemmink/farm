@@ -70,11 +70,12 @@ def _row_to_definition(row: dict[str, Any]) -> CustomRuleDefinition:
         )
     except (ValueError, TypeError, KeyError) as exc:
         row_id = str(row.get("id", "<unknown>")) if row else "<unknown>"
-        msg = f"Failed to parse custom rule row {row_id!r}: {exc}"
-        logger.exception(
+        msg = f"Failed to parse custom rule row {row_id!r}"
+        logger.warning(
             META_CUSTOM_RULE_FETCH_FAILED,
             row_id=row_id,
-            error=msg,
+            error_type=type(exc).__name__,
+            error=safe_error_description(exc),
         )
         raise QueryError(msg) from exc
 
