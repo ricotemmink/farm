@@ -1,0 +1,168 @@
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: farm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: synthorg
+      POSTGRES_USER: synthorg
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - /mnt/HC_Volume_104844891/docker-volumes/farm_pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "synthorg", "-d", "synthorg"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+    logging: *logging
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: farm-nats
+    restart: unless-stopped
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - /mnt/HC_Volume_104844891/docker-volumes/farm_natsdata:/data
+      - ./docker/nats.conf:/etc/nats/nats.conf:ro
+    networks:
+      - internal
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging: *logging
+
+  claude-proxy:
+    build:
+      context: ./claude-proxy
+      dockerfile: Dockerfile
+    container_name: farm-claude-proxy
+    restart: unless-stopped
+    volumes:
+      - /root/.claude/.credentials.json:/root/.claude/.credentials.json:ro
+      - /root/.claude:/root/.claude:ro
+      - /usr/local/lib/claude-cli/claude:/usr/local/bin/claude:ro
+    environment:
+      HOME: /root
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+          cpus: "1.0"
+    logging: *logging
+
+  backend:
+    # Local hotfix overlay for the meeting-scheduler rewire bug.
+    # Revert both `image:` and `build:` back to the commented upstream
+    # ref below once the fix lands in the GHCR image.
+    # image: ghcr.io/aureliolo/synthorg-backend:latest
+    image: synthorg-backend:local-hotfix
+    build:
+      context: .
+      dockerfile: docker/backend/Dockerfile.overlay
+    container_name: farm-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      claude-proxy:
+        condition: service_healthy
+    environment:
+      SYNTHORG_DATABASE_URL: "postgresql://synthorg:${POSTGRES_PASSWORD}@postgres:5432/synthorg"
+      SYNTHORG_POSTGRES_SSL_MODE: "disable"
+      SYNTHORG_MEMORY_DIR: "/data/memory"
+      SYNTHORG_PERSISTENCE_BACKEND: "postgres"
+      SYNTHORG_BUS_BACKEND: "nats"
+      SYNTHORG_NATS_URL: "nats://nats:4222"
+      SYNTHORG_LOG_DIR: "/data/logs"
+      SYNTHORG_LOG_LEVEL: "info"
+      MEM0_TELEMETRY: "false"
+    env_file: .env
+    volumes:
+      - /mnt/HC_Volume_104844891/docker-volumes/farm_data:/data
+    networks:
+      - internal
+      - web
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3001/api/v1/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.farm-api.rule=Host(`farm.peoplewithskills.eu`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.farm-api.priority=100"
+      - "traefik.http.routers.farm-api.entrypoints=websecure"
+      - "traefik.http.routers.farm-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.farm-api.middlewares=security-headers-full@file,crowdsec-bouncer@file,authentik@file"
+      - "traefik.http.services.farm-api.loadbalancer.server.port=3001"
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+    logging: *logging
+
+  web:
+    image: ghcr.io/aureliolo/synthorg-web:latest
+    container_name: farm-web
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - internal
+      - web
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.farm-ui.rule=Host(`farm.peoplewithskills.eu`)"
+      - "traefik.http.routers.farm-ui.priority=10"
+      - "traefik.http.routers.farm-ui.entrypoints=websecure"
+      - "traefik.http.routers.farm-ui.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.farm-ui.middlewares=security-headers-full@file,crowdsec-bouncer@file,authentik@file"
+      - "traefik.http.services.farm-ui.loadbalancer.server.port=8080"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging: *logging
+
+networks:
+  web:
+    external: true
+  internal:
+    driver: bridge

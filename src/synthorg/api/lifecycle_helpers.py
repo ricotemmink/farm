@@ -323,6 +323,118 @@ async def _maybe_bootstrap_agents(app_state: AppState) -> None:
         )
 
 
+async def _maybe_rewire_meetings(
+    app_state: AppState,
+    effective_config: RootConfig,
+) -> None:
+    """Rewire the meeting stack once persisted deps are available.
+
+    At boot, ``auto_wire_meetings`` runs before persisted provider and
+    agent configs are loaded, so it takes the degraded path and leaves
+    ``meeting_scheduler`` as ``None``. Once ``_maybe_bootstrap_agents``
+    has populated the agent registry from DB, this helper loads
+    persisted provider configs, rebuilds the orchestrator + scheduler
+    with a real agent caller, and swaps the stack onto ``AppState``.
+
+    Non-fatal: any failure is logged but does not abort startup. When
+    the scheduler is already wired (explicit operator override or a
+    prior rewire), this is a no-op.
+    """
+    if app_state.has_meeting_scheduler:
+        return
+
+    if not (app_state.has_config_resolver and app_state.has_agent_registry):
+        logger.debug(
+            API_APP_STARTUP,
+            note="Meeting rewire skipped: config_resolver or agent_registry missing",
+        )
+        return
+
+    if not app_state.has_provider_registry:
+        try:
+            from synthorg.providers.registry import (  # noqa: PLC0415
+                ProviderRegistry,
+            )
+
+            provider_configs = (
+                await app_state.config_resolver.get_provider_configs()
+            )
+            if provider_configs:
+                app_state.swap_provider_registry(
+                    ProviderRegistry.from_config(provider_configs),
+                )
+        except MemoryError, RecursionError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                API_APP_STARTUP,
+                note="Meeting rewire: provider reload failed (non-fatal)",
+                error_type=type(exc).__name__,
+                error=safe_error_description(exc),
+            )
+            return
+
+    if not app_state.has_provider_registry:
+        logger.debug(
+            API_APP_STARTUP,
+            note="Meeting rewire skipped: no persisted provider configs",
+        )
+        return
+
+    try:
+        from synthorg.api.auto_wire import auto_wire_meetings  # noqa: PLC0415
+
+        result = auto_wire_meetings(
+            effective_config=effective_config,
+            meeting_orchestrator=None,
+            meeting_scheduler=None,
+            agent_registry=app_state.agent_registry,
+            provider_registry=app_state.provider_registry,
+        )
+    except MemoryError, RecursionError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            API_APP_STARTUP,
+            note="Meeting rewire: auto_wire_meetings failed (non-fatal)",
+            error_type=type(exc).__name__,
+            error=safe_error_description(exc),
+        )
+        return
+
+    if result.meeting_scheduler is None:
+        logger.warning(
+            API_APP_STARTUP,
+            note=(
+                "Meeting rewire: auto_wire_meetings still returned an "
+                "unwired scheduler despite populated registries -- "
+                "check agent_registry contents and provider config"
+            ),
+        )
+        return
+
+    scheduler_running = getattr(result.meeting_scheduler, "running", None)
+    if scheduler_running is not True:
+        try:
+            await result.meeting_scheduler.start()
+        except MemoryError, RecursionError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                API_APP_STARTUP,
+                note="Meeting rewire: scheduler start failed (non-fatal)",
+                error_type=type(exc).__name__,
+                error=safe_error_description(exc),
+            )
+            return
+
+    app_state.swap_meeting_stack(
+        orchestrator=result.meeting_orchestrator,
+        scheduler=result.meeting_scheduler,
+        ceremony_scheduler=result.ceremony_scheduler,
+    )
+
+
 def _build_settings_dispatcher(
     message_bus: MessageBus | None,
     settings_service: SettingsService | None,

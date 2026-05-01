@@ -596,9 +596,39 @@ class AppState(AppStateServicesMixin):
         )
 
     @property
+    def has_meeting_scheduler(self) -> bool:
+        """Check whether the meeting scheduler is configured."""
+        return self._meeting_scheduler is not None
+
+    @property
     def ceremony_scheduler(self) -> CeremonyScheduler | None:
         """Return ceremony scheduler, or None if not configured."""
         return self._ceremony_scheduler
+
+    def swap_meeting_stack(
+        self,
+        orchestrator: MeetingOrchestrator,
+        scheduler: MeetingScheduler,
+        ceremony_scheduler: CeremonyScheduler | None,
+    ) -> None:
+        """Replace the meeting orchestrator + scheduler + ceremony scheduler.
+
+        Used after startup when ``agent_registry`` and ``provider_registry``
+        become available (e.g. persisted-config reload) so the schedulers
+        can be wired with a real agent caller. Callers are responsible
+        for starting the new scheduler before swap; the prior scheduler
+        (if any) is not stopped here because swap paths only fire when
+        the previous scheduler was ``None`` (degraded-mode boot).
+        """
+        self._meeting_orchestrator = orchestrator
+        self._meeting_scheduler = scheduler
+        self._ceremony_scheduler = ceremony_scheduler
+        logger.info(
+            API_APP_STARTUP,
+            action="service_configured",
+            service="meeting_stack",
+            note="Meeting orchestrator + scheduler + ceremony scheduler swapped",
+        )
 
     @property
     def approval_gate(self) -> ApprovalGate | None:

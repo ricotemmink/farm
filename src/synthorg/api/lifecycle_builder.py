@@ -20,6 +20,7 @@ from synthorg.api.lifecycle_helpers import (
     _audit_retention_loop,
     _build_settings_dispatcher,
     _maybe_bootstrap_agents,
+    _maybe_rewire_meetings,
     _maybe_promote_first_owner,
     _ticket_cleanup_loop,
 )
@@ -337,6 +338,7 @@ def _build_lifecycle(  # noqa: PLR0913, PLR0915, C901
                 )
 
         await _maybe_bootstrap_agents(app_state)
+        await _maybe_rewire_meetings(app_state, effective_config)
         await _maybe_promote_first_owner(app_state)
         # Idempotent: a prior ticket-cleanup task from a previous
         # startup may still be alive when lifespan re-enters (e.g.

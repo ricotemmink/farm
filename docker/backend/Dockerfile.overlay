@@ -1,0 +1,8 @@
+# Local hotfix overlay: layers patched source over the GHCR-published
+# base image. Used by docker-compose.yml to apply a server-local fix for
+# the meeting-scheduler rewire bug while the upstream PR is pending.
+# When the upstream image is rebuilt with the fix, revert compose to use
+# `image: ghcr.io/aureliolo/synthorg-backend:latest` and delete this file.
+FROM ghcr.io/aureliolo/synthorg-backend:latest
+
+COPY --chown=65532:65532 src/ /app/src/

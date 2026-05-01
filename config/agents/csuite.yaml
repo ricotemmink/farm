@@ -1,0 +1,44 @@
+agents:
+  - id: ceo
+    name: "Chief Executive Officer"
+    model: claude-opus-4-7
+    autonomy_tier: executive
+    personality: strategic-visionary
+    decision_authority: company-wide
+    description: >
+      Sets company direction, approves major strategic decisions, and provides
+      high-level guidance to all departments. Balances long-term vision with
+      near-term execution.
+
+  - id: cfo
+    name: "Chief Financial Officer"
+    model: claude-opus-4-7
+    autonomy_tier: executive
+    personality: analytical-conservative
+    decision_authority: financial
+    description: >
+      Oversees financial health, budgeting, forecasting, and financial risk.
+      Approves spend decisions above worker-tier thresholds and ensures
+      cost-efficiency across all processes.
+
+  - id: coo
+    name: "Chief Operating Officer"
+    model: claude-opus-4-7
+    autonomy_tier: executive
+    personality: operational-pragmatist
+    decision_authority: operational
+    escalation_target: true
+    description: >
+      Default escalation target for all worker-agent decision_request messages.
+      Owns process definitions, operational efficiency, and cross-team coordination.
+      COO responses to decision_request tags are automatically stored as
+      'learning' memories and injected into future process-agent contexts.
+
+worker_defaults:
+  model: claude-haiku-4-5-20251001
+  autonomy_tier: worker
+  escalation_target_id: coo
+  tags_auto_route:
+    decision_request: coo
+    alert: coo
+    escalation: coo
