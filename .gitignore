@@ -106,3 +106,5 @@ cli/cover.out
 
 # mkdocs-d2-plugin cache (populated locally for faster rebuilds, not persisted in CI)
 .config/plugin/d2/
+docker-compose.yml.bak.*
+docker-compose.yml.bak-*
